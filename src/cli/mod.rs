@@ -4,6 +4,7 @@
 mod device;
 mod power;
 mod provider;
+mod schema;
 mod status;
 
 use std::path::PathBuf;
@@ -53,6 +54,10 @@ pub enum Command {
     },
     /// Overview of all devices and providers
     Status,
+    /// Machine-readable description of the bench, all commands and error codes (for agents)
+    Schema,
+    /// Print the agent skill (SKILL.md) matching this version of desk
+    Skill,
 }
 
 #[derive(Debug, Subcommand)]
@@ -79,6 +84,10 @@ pub struct Targets {
     /// Every device that has a power path
     #[arg(long)]
     pub all: bool,
+
+    /// Show what would be sent, without switching anything (current state is still read)
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -111,9 +120,24 @@ pub enum DeviceCmd {
     },
 }
 
+/// The agent skill, shipped inside the binary so it always matches this version.
+pub const SKILL: &str = include_str!("../../skills/desk-operator/SKILL.md");
+
 pub async fn run(cli: Cli) -> Result<Report> {
+    // These work without a (valid) config.
+    match cli.command {
+        Command::Schema => return Ok(schema::run(Bench::load(cli.config.as_deref()))),
+        Command::Skill => {
+            return Ok(Report::new(
+                &serde_json::json!({ "skill": SKILL }),
+                SKILL.to_string(),
+            ));
+        }
+        _ => {}
+    }
     let bench = Bench::load(cli.config.as_deref())?;
     match cli.command {
+        Command::Schema | Command::Skill => unreachable!("handled above"),
         Command::Power { action } => power::run(&bench, action).await,
         Command::Device { action } => device::run(&bench, action),
         Command::Provider { action } => provider::run(&bench, action).await,

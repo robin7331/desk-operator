@@ -3,11 +3,11 @@ use serde::Serialize;
 
 use super::{PowerCmd, Targets, summarize_failures};
 use crate::bench::Bench;
-use crate::config::Device;
+use crate::config::{Device, PowerBinding};
 use crate::error::{DeskError, ErrorJson, Result};
 use crate::model::PowerState;
 use crate::output::{Report, table};
-use crate::power::Target;
+use crate::power::{Plan, Target};
 
 #[derive(Serialize)]
 struct ActionData<'a> {
@@ -81,6 +81,9 @@ fn targets<'b>(bench: &'b Bench, queries: &[String], all: bool) -> Result<Vec<&'
 
 async fn act(bench: &Bench, target: Target, t: Targets) -> Result<Report> {
     let devices = targets(bench, &t.devices, t.all)?;
+    if t.dry_run {
+        return dry_run(bench, target, devices).await;
+    }
     let outcomes = join_all(devices.iter().map(|d| bench.set_power(d, target))).await;
 
     let mut rows = Vec::new();
@@ -157,4 +160,88 @@ async fn status(bench: &Bench, queries: Vec<String>) -> Result<Report> {
     let human = table(&["DEVICE", "NAME", "POWER"], &rows);
     let failure = summarize_failures(devices.len(), &failures);
     Ok(Report::new(&StatusData { devices: results }, human).with_failure(failure))
+}
+
+#[derive(Serialize)]
+struct DryRunData<'a> {
+    action: Target,
+    dry_run: bool,
+    results: Vec<PlanResult<'a>>,
+}
+
+#[derive(Serialize)]
+struct PlanResult<'a> {
+    device: &'a str,
+    ok: bool,
+    /// The resolved power binding, e.g. `ha (entity=switch.x)` or `script iron.lua`.
+    power_path: String,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    plan: Option<Plan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    log: Vec<String>,
+}
+
+async fn dry_run(bench: &Bench, target: Target, devices: Vec<&Device>) -> Result<Report> {
+    let plans = join_all(devices.iter().map(|d| bench.plan_power(d, target))).await;
+
+    let mut rows = Vec::new();
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    for (d, run) in devices.iter().zip(&plans) {
+        let power_path = d
+            .power
+            .as_ref()
+            .map(PowerBinding::describe)
+            .unwrap_or_default();
+        match &run.result {
+            Ok(p) => {
+                let now = p
+                    .before
+                    .map_or_else(|| "unknown".to_string(), |b| b.to_string());
+                let would = if p.would_send {
+                    format!("would switch {} via {power_path}", p.target)
+                } else {
+                    "nothing to do".to_string()
+                };
+                rows.push(vec![d.id.clone(), now, would]);
+                results.push(PlanResult {
+                    device: &d.id,
+                    ok: true,
+                    power_path,
+                    plan: Some(p.clone()),
+                    error: None,
+                    log: run.log.clone(),
+                });
+            }
+            Err(e) => {
+                rows.push(vec![d.id.clone(), "-".into(), format!("error: {e}")]);
+                results.push(PlanResult {
+                    device: &d.id,
+                    ok: false,
+                    power_path,
+                    plan: None,
+                    error: Some(e.to_json()),
+                    log: run.log.clone(),
+                });
+                failures.push(e);
+            }
+        }
+    }
+
+    let mut human = table(&["DEVICE", "NOW", "PLAN (dry run, nothing sent)"], &rows);
+    if rows.is_empty() {
+        human.clear();
+    }
+    let failure = summarize_failures(devices.len(), &failures);
+    Ok(Report::new(
+        &DryRunData {
+            action: target,
+            dry_run: true,
+            results,
+        },
+        human,
+    )
+    .with_failure(failure))
 }

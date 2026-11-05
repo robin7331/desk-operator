@@ -2,9 +2,12 @@
 -- Two outlets, switched in order, both configured through params:
 --
 --   power = { script = "scripts/iron_with_extractor.lua", params = {
---     iron      = { provider = "sim", endpoint = "outlet4" },
---     extractor = { provider = "sim", endpoint = "outlet5" },
+--     iron      = { provider = "sim", endpoint = "station_iron" },
+--     extractor = { provider = "sim", endpoint = "station_fan" },
 --   } }
+--
+-- Give a scripted device its own outlets: if another device switches one of them, the two
+-- disagree about what is on.
 
 local function outlets(ctx)
   return ctx.power(ctx.params.iron), ctx.power(ctx.params.extractor)
@@ -26,7 +29,12 @@ function off(ctx)
   ctx.log("iron and extractor off")
 end
 
+-- "on" only when both are on; anything half-switched is honestly "unknown".
 function state(ctx)
-  local iron = outlets(ctx)
-  return iron:state()
+  local iron, extractor = outlets(ctx)
+  local a, b = iron:state(), extractor:state()
+  if a == b then
+    return a
+  end
+  return "unknown"
 end

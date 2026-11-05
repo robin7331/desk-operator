@@ -94,6 +94,46 @@ pub async fn switch(device_id: &str, sw: &dyn PowerSwitch, target: Target) -> Re
     })
 }
 
+/// What [`switch`] would do, without sending anything. The state is still read where possible.
+#[derive(Debug, Clone, Serialize)]
+pub struct Plan {
+    pub before: Option<PowerState>,
+    pub target: Power,
+    /// `false` when the device already is in the target state.
+    pub would_send: bool,
+}
+
+pub async fn plan(device_id: &str, sw: &dyn PowerSwitch, target: Target) -> Result<Plan> {
+    if !sw.features().readback {
+        let on = match target {
+            Target::On => true,
+            Target::Off => false,
+            Target::Toggle => return Err(DeskError::StateUnknown(device_id.to_string())),
+        };
+        return Ok(Plan {
+            before: None,
+            target: Power::from_bool(on),
+            would_send: true,
+        });
+    }
+    let before = sw.state().await?;
+    let on = match (target, before.state) {
+        (Target::On, _) => true,
+        (Target::Off, _) => false,
+        (Target::Toggle, Power::On) => false,
+        (Target::Toggle, Power::Off) => true,
+        (Target::Toggle, Power::Unknown) => {
+            return Err(DeskError::StateUnknown(device_id.to_string()));
+        }
+    };
+    let target = Power::from_bool(on);
+    Ok(Plan {
+        before: Some(before),
+        target,
+        would_send: before.state != target,
+    })
+}
+
 /// Read the state until it matches `wanted`, for at most the path's settle window. Providers such
 /// as Home Assistant may report the old state for a moment after a command.
 async fn settle(sw: &dyn PowerSwitch, wanted: Power) -> Result<PowerState> {

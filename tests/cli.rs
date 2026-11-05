@@ -313,3 +313,145 @@ fn example_config_is_valid() {
     let out = run_with(Some(&example), dir.path(), &["--json", "device", "list"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
 }
+
+#[test]
+fn dry_run_reads_but_never_switches() {
+    let b = Bench::new();
+    b.run(&["power", "on", "psu"]);
+    let out = b.run(&["--json", "power", "on", "psu", "iron", "lamp", "--dry-run"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let j = out.json();
+    assert_eq!(j["data"]["dry_run"], true);
+    let r = j["data"]["results"].as_array().unwrap();
+    assert_eq!(r[0]["would_send"], false, "psu already on");
+    assert_eq!(r[1]["would_send"], true);
+    assert_eq!(r[1]["before"]["state"], "off");
+    assert_eq!(r[1]["target"], "on");
+    assert_eq!(r[1]["power_path"], "sim (endpoint=outlet4)");
+    assert!(r[2]["before"].is_null(), "send-only path has no state");
+
+    let j = b.run(&["--json", "power", "status", "iron"]).json();
+    assert_eq!(
+        j["data"]["devices"][0]["power"]["state"], "off",
+        "nothing was switched"
+    );
+
+    let out = b.run(&["--json", "power", "toggle", "lamp", "--dry-run"]);
+    assert_eq!(out.code, 4);
+    assert_eq!(out.json()["error"]["code"], "state_unknown");
+}
+
+#[test]
+fn schema_describes_bench_commands_and_errors() {
+    let b = Bench::new();
+    let out = b.run(&["--json", "schema"]);
+    assert_eq!(out.code, 0);
+    let d = &out.json()["data"];
+    assert_eq!(d["config"]["ok"], true);
+    assert_eq!(d["devices"][0]["id"], "psu");
+    assert_eq!(d["devices"][0]["aliases"][0], "supply");
+    assert_eq!(d["providers"][0]["kind"], "mock");
+
+    let commands: Vec<&str> = d["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["command"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "desk power on",
+        "desk power status",
+        "desk provider endpoints",
+        "desk schema",
+    ] {
+        assert!(
+            commands.contains(&expected),
+            "{expected} missing: {commands:?}"
+        );
+    }
+    let power_on = d["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["command"] == "desk power on")
+        .unwrap();
+    assert!(
+        power_on["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["name"] == "--dry-run")
+    );
+
+    let globals: Vec<&str> = d["global_args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert!(globals.contains(&"--json") && globals.contains(&"--config"));
+
+    let errors = d["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["code"] == "verify_failed" && e["exit"] == 7)
+    );
+}
+
+#[test]
+fn schema_works_without_config() {
+    let dir = TempDir::new().unwrap();
+    let out = run_with(
+        Some(&dir.path().join("missing.toml")),
+        dir.path(),
+        &["--json", "schema"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let d = &out.json()["data"];
+    assert_eq!(d["config"]["ok"], false);
+    assert_eq!(d["config"]["error"]["code"], "config_invalid");
+    assert!(!d["commands"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn skill_matches_the_cli() {
+    let dir = TempDir::new().unwrap();
+    let out = run_with(
+        Some(&dir.path().join("missing.toml")),
+        dir.path(),
+        &["skill"],
+    );
+    assert_eq!(out.code, 0, "skill works without config");
+    let skill = out.stdout;
+    assert!(skill.starts_with("---\nname: desk-operator\ndescription: "));
+
+    // Every error code and command in the schema is documented, and the skill doesn't mention
+    // error codes that don't exist.
+    let schema = Bench::new().run(&["--json", "schema"]).json();
+    let codes: Vec<String> = schema["data"]["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["code"].as_str().unwrap().to_string())
+        .collect();
+    for line in skill.lines().filter(|l| l.starts_with("| `")) {
+        for code in line.split('`').skip(1).step_by(2) {
+            if code.chars().all(|c| c.is_ascii_lowercase() || c == '_') && code.contains('_') {
+                assert!(
+                    codes.contains(&code.to_string()),
+                    "skill mentions unknown code `{code}`"
+                );
+            }
+        }
+    }
+    for cmd in [
+        "desk power",
+        "desk status",
+        "desk schema",
+        "desk device",
+        "desk provider",
+    ] {
+        assert!(skill.contains(cmd), "skill doesn't mention `{cmd}`");
+    }
+}

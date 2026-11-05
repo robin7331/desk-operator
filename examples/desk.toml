@@ -48,8 +48,9 @@ name = "Oscilloscope"
 [devices.station]
 name    = "Iron + fume extractor"
 aliases = ["solder station"]
-power   = { script = "scripts/iron_with_extractor.lua", params = { iron = { provider = "sim", endpoint = "outlet4" }, extractor = { provider = "sim", endpoint = "outlet5" } } }
+power   = { script = "scripts/iron_with_extractor.lua", params = { iron = { provider = "sim", endpoint = "station_iron" }, extractor = { provider = "sim", endpoint = "station_fan" } } }
 
 [devices.lamp]
-name  = "Bench lamp (RF remote)"
+name    = "Bench lamp (RF remote)"
+aliases = ["bench lamp"]
 power = { script = "scripts/double_press.lua", params = { remote = { provider = "sim", endpoint = "blind_lamp" } } }

@@ -365,10 +365,18 @@ fn example_scripts_work() {
 
     let out = run_in(dir.path(), &example, &["--json", "power", "on", "station"]);
     assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    let j = run_in(
+        dir.path(),
+        &example,
+        &["--json", "power", "status", "station"],
+    )
+    .json();
+    assert_eq!(j["data"]["devices"][0]["power"]["state"], "on");
+    assert_eq!(j["data"]["devices"][0]["power"]["confidence"], "real");
     let j = run_in(dir.path(), &example, &["--json", "power", "status", "iron"]).json();
     assert_eq!(
-        j["data"]["devices"][0]["power"]["state"], "on",
-        "station drives the iron outlet"
+        j["data"]["devices"][0]["power"]["state"], "off",
+        "the station has its own outlets"
     );
     let out = run_in(dir.path(), &example, &["--json", "power", "off", "station"]);
     assert_eq!(out.code, 0, "{}", out.stdout);

@@ -78,7 +78,8 @@ default.
 ```
 src/
   main.rs              entry: clap parse, tokio runtime, exit code
-  cli/                 clap definitions (mod.rs) + one handler module per command group
+  cli/                 clap definitions (mod.rs) + one handler module per command group;
+                       schema.rs generates `desk schema` from the clap tree
   output.rs            Report, --json envelope, human tables
   error.rs             DeskError: stable `code()` + `exit_code()` + `hint()` (part of the CLI contract)
   config.rs            load/validate desk.toml, Device, PowerBinding, device resolution
@@ -89,6 +90,8 @@ src/
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
+skills/desk-operator/  SKILL.md for agents, embedded via include_str! (`desk skill`); update it when
+                       commands, error codes or semantics change (tests/cli.rs checks codes)
 tests/cli.rs           end-to-end tests of the binary against the mock provider
 tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
@@ -113,3 +116,5 @@ Conventions:
 - Every new provider or host-API function gets a test (mock or `wiremock`).
 - Don't add dependencies or abstractions that the current milestone doesn't need.
 - Update `plan.md` checkboxes when you finish a milestone item.
+- New error variants need an `ERROR_CODES` entry (`src/error.rs`, enforced by a test) and a row in
+  SKILL.md's failure table.

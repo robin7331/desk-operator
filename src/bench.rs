@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::config::{Config, Device, PowerBinding};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, PowerState};
-use crate::power::{self, Outcome, PowerSwitch, Target};
+use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
 use crate::providers::{Endpoint, ProviderInfo, Registry};
 use crate::script::{DeviceInfo, ScriptSwitch};
 
@@ -80,6 +80,30 @@ impl Bench {
             .unwrap_or_else(|_| {
                 Err(DeskError::Timeout {
                     what: format!("switching `{}`", device.id),
+                    after,
+                })
+            });
+        Run {
+            result,
+            log: sw.take_log(),
+        }
+    }
+
+    pub async fn plan_power(&self, device: &Device, target: Target) -> Run<Plan> {
+        let (sw, after) = match self.power_switch(device) {
+            Ok(v) => v,
+            Err(e) => {
+                return Run {
+                    result: Err(e),
+                    log: Vec::new(),
+                };
+            }
+        };
+        let result = tokio::time::timeout(after, power::plan(&device.id, sw.as_ref(), target))
+            .await
+            .unwrap_or_else(|_| {
+                Err(DeskError::Timeout {
+                    what: format!("planning `{}`", device.id),
                     after,
                 })
             });

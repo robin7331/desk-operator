@@ -196,10 +196,14 @@ Noticed during the real test (refine later, not blocking):
 hanging script reports a useful error.
 
 ### M3 — Agent-ready
-- [ ] `desk schema --json`
-- [ ] `--dry-run` for power commands (prints the resolved binding + the actions it would take)
-- [ ] `skills/desk-operator/SKILL.md` (start with `schema`, always `--json`, honour `assumed`, no unasked power changes)
-- [ ] Try it: let an agent (Claude Code) operate the bench through the skill alone
+- [x] `desk schema --json`: bench, capabilities, every command/arg (generated from clap), error codes; works without a config
+- [x] `--dry-run` for `power on|off|toggle`: resolves, validates and reads state, then reports `would_send` per device
+- [x] `skills/desk-operator/SKILL.md`, embedded in the binary (`desk skill`); a test checks it against the schema
+- [x] Try it: a fresh subagent with only `SKILL.md` and a wrapper pinned to the simulated bench answered
+  "what's on?", switched the iron off with verification, and asked instead of toggling the
+  send-only lamp. Its feedback led to fixes: `results` vs `devices` named correctly in the skill,
+  `confidence: "none"` for unknown states, a clearer dry-run rule, and the example "station" got
+  its own outlets plus an honest `state()` (it had shared one with `iron`).
 
 **Done when:** an agent with only the skill can answer "what's on?" and "turn the iron off".
 

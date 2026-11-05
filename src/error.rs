@@ -122,3 +122,96 @@ impl From<std::io::Error> for DeskError {
 }
 
 pub type Result<T, E = DeskError> = std::result::Result<T, E>;
+
+/// Every error code with its exit code and meaning, as published by `desk schema`.
+/// A test keeps this in sync with [`DeskError::code`] / [`DeskError::exit_code`].
+pub const ERROR_CODES: &[(&str, i32, &str)] = &[
+    ("internal", 1, "bug or unexpected environment problem"),
+    ("usage", 2, "invalid command line"),
+    (
+        "device_not_found",
+        2,
+        "no device matches the given id, alias or name",
+    ),
+    ("device_ambiguous", 2, "the name matches several devices"),
+    (
+        "config_invalid",
+        3,
+        "desk.toml (or a referenced file) is missing or invalid",
+    ),
+    ("no_power_path", 3, "the device has no power binding"),
+    (
+        "provider_unreachable",
+        4,
+        "provider offline, unreachable, or authentication failed",
+    ),
+    (
+        "endpoint_unavailable",
+        4,
+        "the provider is fine but this entity/outlet is unknown or offline",
+    ),
+    (
+        "state_unknown",
+        4,
+        "the current state can't be read (send-only path), so toggle is refused",
+    ),
+    ("script_failed", 5, "a Lua power script raised an error"),
+    ("timeout", 6, "the operation exceeded its timeout"),
+    (
+        "verify_failed",
+        7,
+        "a command was sent but the device did not reach the target state",
+    ),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_table_matches_variants() {
+        let all = [
+            DeskError::Internal(String::new()),
+            DeskError::Usage(String::new()),
+            DeskError::DeviceNotFound {
+                query: String::new(),
+                known: vec![],
+            },
+            DeskError::DeviceAmbiguous {
+                query: String::new(),
+                candidates: vec![],
+            },
+            DeskError::ConfigInvalid(String::new()),
+            DeskError::NoPowerPath(String::new()),
+            DeskError::ProviderUnreachable {
+                provider: String::new(),
+                message: String::new(),
+            },
+            DeskError::EndpointUnavailable {
+                endpoint: String::new(),
+                message: String::new(),
+            },
+            DeskError::StateUnknown(String::new()),
+            DeskError::ScriptFailed(String::new()),
+            DeskError::Timeout {
+                what: String::new(),
+                after: Duration::ZERO,
+            },
+            DeskError::VerifyFailed {
+                expected: String::new(),
+                actual: String::new(),
+            },
+        ];
+        assert_eq!(all.len(), ERROR_CODES.len());
+        for e in &all {
+            assert!(
+                ERROR_CODES
+                    .iter()
+                    .any(|(c, x, _)| *c == e.code() && *x == e.exit_code()),
+                "{} / {} missing from ERROR_CODES",
+                e.code(),
+                e.exit_code()
+            );
+        }
+    }
+}

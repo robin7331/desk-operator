@@ -44,8 +44,10 @@ impl fmt::Display for Power {
 pub enum Confidence {
     /// Read back from the device or provider.
     Real,
-    /// Inferred from a command we sent (send-only paths, e.g. RF remotes).
+    /// Inferred from a command we just sent (send-only paths, e.g. RF remotes).
     Assumed,
+    /// Nothing is known: the state is `unknown`.
+    None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -70,14 +72,17 @@ impl PowerState {
     }
 
     pub fn unknown() -> Self {
-        Self::assumed(Power::Unknown)
+        Self {
+            state: Power::Unknown,
+            confidence: Confidence::None,
+        }
     }
 }
 
 impl fmt::Display for PowerState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.state, self.confidence) {
-            (Power::Unknown, _) => f.write_str("unknown"),
+            (Power::Unknown, _) | (_, Confidence::None) => f.write_str("unknown"),
             (s, Confidence::Real) => write!(f, "{s}"),
             (s, Confidence::Assumed) => write!(f, "{s} (assumed)"),
         }
