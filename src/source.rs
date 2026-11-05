@@ -115,7 +115,7 @@ pub struct Report {
     /// Things the user should know although nothing failed (e.g. limits that couldn't be checked).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// `false` for `--dry-run`: nothing was sent.
+    /// `true` when something was sent to the device (`false` for reads and `--dry-run`).
     pub applied: bool,
 }
 
@@ -215,7 +215,7 @@ pub async fn apply(
         verified,
         info,
         warnings,
-        applied: true,
+        applied: !req.is_empty(),
     })
 }
 

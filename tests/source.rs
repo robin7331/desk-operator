@@ -122,6 +122,7 @@ fn set_and_switch_on_with_verification() {
 
     let d = b.run(&["--json", "source", "read", "supply"]).data();
     assert!(close(&d["reading"]["voltage_set"], 5.0));
+    assert_eq!(d["applied"], false, "a read sends nothing");
     assert!(d["requested"].as_object().unwrap().is_empty());
 }
 

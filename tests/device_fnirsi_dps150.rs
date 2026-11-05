@@ -24,16 +24,53 @@ struct Behavior {
     echo_output: bool,
     telemetry: bool,
     garbage: bool,
+    /// Answer to the model name query (0xDE).
+    name: Option<&'static str>,
+    /// Answer the full status query (0xFF) with the IPS3608 layout.
+    status: bool,
+    /// Ignore this many name queries first (a device that's still booting).
+    booting: usize,
 }
 
 impl Default for Behavior {
+    /// Like the documented DPS-150: echoes output commands, no status layout used.
     fn default() -> Self {
         Behavior {
             echo_output: true,
             telemetry: true,
             garbage: false,
+            name: None,
+            status: false,
+            booting: 0,
         }
     }
+}
+
+impl Behavior {
+    /// Like the IPS3608 measured on hardware: no echo, name and full status queries.
+    fn ips3608() -> Self {
+        Behavior {
+            echo_output: false,
+            name: Some("IPS3608"),
+            status: true,
+            ..Behavior::default()
+        }
+    }
+}
+
+/// The IPS3608 full status: 139 bytes, offsets as documented in devices/fnirsi/README.md.
+fn status_blob(s: &State) -> Vec<u8> {
+    let mut d = vec![0u8; 139];
+    let mut put = |offset: usize, v: f32| d[offset..offset + 4].copy_from_slice(&v.to_le_bytes());
+    let vout = if s.output { s.vset } else { 0.0 };
+    put(0, 48.0);
+    put(4, s.vset);
+    put(8, s.iset);
+    put(12, vout);
+    put(76, 36.0);
+    put(80, 8.0);
+    d[107] = s.output as u8;
+    d
 }
 
 #[derive(Default)]
@@ -45,6 +82,7 @@ struct State {
     /// Commands received, in order.
     log: Vec<String>,
     bad_frames: usize,
+    name_queries: usize,
 }
 
 struct FakePsu {
@@ -132,6 +170,22 @@ impl FakePsu {
                             s.iset = a;
                             s.log.push(format!("iset {a}"));
                         }
+                        (0xA1, 0xDE) => {
+                            s.log.push("query name".into());
+                            s.name_queries += 1;
+                            if s.name_queries <= behavior.booting {
+                                continue; // not ready yet
+                            }
+                            if let Some(name) = behavior.name {
+                                let _ = master.write_all(&device_frame(0xDE, name.as_bytes()));
+                            }
+                        }
+                        (0xA1, 0xFF) => {
+                            s.log.push("query status".into());
+                            if behavior.status {
+                                let _ = master.write_all(&device_frame(0xFF, &status_blob(&s)));
+                            }
+                        }
                         (0xB1, 0xDB) if len == 1 => {
                             s.output = data[0] == 1;
                             s.log.push(format!("output {}", data[0]));
@@ -194,13 +248,18 @@ impl Out {
 }
 
 fn bench(path: &str) -> TempDir {
+    bench_with(path, "")
+}
+
+/// `extra` is appended to the driver params, e.g. `, name = "IPS3608"`.
+fn bench_with(path: &str, extra: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::write(
         dir.path().join("desk.toml"),
         format!(
             r#"
 [devices.psu]
-source = {{ script = "{}", port = {{ path = "{path}" }}, timeout = "6s", params = {{ max_voltage = 36.0, max_current = 8.0, telemetry_ms = 800, settle_ms = 120, echo_ms = 300, wait = "0s" }} }}
+source = {{ script = "{}", port = {{ path = "{path}" }}, timeout = "6s", params = {{ max_voltage = 36.0, max_current = 8.0, telemetry_ms = 800, settle_ms = 120, echo_ms = 300, wait = "0s"{extra} }} }}
 limits = {{ voltage = 24 }}
 "#,
             driver().display()
@@ -381,4 +440,98 @@ fn definitions_reference_the_shared_driver() {
         assert!(dir.join(script).exists(), "{model}: {script} missing");
         assert!(def["source"]["params"]["max_voltage"].as_float().is_some());
     }
+}
+
+const IPS3608_PARAMS: &str = r#", boot_ms = 1500, status_ms = 300, name = "IPS3608", status = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, output = 107 }"#;
+
+#[test]
+fn ips3608_confirms_setpoints_and_output_from_the_status() {
+    let psu = FakePsu::start(Behavior::ips3608());
+    let dir = bench_with(&psu.path, IPS3608_PARAMS);
+    let out = run(
+        dir.path(),
+        &["--json", "source", "set", "psu", "5v", "1a", "--on"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let d = out.data();
+    assert_eq!(d["verified"]["voltage"], true, "{}", d["verified"]);
+    assert_eq!(d["verified"]["current"], true);
+    assert_eq!(d["verified"]["output"], true);
+    assert!(close(&d["reading"]["voltage_set"], 5.0));
+    assert!(close(&d["reading"]["voltage"], 5.0));
+    assert_eq!(
+        psu.log(),
+        [
+            "connect",
+            "query name",   // identify before sending anything
+            "query status", // core: output on + bench limits -> check the existing setpoints first
+            "vset 5",
+            "iset 1",
+            "output 1",
+            "query status", // read back and verify
+            "disconnect",
+        ]
+    );
+
+    // The output state is known without switching it in this session.
+    let d = run(dir.path(), &["--json", "source", "read", "psu"]).data();
+    assert_eq!(d["reading"]["output"], true);
+}
+
+#[test]
+fn another_device_on_the_same_usb_id_is_refused() {
+    let psu = FakePsu::start(Behavior {
+        name: Some("SOMETHING"),
+        ..Behavior::ips3608()
+    });
+    let dir = bench_with(&psu.path, IPS3608_PARAMS);
+    let out = run(
+        dir.path(),
+        &["--json", "source", "set", "psu", "5v", "--on"],
+    );
+    assert_eq!(out.code, 5, "{}", out.stdout);
+    let msg = out.json()["error"]["message"].as_str().unwrap().to_string();
+    assert!(msg.contains(r#""SOMETHING", not a IPS3608"#), "{msg}");
+    assert!(
+        !psu.log()
+            .iter()
+            .any(|c| c.starts_with("vset") || c.starts_with("output")),
+        "nothing was sent to the wrong device: {:?}",
+        psu.log()
+    );
+}
+
+#[test]
+fn a_device_that_does_not_answer_the_name_query_is_refused() {
+    let psu = FakePsu::start(Behavior {
+        name: None,
+        ..Behavior::ips3608()
+    });
+    let dir = bench_with(&psu.path, IPS3608_PARAMS);
+    let out = run(dir.path(), &["--json", "source", "read", "psu"]);
+    assert_eq!(out.code, 5);
+    assert!(
+        out.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("doesn't respond as a IPS3608")
+    );
+}
+
+#[test]
+fn a_device_that_is_still_booting_is_retried() {
+    let psu = FakePsu::start(Behavior {
+        booting: 1,
+        ..Behavior::ips3608()
+    });
+    let dir = bench_with(&psu.path, IPS3608_PARAMS);
+    let out = run(dir.path(), &["--json", "source", "read", "psu"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let queries = psu.log().iter().filter(|c| *c == "query name").count();
+    assert_eq!(
+        queries,
+        2,
+        "answered on the second attempt: {:?}",
+        psu.log()
+    );
 }

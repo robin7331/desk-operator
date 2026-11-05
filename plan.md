@@ -275,7 +275,19 @@ desk source read psu                            # output, setpoints, measured V/
       API gap it revealed, fixed generically: `ctx.clock()` (the sandbox had no time source, needed
       to ignore measurements taken before a command). A test now enforces that `src/` never
       mentions `devices/` or a vendor.
-- [ ] **M4.5** Smoke test on a real IPS3608 (nothing connected to the output), only with the user's go-ahead
+- [x] **M4.5** Smoke test on a real IPS3608 (firmware V1.1, nothing connected to the output). Worked:
+      read, set + output on, all confirmed by read-back; bench limit refusal; `device_off` with mains
+      off; reading right after mains on. Found on hardware and fixed in the driver/definition, not
+      the core: no output echo (unlike the DPS-150 docs), so setpoints and output come from the full
+      status (layout found by diffing snapshots, offsets live in the definition); the name query
+      guards against other devices with Artery's generic USB id `2e3c:5740`; a boot window
+      (`boot_ms`) because the port appears before the device answers; `settle_ms = 1000` for the
+      output ramp. Also learned: after a mains cut the output comes back off, setpoints are kept.
+
+**Lessons for M5's definition format:** a definition needs a way to identify the model (generic
+USB ids are common), device-specific data the driver interprets (status offsets), and a
+"tested on hardware" status with firmware versions. The user had to copy all driver params into
+their own config, which is exactly what `model = "…"` must remove.
 
 **Background (research, Nov 2026):** the IPS3608 is a USB CDC-ACM device that speaks the DPS-150
 protocol family: frames `F1|F0, type, cmd, len, data, sum(cmd..data)`, float32 LE, set V/I = `C1`/`C2`
