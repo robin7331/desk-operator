@@ -8,6 +8,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DeskError, Result};
+use crate::library::{self, Library};
 use crate::providers;
 use crate::serial::PortSpec;
 use crate::source::Limits;
@@ -34,6 +35,8 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub aliases: Vec<String>,
+    /// The device definition it's based on, if any (e.g. `acme/psu-3000`).
+    pub model: Option<String>,
     pub power: Option<Binding>,
     /// `voltage_source` capability (bench power supply).
     pub source: Option<Binding>,
@@ -201,12 +204,48 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct RawDevice {
     name: Option<String>,
+    /// A device definition from the library, e.g. `acme/psu-3000`.
+    model: Option<String>,
     #[serde(default)]
     aliases: Vec<String>,
-    power: Option<Binding>,
-    source: Option<Binding>,
+    // Raw tables: they may be partial overrides of a definition's bindings.
+    power: Option<toml::Table>,
+    source: Option<toml::Table>,
     #[serde(default)]
     limits: Limits,
+}
+
+impl RawDevice {
+    fn binding_table(&self, key: &str) -> Option<&toml::Table> {
+        match key {
+            "power" => self.power.as_ref(),
+            "source" => self.source.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// Build one capability binding from the device's own table and its definition's (if any).
+fn build_binding(
+    device: &str,
+    key: &str,
+    own: Option<&toml::Table>,
+    definition: Option<&toml::Table>,
+    config_path: &Path,
+) -> Result<Option<Binding>> {
+    let bad = |e: String| DeskError::ConfigInvalid(format!("device `{device}`: `{key}`: {e}"));
+    Ok(match (own, definition) {
+        (None, None) => None,
+        (None, Some(def)) => Some(Binding::try_from(def.clone()).map_err(bad)?),
+        (Some(own), Some(def)) if !own.contains_key("script") && !own.contains_key("provider") => {
+            Some(Binding::try_from(library::merge(def, own)).map_err(bad)?)
+        }
+        // The device's own binding (paths relative to the config file).
+        (Some(own), _) => Some(resolve_script_path(
+            Binding::try_from(own.clone()).map_err(bad)?,
+            config_path,
+        )),
+    })
 }
 
 /// Platform default: `~/.config/desk-operator/desk.toml` on Linux, the equivalent elsewhere.
@@ -243,18 +282,41 @@ impl Config {
         let raw: RawConfig = toml::from_str(text)
             .map_err(|e| DeskError::ConfigInvalid(format!("{}: {e}", path.display())))?;
 
-        let devices = raw
-            .devices
-            .into_iter()
-            .map(|(id, d)| Device {
-                name: d.name.unwrap_or_else(|| id.clone()),
-                id,
-                aliases: d.aliases,
-                power: d.power.map(|p| resolve_script_path(p, &path)),
-                source: d.source.map(|p| resolve_script_path(p, &path)),
+        let library = Library::for_config(&path);
+        let mut devices = Vec::new();
+        for (id, d) in raw.devices {
+            let definition =
+                match &d.model {
+                    Some(model) => Some(library.find(model).map_err(|e| {
+                        DeskError::ConfigInvalid(format!("device `{id}`: model: {e}"))
+                    })?),
+                    None => None,
+                };
+            let binding = |key: &str| {
+                build_binding(
+                    &id,
+                    key,
+                    d.binding_table(key),
+                    definition.as_ref().and_then(|def| def.bindings.get(key)),
+                    &path,
+                )
+            };
+            let power = binding("power")?;
+            let source = binding("source")?;
+            devices.push(Device {
+                name: d
+                    .name
+                    .clone()
+                    .or_else(|| definition.as_ref().map(|def| def.name.clone()))
+                    .unwrap_or_else(|| id.clone()),
+                model: d.model.clone(),
+                aliases: d.aliases.clone(),
+                power,
+                source,
                 limits: d.limits,
-            })
-            .collect();
+                id,
+            });
+        }
 
         let config = Config {
             path,
@@ -385,7 +447,7 @@ fn resolve_script_path(binding: Binding, config_path: &Path) -> Binding {
             params,
             timeout,
             port,
-        } if script.is_relative() => Binding::Script {
+        } if script.is_relative() && !library::is_bundled(&script) => Binding::Script {
             script: config_path.parent().unwrap_or(Path::new(".")).join(script),
             params,
             timeout,

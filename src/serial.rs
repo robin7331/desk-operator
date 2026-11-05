@@ -5,6 +5,7 @@
 //! opened exclusively, so two programs never interleave bytes on one device.
 
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -125,26 +126,47 @@ pub fn list() -> Result<Vec<PortInfo>> {
     Ok(out)
 }
 
-/// Find the one port matching `spec`. A `path`-only spec is used as is (it may be a symlink such
-/// as `/dev/serial/by-id/…`, or a pty in tests).
+/// Find the one port matching `spec`.
+///
+/// With a `path`, that port is used (symlinks such as `/dev/serial/by-id/…` are followed). If it's
+/// a known USB port, its ids must agree with the spec's: a definition's `usb_vid`/`usb_pid` then
+/// guard against the wrong device on that path. Ports without USB info (e.g. ptys in tests) are
+/// used as given. Without a `path`, exactly one port must match the USB ids.
 fn resolve(spec: &PortSpec) -> Result<String> {
-    if let (Some(path), None, None, None) =
-        (&spec.path, spec.usb_vid, spec.usb_pid, &spec.serial_number)
-    {
-        return Ok(path.clone());
+    let usb_matches = |p: &PortInfo| {
+        spec.usb_vid.is_none_or(|x| p.usb_vid == Some(x))
+            && spec.usb_pid.is_none_or(|x| p.usb_pid == Some(x))
+            && spec
+                .serial_number
+                .as_ref()
+                .is_none_or(|x| p.serial_number.as_ref() == Some(x))
+    };
+
+    if let Some(path) = &spec.path {
+        let has_ids =
+            spec.usb_vid.is_some() || spec.usb_pid.is_some() || spec.serial_number.is_some();
+        if !has_ids {
+            return Ok(path.clone());
+        }
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let listed = list()?.into_iter().find(|p| {
+            std::fs::canonicalize(&p.path).unwrap_or_else(|_| PathBuf::from(&p.path)) == real
+        });
+        return match listed {
+            Some(p) if p.usb_vid.is_some() && !usb_matches(&p) => {
+                Err(DeskError::EndpointUnavailable {
+                    endpoint: path.clone(),
+                    message: format!(
+                        "this port is {}, but the binding expects {spec} (a different device on that path?)",
+                        describe_port(&p)
+                    ),
+                })
+            }
+            _ => Ok(path.clone()),
+        };
     }
-    let matches: Vec<PortInfo> = list()?
-        .into_iter()
-        .filter(|p| {
-            spec.path.as_ref().is_none_or(|x| *x == p.path)
-                && spec.usb_vid.is_none_or(|x| p.usb_vid == Some(x))
-                && spec.usb_pid.is_none_or(|x| p.usb_pid == Some(x))
-                && spec
-                    .serial_number
-                    .as_ref()
-                    .is_none_or(|x| p.serial_number.as_ref() == Some(x))
-        })
-        .collect();
+
+    let matches: Vec<PortInfo> = list()?.into_iter().filter(usb_matches).collect();
     match matches.as_slice() {
         [one] => Ok(one.path.clone()),
         [] => Err(DeskError::EndpointUnavailable {
@@ -161,6 +183,18 @@ fn resolve(spec: &PortSpec) -> Result<String> {
                 .join(", ")
         ))),
     }
+}
+
+fn describe_port(p: &PortInfo) -> String {
+    let mut s = format!(
+        "usb {:04x}:{:04x}",
+        p.usb_vid.unwrap_or_default(),
+        p.usb_pid.unwrap_or_default()
+    );
+    if let Some(sn) = &p.serial_number {
+        s.push_str(&format!(", serial {sn}"));
+    }
+    s
 }
 
 /// Line settings from `ctx.serial.open{ … }`.

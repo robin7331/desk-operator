@@ -314,7 +314,7 @@ built to be split into a separate `desk-operator-devices` repo later (self-conta
 `requires` version in each definition), once the driver API is stable (~1.0) and there are outside
 contributors. The core never references anything in `devices/`.
 
-## M5 — Device library
+## M5 — Device library ✓
 
 - **`model = "fnirsi/ips3608"`** in a device: the definition supplies its capability bindings
   (`source = …`, ports, params, maximums). The user's config adds what's theirs (`power`, `limits`,
@@ -330,6 +330,21 @@ contributors. The core never references anything in `devices/`.
   driver), so the library can live in its own repo later. M4.4's fake device is written in Rust in
   `tests/`; M5 decides how definitions carry their own.
 - Contributor docs: layout, contract, what "tested" means, how to submit.
+
+**Done:**
+- [x] `model = "vendor/model"` with key-by-key merging (own `script`/`provider` replaces);
+      device name defaults to the definition's
+- [x] `device.toml` format: `[device]` (id must match the folder, `requires` checked, status,
+      tested) + capability tables; **script bindings only** (providers are rejected)
+- [x] Search path: `devices/` next to the config → `$DESK_DEVICES` → bundled (embedded by
+      `build.rs` as `bundled:<path>`; `src/` still never names a vendor or reads the repo folder)
+- [x] `desk library list|show|check` (`check` loads every driver in the sandbox, no hardware)
+- [x] Port matching with `path` + USB ids follows symlinks (`/dev/serial/by-id/…`) and refuses a
+      different USB device on that path
+- [x] `devices/README.md` as contributor guide; skill uses `model =`
+- [x] Real bench switched to `model = "fnirsi/ips3608"` + its serial number; read verified on hardware
+- Decision: definition tests stay in Rust (`tests/device_*.rs`) until the library becomes its own
+  repository; a Lua fake-device format is only worth it then.
 
 ## M6 — AI skills
 

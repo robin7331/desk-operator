@@ -2,6 +2,7 @@ mod bench;
 mod cli;
 mod config;
 mod error;
+mod library;
 mod model;
 mod output;
 mod power;

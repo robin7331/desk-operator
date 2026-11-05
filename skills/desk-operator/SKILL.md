@@ -48,6 +48,8 @@ desk device list|show <device> --json
 desk provider list|test <id> --json
 desk provider endpoints <id> --search <text> --json # e.g. Home Assistant entities
 desk port list --json                               # USB serial ports (for a binding's port = {…})
+desk library list --json                            # device definitions (models desk knows)
+desk library show <vendor/model> --json
 
 desk source read <device> --json                    # output state, setpoints, measured V/A/W
 desk source set <device> 5v 1a [--on] --json        # units required: v, mv, a, ma
@@ -96,14 +98,20 @@ asking.
 
 ## Configuration (only when asked)
 
-The config path is `data.config.path` in `desk schema --json`. Devices look like:
+The config path is `data.config.path` in `desk schema --json`. If `desk library list` has a
+definition for the model, use it instead of writing driver bindings by hand:
 
 ```toml
 [devices.psu]
-name    = "Bench power supply"
+model   = "vendor/model"                                        # from `desk library list`
 aliases = ["supply"]
-power   = { provider = "ha", entity = "switch.desk_outlet_1" }   # from `desk provider endpoints`
+power   = { provider = "ha", entity = "switch.desk_outlet_1" }  # from `desk provider endpoints`
+source  = { port = { serial_number = "…" } }                    # which unit, from `desk port list`
+limits  = { voltage = 12, current = 2 }                         # ask the user for bench limits
 ```
+
+Values in the device merge into the definition's bindings. Never copy bench-specific things
+(entities, limits, serial numbers) into a definition.
 
 After editing it, check with `desk device list --json`. Lua power scripts are documented in the
 project's `docs/scripting.md`.

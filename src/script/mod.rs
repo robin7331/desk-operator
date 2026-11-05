@@ -73,7 +73,7 @@ impl Engine {
             timeout,
             providers,
         } = spec;
-        let code = std::fs::read_to_string(path).map_err(|e| {
+        let code = crate::library::read_text(path).map_err(|e| {
             DeskError::ConfigInvalid(format!(
                 "device `{}`: cannot read script {}: {e}",
                 device.id,

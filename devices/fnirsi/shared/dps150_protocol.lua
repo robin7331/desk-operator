@@ -155,8 +155,11 @@ function open(ctx)
       port = nil
     end
     if ctx.clock() >= deadline then
+      if not ok then
+        error(result, 0) -- re-raise as is: host errors (port missing, busy) keep their error code
+      end
       local name = ctx.params.name and (" as a " .. ctx.params.name) or ""
-      error(string.format("the device doesn't respond%s: %s", name, why), 0)
+      error(string.format("the device doesn't respond%s", name), 0)
     end
     ctx.sleep(250)
   end

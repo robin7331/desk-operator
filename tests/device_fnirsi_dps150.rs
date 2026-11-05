@@ -425,21 +425,37 @@ fn limits_are_enforced_before_any_setpoint_is_sent() {
 }
 
 #[test]
-fn definitions_reference_the_shared_driver() {
-    // Until M5 loads definitions, at least keep them well-formed and pointing at real files.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("devices/fnirsi");
-    for model in ["ips3608", "dps-150"] {
-        let dir = root.join(model);
-        let text = std::fs::read_to_string(dir.join("device.toml")).unwrap();
-        let def: toml::Table = toml::from_str(&text).unwrap();
-        assert_eq!(
-            def["device"]["id"].as_str(),
-            Some(format!("fnirsi/{model}").as_str())
-        );
-        let script = def["source"]["script"].as_str().unwrap();
-        assert!(dir.join(script).exists(), "{model}: {script} missing");
-        assert!(def["source"]["params"]["max_voltage"].as_float().is_some());
-    }
+fn the_bundled_ips3608_definition_works_as_is() {
+    // `model = "fnirsi/ips3608"`: name check, status layout and limits come from the definition
+    // (bundled into the binary); the device only adds its port and faster timings for the test.
+    let psu = FakePsu::start(Behavior::ips3608());
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("desk.toml"),
+        format!(
+            r#"
+[devices.psu]
+model  = "fnirsi/ips3608"
+source = {{ port = {{ path = "{}" }}, params = {{ wait = "0s", boot_ms = 1500, status_ms = 300, settle_ms = 120 }} }}
+"#,
+            psu.path
+        ),
+    )
+    .unwrap();
+    let out = run(
+        dir.path(),
+        &["--json", "source", "set", "psu", "12v", "2a", "--on"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let d = out.data();
+    assert_eq!(d["verified"]["voltage"], true, "{}", d["verified"]);
+    assert_eq!(d["verified"]["current"], true);
+    assert_eq!(d["verified"]["output"], true);
+    assert!(close(&d["info"]["max_voltage"], 36.0));
+    assert_eq!(
+        run(dir.path(), &["--json", "source", "set", "psu", "37v"]).code,
+        8
+    );
 }
 
 const IPS3608_PARAMS: &str = r#", boot_ms = 1500, status_ms = 300, name = "IPS3608", status = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, output = 107 }"#;

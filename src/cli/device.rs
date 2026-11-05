@@ -13,6 +13,8 @@ pub(super) struct DeviceView<'a> {
     id: &'a str,
     name: &'a str,
     aliases: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
     capabilities: Vec<Capability>,
     power: Option<&'a Binding>,
     source: Option<&'a Binding>,
@@ -37,6 +39,7 @@ impl<'a> DeviceView<'a> {
             id: &d.id,
             name: &d.name,
             aliases: &d.aliases,
+            model: d.model.as_deref(),
             capabilities,
             power: d.power.as_ref(),
             source: d.source.as_ref(),
@@ -120,6 +123,9 @@ pub fn run(bench: &Bench, cmd: DeviceCmd) -> Result<Report> {
                 power_path(d),
             );
             let mut human = human;
+            if let Some(model) = &d.model {
+                human.push_str(&format!("model:        {model}\n"));
+            }
             if let Some(source) = &d.source {
                 human.push_str(&format!("source:       {}\n", source.describe()));
             }

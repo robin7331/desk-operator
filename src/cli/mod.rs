@@ -2,6 +2,7 @@
 //! never drift apart.
 
 mod device;
+mod library;
 mod port;
 mod power;
 mod provider;
@@ -53,6 +54,11 @@ pub enum Command {
     Device {
         #[command(subcommand)]
         action: DeviceCmd,
+    },
+    /// Device definitions: models desk knows (bundled, local, or from $DESK_DEVICES)
+    Library {
+        #[command(subcommand)]
+        action: LibraryCmd,
     },
     /// Serial ports and their USB ids (to fill in a binding's `port = { ... }`)
     Port {
@@ -135,6 +141,22 @@ pub enum SourceCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum LibraryCmd {
+    /// List available device definitions and where they come from
+    List,
+    /// Show one definition: bindings, status, and how to use it
+    Show {
+        /// Definition id, e.g. vendor/model
+        id: String,
+    },
+    /// Validate definitions and load their drivers (no hardware is touched)
+    Check {
+        /// Definition ids or paths to device.toml files [default: all]
+        targets: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum PortCmd {
     /// List USB serial ports with vendor/product ids and serial numbers
     List {
@@ -190,6 +212,7 @@ pub async fn run(cli: Cli) -> Result<Report> {
         Command::Port {
             action: PortCmd::List { all },
         } => return port::list(all),
+        Command::Library { action } => return library::run(cli.config.as_deref(), action),
         Command::Skill => {
             return Ok(Report::new(
                 &serde_json::json!({ "skill": SKILL }),
@@ -200,7 +223,9 @@ pub async fn run(cli: Cli) -> Result<Report> {
     }
     let bench = Bench::load(cli.config.as_deref())?;
     match cli.command {
-        Command::Schema | Command::Skill | Command::Port { .. } => unreachable!("handled above"),
+        Command::Schema | Command::Skill | Command::Port { .. } | Command::Library { .. } => {
+            unreachable!("handled above")
+        }
         Command::Power { action } => power::run(&bench, action).await,
         Command::Source { action } => source::run(&bench, action).await,
         Command::Device { action } => device::run(&bench, action),

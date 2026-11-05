@@ -62,8 +62,9 @@ default.
   or `debug`).
 - **Secrets are never in the config file.** Tokens come from an env var or a separate `token_file`
   (keyring later), and are never printed or logged.
-- **The core never knows a specific model.** Nothing in `src/` references `devices/`. A driver
-  that needs something the API can't do reveals a gap in the API; fix it generically.
+- **The core never knows a specific model.** Nothing in `src/` names a vendor or model or reads the
+  repo's `devices/` folder (`build.rs` bundles it; a test enforces both). A driver that needs
+  something the API can't do reveals a gap in the API; fix it generically.
 - **Cross-platform.** No platform-specific code without `cfg`-gated alternatives. Note: global
   hotkeys don't work on Wayland. The UI will expose a `desk palette` command for compositor
   keybinds.
@@ -92,6 +93,7 @@ src/
   source.rs            VoltageSource trait + semantics (limits, setpoints before output, verify, sessions)
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
   serial.rs            PortSpec matching, `desk port list`, async Port handle (exclusive opens)
+  library.rs           device definitions: search path, `device.toml` parsing, merge, bundled files
   providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
@@ -104,6 +106,8 @@ tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, erro
 tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
 tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
 tests/device_*.rs      device definitions against fake devices over ptys (belong to the library)
+tests/library.rs       model = "…", merging, search path, desk library list|show|check
+build.rs               bundles devices/ into the binary (`bundled:<path>`)
 devices/               device library: <vendor>/<model>/device.toml + shared protocol drivers (see devices/README.md)
 ```
 

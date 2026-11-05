@@ -542,7 +542,8 @@ fn all_is_a_reserved_device_name() {
 #[test]
 fn core_never_references_specific_devices() {
     // The core knows capabilities, not models. Device definitions live in `devices/` and may be
-    // moved to their own repository, so nothing in `src/` may depend on them.
+    // moved to their own repository, so nothing in `src/` may name a vendor or model, or read the
+    // repository's library folder directly (build.rs bundles it).
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in std::fs::read_dir(dir).unwrap().flatten() {
             let p = e.path();
@@ -567,9 +568,10 @@ fn core_never_references_specific_devices() {
             .collect();
     for f in files {
         let text = std::fs::read_to_string(&f).unwrap().to_lowercase();
+        // Bundling the library is build.rs's job; src/ never reaches into the repo's folders.
         assert!(
-            !text.contains("devices/"),
-            "{} references devices/",
+            !text.contains("cargo_manifest_dir"),
+            "{} reaches into the repository (bundle through build.rs)",
             f.display()
         );
         for v in &vendors {
