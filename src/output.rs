@@ -45,10 +45,13 @@ pub fn emit(json_mode: bool, result: Result<Report, DeskError>) -> i32 {
             } else {
                 print!("{}", report.human);
                 // A single failure is already in the table; only summaries need an extra line.
-                if let Some((err, _)) = &report.failure
-                    && !report.human.contains(&err.message)
-                {
-                    eprintln!("error: {}", err.message);
+                if let Some((err, _)) = &report.failure {
+                    if !report.human.contains(&err.message) {
+                        eprintln!("error: {}", err.message);
+                    }
+                    if let Some(hint) = err.hint {
+                        eprintln!("hint: {hint}");
+                    }
                 }
             }
             code

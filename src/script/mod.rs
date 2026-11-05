@@ -1,47 +1,38 @@
-//! Lua power bindings (mlua, Lua 5.4).
+//! Lua scripting (mlua, Lua 5.4): the shared engine behind every script binding.
 //!
-//! A script implements a device's power path:
+//! * [`power::ScriptSwitch`]: a `power = { script = … }` binding (`on`, `off`, `state`)
+//! * [`source::ScriptSource`]: a `source = { script = … }` driver (`set_voltage`, `read`, …)
 //!
-//! ```lua
-//! function on(ctx)  ... end            -- required
-//! function off(ctx) ... end            -- required
-//! function state(ctx) return "on" end  -- optional: "on" | "off" | "unknown" | true | false | nil
-//! ```
-//!
-//! A call succeeds when the function returns; `error(...)` fails it. The host API (`ctx`) is
-//! documented in `docs/scripting.md` and is the plugin contract, so keep it small and stable.
+//! Every function gets `ctx` as its first argument. A call succeeds when it returns; `error(...)`
+//! fails it. The host API (`ctx`) is documented in `docs/scripting.md` and is the plugin contract,
+//! so keep it small and stable.
 //!
 //! Sandbox: only the `table`, `string`, `math`, `utf8` and `coroutine` libraries are loaded, and
 //! `dofile`/`loadfile` are removed, so there is no file, OS or network access except through `ctx`.
 //! `print` goes to the log. A global instruction hook enforces the timeout even in busy loops.
 
+pub mod power;
+pub mod source;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use mlua::{
-    Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Table, Value, VmState,
+    Function, HookTriggers, IntoLua, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Table,
+    Value, VmState,
 };
 
-use crate::config::PowerBinding;
+use crate::config::Binding;
 use crate::error::{DeskError, Result};
-use crate::model::{Power, PowerFeatures, PowerState};
-use crate::power::{self, PowerSwitch, Target};
+use crate::power::{self as power_core, PowerSwitch, Target};
 use crate::providers::Registry;
+
+pub use power::ScriptSwitch;
+pub use source::ScriptSource;
 
 /// How often (in VM instructions) the timeout hook runs.
 const HOOK_EVERY: u32 = 10_000;
-
-pub struct ScriptSwitch {
-    lua: Lua,
-    ctx: Table,
-    path: PathBuf,
-    has_state: bool,
-    timeout: Duration,
-    deadline: Arc<Mutex<Option<Instant>>>,
-    log: Arc<Mutex<Vec<String>>>,
-}
 
 /// Device facts passed to the script as `ctx.device`.
 pub struct DeviceInfo<'a> {
@@ -49,15 +40,35 @@ pub struct DeviceInfo<'a> {
     pub name: &'a str,
 }
 
-impl ScriptSwitch {
+/// Everything a script binding needs to load.
+pub struct ScriptSpec<'a> {
+    pub device: DeviceInfo<'a>,
+    pub path: &'a Path,
+    pub params: &'a toml::Table,
+    pub timeout: Duration,
+    pub providers: Arc<Registry>,
+}
+
+/// A loaded, sandboxed script with its `ctx`.
+pub struct Engine {
+    lua: Lua,
+    ctx: Table,
+    path: PathBuf,
+    timeout: Duration,
+    deadline: Arc<Mutex<Option<Instant>>>,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl Engine {
     /// Create a sandboxed Lua state, install the host API and run the script's top level.
-    pub fn load(
-        device: DeviceInfo,
-        path: &Path,
-        params: &toml::Table,
-        timeout: Duration,
-        providers: Arc<Registry>,
-    ) -> Result<Self> {
+    pub fn load(spec: ScriptSpec) -> Result<Self> {
+        let ScriptSpec {
+            device,
+            path,
+            params,
+            timeout,
+            providers,
+        } = spec;
         let code = std::fs::read_to_string(path).map_err(|e| {
             DeskError::ConfigInvalid(format!(
                 "device `{}`: cannot read script {}: {e}",
@@ -77,55 +88,91 @@ impl ScriptSwitch {
         install_timeout_hook(&lua, deadline.clone(), timeout, path)?;
         let ctx = host_api(&lua, &device, params, log.clone(), providers).map_err(internal)?;
 
-        let script = ScriptSwitch {
+        let engine = Engine {
             lua,
             ctx,
             path: path.to_path_buf(),
-            has_state: false,
             timeout,
             deadline,
             log,
         };
-
-        script
+        engine
             .lua
             .load(&code)
             .set_name(format!("@{}", file_name(path)))
             .exec()
-            .map_err(|e| script.error(e))?;
-        *script.deadline.lock().map_err(poisoned)? = None;
-
-        let globals = script.lua.globals();
-        for required in ["on", "off"] {
-            if !matches!(globals.get::<Value>(required), Ok(Value::Function(_))) {
-                return Err(DeskError::ConfigInvalid(format!(
-                    "script {} must define a function `{required}(ctx)`",
-                    path.display()
-                )));
-            }
-        }
-        let has_state = matches!(globals.get::<Value>("state"), Ok(Value::Function(_)));
-        Ok(ScriptSwitch {
-            has_state,
-            ..script
-        })
+            .map_err(|e| engine.error(e))?;
+        *engine.deadline.lock().map_err(poisoned)? = None;
+        Ok(engine)
     }
 
-    async fn call(&self, name: &str) -> Result<Value> {
+    /// Whether the script defines a global function `name`.
+    pub fn has(&self, name: &str) -> bool {
+        matches!(
+            self.lua.globals().get::<Value>(name),
+            Ok(Value::Function(_))
+        )
+    }
+
+    /// Fail with `config_invalid` unless every function in `names` is defined.
+    pub fn require(&self, names: &[&str]) -> Result<()> {
+        let missing: Vec<&str> = names.iter().copied().filter(|n| !self.has(n)).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(DeskError::ConfigInvalid(format!(
+            "script {} must define: {}",
+            self.path.display(),
+            missing
+                .iter()
+                .map(|n| format!("`{n}(ctx, ...)`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+
+    /// Call `name(ctx, args...)`, enforcing the timeout inside Lua too.
+    pub async fn call(&self, name: &str, args: impl IntoLua) -> Result<Value> {
         let f: Function = self.lua.globals().get(name).map_err(|e| self.error(e))?;
+        let mut argv = MultiValue::new();
+        argv.push_back(Value::Table(self.ctx.clone()));
+        let arg = args.into_lua(&self.lua).map_err(|e| self.error(e))?;
+        if !arg.is_nil() {
+            argv.push_back(arg);
+        }
         *self.deadline.lock().map_err(poisoned)? = Some(Instant::now() + self.timeout);
-        let result = f.call_async::<Value>(self.ctx.clone()).await;
+        let result = f.call_async::<Value>(argv).await;
         *self.deadline.lock().map_err(poisoned)? = None;
         result.map_err(|e| self.error(e))
     }
 
+    /// Convert a value returned by the script, with a helpful error naming the function.
+    pub fn decode<T: serde::de::DeserializeOwned>(
+        &self,
+        function: &str,
+        expected: &str,
+        value: Value,
+    ) -> Result<T> {
+        self.lua.from_value(value).map_err(|e| {
+            DeskError::ScriptFailed(format!(
+                "{}: {function}() must return {expected}: {}",
+                self.file_name(),
+                lua_message(&e)
+            ))
+        })
+    }
+
+    pub fn file_name(&self) -> String {
+        file_name(&self.path)
+    }
+
     /// Host errors raised inside the script (e.g. HA unreachable) keep their code; anything the
     /// script raised itself becomes `script_failed`.
-    fn error(&self, e: mlua::Error) -> DeskError {
+    pub fn error(&self, e: mlua::Error) -> DeskError {
         if let Some(inner) = find_desk_error(&e) {
             return inner.clone();
         }
-        let name = file_name(&self.path);
+        let name = self.file_name();
         let msg = lua_message(&e);
         // Lua usually prefixes "<chunk>:<line>:" itself; only add the file name when it didn't.
         if msg.starts_with(&name) {
@@ -134,56 +181,12 @@ impl ScriptSwitch {
             DeskError::ScriptFailed(format!("{name}: {msg}"))
         }
     }
-}
 
-#[async_trait]
-impl PowerSwitch for ScriptSwitch {
-    fn features(&self) -> PowerFeatures {
-        PowerFeatures {
-            readback: self.has_state,
-            settle: Duration::ZERO,
-        }
-    }
-
-    async fn set(&self, on: bool) -> Result<()> {
-        self.call(if on { "on" } else { "off" }).await.map(drop)
-    }
-
-    async fn state(&self) -> Result<PowerState> {
-        if !self.has_state {
-            return Ok(PowerState::unknown());
-        }
-        let state = match self.call("state").await? {
-            Value::Boolean(b) => Power::from_bool(b),
-            Value::Nil => Power::Unknown,
-            Value::String(s) => match s.to_str().map(|s| s.to_lowercase()).as_deref() {
-                Ok("on") => Power::On,
-                Ok("off") => Power::Off,
-                Ok("unknown") => Power::Unknown,
-                _ => return Err(self.bad_state(&format!("\"{}\"", s.to_string_lossy()))),
-            },
-            other => return Err(self.bad_state(other.type_name())),
-        };
-        Ok(match state {
-            Power::Unknown => PowerState::unknown(),
-            s => PowerState::real(s),
-        })
-    }
-
-    fn take_log(&self) -> Vec<String> {
+    pub fn take_log(&self) -> Vec<String> {
         self.log
             .lock()
             .map(|mut l| std::mem::take(&mut *l))
             .unwrap_or_default()
-    }
-}
-
-impl ScriptSwitch {
-    fn bad_state(&self, got: &str) -> DeskError {
-        DeskError::ScriptFailed(format!(
-            "{}: state() must return \"on\", \"off\", \"unknown\", a boolean or nil, got {got}",
-            file_name(&self.path)
-        ))
     }
 }
 
@@ -279,10 +282,10 @@ fn host_api(
                 "ctx.power expects a table like a power binding: {e}"
             ))
         })?;
-        let binding = PowerBinding::try_from(table).map_err(|e| {
+        let binding = Binding::try_from(table).map_err(|e| {
             mlua::Error::external(DeskError::ConfigInvalid(format!("ctx.power: {e}")))
         })?;
-        let PowerBinding::Native {
+        let Binding::Native {
             ref provider,
             ref params,
             ..
@@ -318,7 +321,7 @@ fn power_handle(lua: &Lua, sw: Arc<dyn PowerSwitch>, label: String) -> mlua::Res
             let sw = sw.clone();
             let label = label.clone();
             async move {
-                let outcome = power::switch(&label, sw.as_ref(), target)
+                let outcome = power_core::switch(&label, sw.as_ref(), target)
                     .await
                     .map_err(mlua::Error::external)?;
                 Ok(outcome.after.state.to_string())

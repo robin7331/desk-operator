@@ -212,16 +212,85 @@ hanging script reports a useful error.
 
 ---
 
-## After the MVP (rough order, re-evaluate each time)
+## M4 — Instrument control: the `voltage_source` capability
+
+**Goal:** control the *functions* of an instrument, not only its mains power, through a generic
+capability. Bench power supplies are the first class. The core never knows any specific model; the
+first real driver (FNIRSI DPS-150 protocol family, which also covers the IPS3608) only uses generic APIs.
+Anything it needs that the API can't do is a gap in the API, and gets fixed generically.
+
+```toml
+[devices.psu]
+power  = { provider = "ha", entity = "switch.…" }        # power_switch: mains (exists)
+source = { script = "drivers/fnirsi_dps150.lua",         # voltage_source: the instrument itself
+           port   = { usb_vid = 0x1234, usb_pid = 0x5678 },
+           params = { model = "ips3608" } }
+limits = { voltage = 12.0, current = 2.0 }                # bench safety, enforced by the core
+```
+
+**Design**
+- **One config key per capability** (`power`, `source`; later `load`, `meter`, …). Capabilities are
+  then visible without loading any driver. A binding is native (`provider = …`) or a Lua script,
+  exactly like power bindings.
+- **`port` belongs to the binding**, not to the script: `ctx.serial.open{ baud = … }` opens the bound
+  port and nothing else, so a driver can't reach other devices' ports. Ports are matched by
+  `path` or USB `usb_vid`/`usb_pid`/`serial_number`, never by a fixed `/dev/tty…` alone.
+- **Sessions:** a command opens one driver session (`open(ctx)` … `close(ctx)`, both optional)
+  around all its steps, and always closes it, even on errors and timeouts. Some devices lock their
+  front panel while connected, so no long-lived connection (and still no daemon).
+- **Semantics in the core, not in drivers:** check limits (device maximum from `info()` and the
+  bench `limits`), then setpoints, then output (always in that order), then read back. Setpoints
+  that a driver can't read back are reported as **unverified**, never as confirmed.
+- **Mains first:** if the device has a power path that reads `off`, fail fast with `device_off`
+  and a hint, instead of a confusing "port not found". Switching it on automatically comes later,
+  with the command language.
+- **Single channel** for now. Multi-channel PSUs come later as `channel = n`.
+
+**Driver contract (Lua)**: `info(ctx)` → `{ max_voltage, max_current }`, `set_voltage(ctx, v)`,
+`set_current(ctx, a)`, `set_output(ctx, on)`, `read(ctx)` → `{ output?, voltage_set?, current_set?,
+voltage?, current?, power? }`, optional `open`/`close`. Host API gains `ctx.serial.open{…}` → `port`
+with `write(bytes)`, `read(n, timeout)`, `clear()`, `close()`. Lua 5.4's `string.pack("<f", 5.0)`
+handles binary frames.
+
+**CLI**
+```
+desk source set psu 5v 1a [--on] [--dry-run]   # units required: v/mv, a/ma
+desk source output on|off psu [--dry-run]
+desk source read psu                            # output, setpoints, measured V/A/W
+```
+
+**Steps** (each tested without hardware)
+- [x] **M4.1** `voltage_source` model, `source`/`limits` config, core semantics, `desk source …`,
+      simulated PSU in the mock provider (`load_ohms` for CC/CV behavior), schema + skill updates.
+      New codes: `capability_missing` (3), `device_off` (4), `limit_exceeded` (8). Also refuses
+      `output on` when the device already holds a setpoint above the bench limits.
+- [x] **M4.2** Lua source drivers: shared script engine (`script::Engine`) for power and source
+      scripts, sessions with guaranteed `close`, driver logs kept in errors, `docs/scripting.md`
+- [ ] **M4.3** Serial host API: port matching, `ctx.serial.open`, read/write/timeouts; tested over a
+      pseudo-terminal pair (Unix)
+- [ ] **M4.4** `drivers/fnirsi_dps150.lua`, tested against a fake device that speaks the protocol
+      over a pty (setpoints, output echo, pushed telemetry)
+- [ ] **M4.5** Smoke test on a real IPS3608 (nothing connected to the output), only with the user's go-ahead
+
+**Background (research, Nov 2026):** the IPS3608 is a USB CDC-ACM device that speaks the DPS-150
+protocol family: frames `F1|F0, type, cmd, len, data, sum(cmd..data)`, float32 LE, set V/I = `C1`/`C2`
+(no reply), output = `DB` (echoed), telemetry `C3` (V, A, W) pushed ~every 0.6 s, connect/disconnect
+via `C1 00`. Sources: [hamsternz/fnirsi_psu](https://github.com/hamsternz/fnirsi_psu) (working C tool),
+[DPS-150 protocol docs](https://philipp-iot.github.io/fnirsi_protocol/protocol/reference), FNIRSI ships
+one PC app for "DPS-150 / IPS3608". Unknown until tested: USB VID:PID, setpoint/output readback.
+Other PSU families the capability must also fit: SCPI-style text (Rigol, Siglent, Owon, Korad) and
+Modbus registers (Riden RD60xx).
+
+## After M4 (rough order, re-evaluate each time)
 
 1. **Config editing from the CLI:** `device add`, `device power <dev>` with interactive provider/entity pickers (`toml_edit`, `inquire`)
-2. **Serial/USB host API for Lua:** `ctx.usb.wait_for{vid,pid}`, `port:write`, `port:query`, enabling wake/verify sequences
-3. **First instrument capability:** `voltage_source` + a driver for the IPS3608 (if it has a PC interface) or another PSU; the first safety limits
-4. **Daemon** owning the hardware (exclusive serial ports); the CLI talks to it over a local socket, with in-process fallback
-5. **Command language:** `psu 5v 1a on, iron 330c then dmm dcv`, plus scenes
-6. **Palette + tray** (Tauri v2), with `desk palette` for Wayland compositor binds
+2. **Driver library:** `driver = "fnirsi-dps150"` resolves to drivers bundled with desk; native Rust drivers for common families (SCPI, Modbus)
+3. **More capabilities:** `electronic_load`, `meter`, `heater`; multi-channel sources; scope much later
+4. **Command language:** `psu 5v 1a on, iron 330c then dmm dcv`, scenes, automatic "mains on → wait for port → configure"
+5. **Palette + tray** (Tauri v2), with `desk palette` for Wayland compositor binds
+6. **Daemon** when something needs long-lived state (palette live values, monitoring); the CLI talks to it over a local socket, with in-process fallback
 7. **MCP server** (`desk mcp`), then natural language with your own API key, always as a previewed plan
-8. **Community driver library**, Shelly-direct provider, more capabilities (load, meter, heater; scope much later)
+8. **Community driver library**, Shelly-direct provider
 
 ## Decisions log
 
@@ -232,7 +301,12 @@ hanging script reports a useful error.
   same idempotent, verified switching. `p:set()` is the raw escape hatch. Provider-specific calls
   (e.g. arbitrary HA services) get added when a real device needs them.
 - **Single crate for the MVP:** split into a workspace when the daemon or UI needs a shared core library.
-- **No daemon in the MVP:** HA is stateless HTTP. The daemon arrives with serial devices.
+- **No daemon in the MVP:** HA is stateless HTTP. M4 confirmed it's not needed for serial devices
+  either: one session per command is the better default (some devices lock their front panel while
+  connected).
+- **Capability-named binding keys (`source = …`) instead of a generic `control = …`:** capabilities
+  are known without loading drivers, and a driver's port is part of its binding (scripts can't open
+  other ports).
 - **"power" = mains, "output" = PSU terminals:** never conflate the two.
 - **Verification polls instead of reading once:** HA/Shelly can report the old state briefly after
   a service call. Each power path declares a `settle` window (`PowerFeatures::settle`).
@@ -243,5 +317,4 @@ hanging script reports a useful error.
 
 ## Open questions
 
-- Does the FNIRSI IPS3608 have a PC control interface (USB serial / Modbus)? This decides post-MVP item 3.
 - Binary name: `desk` (assumed) vs. something less generic.

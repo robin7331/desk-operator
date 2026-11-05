@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use super::ProviderCmd;
 use crate::bench::Bench;
-use crate::config::PowerBinding;
+use crate::config::Binding;
 use crate::error::Result;
 use crate::model::Capability;
 use crate::output::{Report, table};
@@ -64,7 +64,8 @@ fn list(bench: &Bench) -> Result<Report> {
     let views: Vec<ProviderView> = bench
         .providers
         .ids()
-        .map(|(id, cfg)| ProviderView {
+        .map(|(id, cfg)| {
+            ProviderView {
             id,
             kind: &cfg.kind,
             used_by: bench
@@ -72,10 +73,11 @@ fn list(bench: &Bench) -> Result<Report> {
                 .devices
                 .iter()
                 .filter(|d| {
-                    matches!(&d.power, Some(PowerBinding::Native { provider, .. }) if provider == id)
+                    matches!(&d.power, Some(Binding::Native { provider, .. }) if provider == id)
                 })
                 .map(|d| d.id.as_str())
                 .collect(),
+        }
         })
         .collect();
     let rows: Vec<Vec<String>> = views

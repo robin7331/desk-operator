@@ -323,7 +323,11 @@ fn bad_scripts_are_reported() {
     let missing_off = bench("function on(ctx) end", "");
     let out = missing_off.run(&["--json", "power", "on", "dev"]);
     assert_eq!(out.code, 3);
-    assert!(out.error_message().contains("`off(ctx)`"));
+    assert!(
+        out.error_message().contains("`off(ctx"),
+        "{}",
+        out.error_message()
+    );
 
     let bad_state = bench(
         r#"
@@ -387,4 +391,206 @@ fn example_scripts_work() {
         out.json()["data"]["results"][0]["power"]["confidence"],
         "assumed"
     );
+}
+
+// ---- voltage_source drivers -------------------------------------------------------------------
+
+/// A bench with one device `psu` whose `source` is the Lua driver `driver`.
+fn source_bench(driver: &str, binding_extra: &str, limits: &str) -> Bench {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("driver.lua"), driver).unwrap();
+    std::fs::write(
+        dir.path().join("desk.toml"),
+        format!(
+            r#"
+[providers.sim]
+kind = "mock"
+
+[devices.psu]
+source = {{ script = "driver.lua"{binding_extra} }}
+{limits}
+"#
+        ),
+    )
+    .unwrap();
+    Bench { dir }
+}
+
+/// A complete driver for a PSU simulated inside the script (state lives for one command).
+const SIM_DRIVER: &str = r#"
+local s = { v = 0, a = 0, out = false }
+function open(ctx)  ctx.log("open") end
+function close(ctx) ctx.log("close") end
+function info(ctx)  return { max_voltage = ctx.params.max or 30, max_current = 5 } end
+function set_voltage(ctx, v) ctx.log("set_voltage", v); s.v = v end
+function set_current(ctx, a) ctx.log("set_current", a); s.a = a end
+function set_output(ctx, on) ctx.log("set_output", on); s.out = on end
+function read(ctx)
+  local v = s.out and s.v or 0
+  return { output = s.out, voltage_set = s.v, current_set = s.a, voltage = v, current = 0, power = 0 }
+end
+"#;
+
+#[test]
+fn lua_source_driver_runs_in_one_session_in_order() {
+    let b = source_bench(SIM_DRIVER, "", "");
+    let out = b.run(&["--json", "source", "set", "psu", "5v", "1a", "--on"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    let d = &out.json()["data"];
+    assert_eq!(d["verified"]["voltage"], true);
+    assert_eq!(d["verified"]["output"], true);
+    assert_eq!(d["reading"]["voltage"], 5.0);
+    let log: Vec<&str> = d["log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        log,
+        [
+            "open",
+            "set_voltage 5.0",
+            "set_current 1.0",
+            "set_output true",
+            "close"
+        ],
+        "one session; setpoints before output"
+    );
+}
+
+#[test]
+fn lua_driver_limits_come_from_info_and_bench() {
+    let b = source_bench(
+        SIM_DRIVER,
+        r#", params = { max = 12 }"#,
+        "limits = { current = 2 }",
+    );
+    let out = b.run(&["--json", "source", "set", "psu", "13v"]);
+    assert_eq!(out.code, 8);
+    assert!(
+        out.error_message().contains("device maximum"),
+        "{}",
+        out.error_message()
+    );
+    let out = b.run(&["--json", "source", "set", "psu", "3a"]);
+    assert_eq!(out.code, 8);
+    assert!(out.error_message().contains("bench limit"));
+    // Nothing was sent: the driver only saw the session.
+    let log = &out.json()["data"]["log"];
+    assert_eq!(log, &serde_json::json!(["open", "close"]), "{}", out.stdout);
+}
+
+#[test]
+fn lua_driver_session_closes_after_errors() {
+    let driver = SIM_DRIVER.replace(
+        "function set_output(ctx, on)",
+        "function set_output(ctx, on) error('relay stuck') end\nfunction unused(ctx, on)",
+    );
+    let b = source_bench(&driver, "", "");
+    let out = b.run(&["--json", "source", "set", "psu", "5v", "--on"]);
+    assert_eq!(out.code, 5, "{}", out.stdout);
+    assert!(out.error_message().contains("relay stuck"));
+    assert!(
+        out.stderr.contains("psu: close"),
+        "close() ran: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn lua_driver_session_closes_after_timeout() {
+    let driver = SIM_DRIVER.replace(
+        "function read(ctx)",
+        "function read(ctx) ctx.sleep(5000) end\nfunction unused(ctx)",
+    );
+    let b = source_bench(&driver, r#", timeout = "300ms""#, "");
+    let out = b.run(&["--json", "source", "read", "psu"]);
+    assert_eq!(out.code, 6, "{}", out.stdout);
+    assert!(
+        out.stderr.contains("psu: close"),
+        "close() ran: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn minimal_driver_without_readback_is_unverified() {
+    let b = source_bench(
+        r#"
+        function set_voltage(ctx, v) end
+        function set_current(ctx, a) end
+        function set_output(ctx, on) end
+        function read(ctx) return { voltage = 4.98 } end
+        "#,
+        "",
+        "",
+    );
+    let out = b.run(&["--json", "source", "set", "psu", "5v", "--on"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let d = &out.json()["data"];
+    assert!(
+        d["verified"].as_object().unwrap().is_empty(),
+        "{}",
+        d["verified"]
+    );
+    assert_eq!(d["reading"]["voltage"], 4.98);
+}
+
+#[test]
+fn bad_drivers_are_reported() {
+    let missing = source_bench("function read(ctx) return {} end", "", "");
+    let out = missing.run(&["--json", "source", "read", "psu"]);
+    assert_eq!(out.code, 3);
+    let msg = out.error_message();
+    assert!(
+        msg.contains("`set_voltage(ctx") && msg.contains("`set_output(ctx"),
+        "{msg}"
+    );
+
+    let bad_read = source_bench(
+        &SIM_DRIVER.replace(
+            "return { output = s.out",
+            "do return 42 end\n  return { output = s.out",
+        ),
+        "",
+        "",
+    );
+    let out = bad_read.run(&["--json", "source", "read", "psu"]);
+    assert_eq!(out.code, 5);
+    assert!(
+        out.error_message().contains("read() must return a table"),
+        "{}",
+        out.error_message()
+    );
+
+    let bad_type = source_bench(
+        &SIM_DRIVER.replace("voltage = v,", "voltage = \"high\","),
+        "",
+        "",
+    );
+    let out = bad_type.run(&["--json", "source", "read", "psu"]);
+    assert_eq!(out.code, 5);
+    assert!(
+        out.error_message().contains("read() must return"),
+        "{}",
+        out.error_message()
+    );
+}
+
+#[test]
+fn drivers_can_use_other_power_paths() {
+    // E.g. a driver that powers an isolation relay before switching the output.
+    let driver = SIM_DRIVER.replace(
+        "function set_output(ctx, on) ctx.log(\"set_output\", on); s.out = on end",
+        "function set_output(ctx, on)\n  ctx.power{ provider = \"sim\", endpoint = \"relay\" }:set(on)\n  s.out = on\nend",
+    );
+    let b = source_bench(&driver, "", "");
+    let out = b.run(&["--json", "source", "output", "on", "psu"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let state: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(b.dir.path().join("mock-state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["power"]["sim"]["relay"], true);
 }

@@ -63,6 +63,42 @@ Errors raised by the host (an unreachable provider, an unavailable entity, a fai
 keep their own error code (`provider_unreachable`, `endpoint_unavailable`, `verify_failed`, …) unless
 the script catches them with `pcall`.
 
+## Instrument drivers (`source = { script = … }`)
+
+A script can also be the driver of a capability. For a bench power supply (`voltage_source`):
+
+```toml
+[devices.psu]
+source = { script = "drivers/my_psu.lua", timeout = "10s", params = { model = "x" } }
+limits = { voltage = 12, current = 2 }   # bench safety, enforced by desk, not by the driver
+```
+
+```lua
+function set_voltage(ctx, volts) ... end   -- required
+function set_current(ctx, amps) ... end    -- required
+function set_output(ctx, on) ... end       -- required
+function read(ctx)                         -- required: report what the device can tell
+  return { output = true, voltage_set = 5, current_set = 1, voltage = 5.01, current = 0.2, power = 1.0 }
+end
+function info(ctx) return { max_voltage = 30, max_current = 5 } end   -- optional, enables max checks
+function open(ctx) ... end                 -- optional: start of a session (connect, handshake)
+function close(ctx) ... end                -- optional: end of a session
+```
+
+Drivers only implement primitives. Everything users rely on is done by desk itself, the same for
+every driver:
+
+- **Sessions:** one `open` … `close` per command around all steps. `close` is called even after
+  errors and timeouts (devices that lock their front panel while connected get released).
+- **Limits:** values above `info()`'s maximum or the device's bench `limits` are refused before
+  the driver is called. Switching the output on is also refused when the device *already* holds a
+  setpoint above the bench limits (as far as `read()` reports it).
+- **Order:** voltage, then current, then output.
+- **Verification:** after the steps, `read()` is compared with the request. Fields `read()` doesn't
+  return are reported as *not confirmed*, never as confirmed. Return only what the device really
+  reports.
+- **`timeout`** (default `10s`) covers the whole session of one command.
+
 ## Sandbox
 
 Only the `string`, `table`, `math`, `utf8` and `coroutine` libraries are available. There is no

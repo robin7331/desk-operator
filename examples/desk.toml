@@ -23,7 +23,9 @@ endpoints = ["outlet1", "outlet2", "outlet3", "outlet4"]   # what `desk provider
 [devices.psu]
 name    = "FNIRSI IPS3608"
 aliases = ["supply", "power supply"]
-power   = { provider = "sim", endpoint = "outlet1" }
+power   = { provider = "sim", endpoint = "outlet1" }                      # mains, via an outlet
+source  = { provider = "sim", endpoint = "psu", max_voltage = 36, max_current = 8, load_ohms = 10 }  # the instrument
+limits  = { voltage = 15, current = 2 }                                    # bench safety, enforced by desk
 
 [devices.load]
 name    = "DC load"

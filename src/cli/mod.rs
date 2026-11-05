@@ -5,11 +5,12 @@ mod device;
 mod power;
 mod provider;
 mod schema;
+mod source;
 mod status;
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::bench::Bench;
 use crate::error::{DeskError, ErrorJson, Result};
@@ -41,6 +42,11 @@ pub enum Command {
     Power {
         #[command(subcommand)]
         action: PowerCmd,
+    },
+    /// Control bench power supplies: setpoints, output, measurements (voltage_source)
+    Source {
+        #[command(subcommand)]
+        action: SourceCmd,
     },
     /// Inspect configured devices
     Device {
@@ -88,6 +94,44 @@ pub struct Targets {
     /// Show what would be sent, without switching anything (current state is still read)
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SourceCmd {
+    /// Set voltage and/or current, e.g. `desk source set psu 5v 1a --on`
+    Set {
+        /// Device id, alias or name
+        device: String,
+        /// Values with units: 5v, 500mv, 1a, 250ma
+        #[arg(required = true)]
+        values: Vec<String>,
+        /// Then switch the output on (after the setpoints)
+        #[arg(long)]
+        on: bool,
+        /// Check limits and show what would be sent, without sending anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Switch the output terminals on or off (not mains power: see `desk power`)
+    Output {
+        state: OnOff,
+        /// Device id, alias or name
+        device: String,
+        /// Check limits and show what would be sent, without sending anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Read output state, setpoints and measured voltage, current and power
+    Read {
+        /// Device id, alias or name
+        device: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Debug, Subcommand)]
@@ -139,6 +183,7 @@ pub async fn run(cli: Cli) -> Result<Report> {
     match cli.command {
         Command::Schema | Command::Skill => unreachable!("handled above"),
         Command::Power { action } => power::run(&bench, action).await,
+        Command::Source { action } => source::run(&bench, action).await,
         Command::Device { action } => device::run(&bench, action),
         Command::Provider { action } => provider::run(&bench, action).await,
         Command::Status => status::run(&bench).await,

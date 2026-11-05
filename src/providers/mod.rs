@@ -17,6 +17,7 @@ use crate::config::ProviderConfig;
 use crate::error::{DeskError, Result};
 use crate::model::Capability;
 use crate::power::PowerSwitch;
+use crate::source::VoltageSource;
 
 /// Provider kinds this build knows, as used in `kind = "..."`.
 pub const KINDS: &[&str] = &[home_assistant::KIND, mock::KIND];
@@ -29,6 +30,13 @@ pub trait Provider: Send + Sync {
     async fn endpoints(&self, capability: Capability) -> Result<Vec<Endpoint>>;
     /// Bind one endpoint, described by the device's power binding params, as a power switch.
     fn power_switch(&self, params: &toml::Table) -> Result<Box<dyn PowerSwitch>>;
+    /// Bind an endpoint as a bench power supply. Most providers can't.
+    fn voltage_source(&self, _params: &toml::Table) -> Result<Box<dyn VoltageSource>> {
+        Err(DeskError::ConfigInvalid(
+            "this provider can't drive a voltage source (use a driver script or another provider)"
+                .into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +184,15 @@ impl<'a> Params<'a> {
                 })
                 .collect(),
             Some(_) => Err(self.invalid(format_args!("`{key}` must be a list of strings"))),
+        }
+    }
+
+    pub fn float(&self, key: &str) -> Result<Option<f64>> {
+        match self.table.get(key) {
+            None => Ok(None),
+            Some(toml::Value::Float(f)) => Ok(Some(*f)),
+            Some(toml::Value::Integer(i)) => Ok(Some(*i as f64)),
+            Some(_) => Err(self.invalid(format_args!("`{key}` must be a number"))),
         }
     }
 

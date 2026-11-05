@@ -200,7 +200,9 @@ impl Provider for HomeAssistant {
     }
 
     async fn endpoints(&self, capability: Capability) -> Result<Vec<Endpoint>> {
-        let Capability::PowerSwitch = capability;
+        if capability != Capability::PowerSwitch {
+            return Ok(Vec::new());
+        }
         let mut states: Vec<EntityState> = self.client.get_json("/api/states").await?;
         states.retain(|s| domain_of(&s.entity_id).is_some_and(|d| POWER_DOMAINS.contains(&d)));
         states.sort_by(|a, b| a.entity_id.cmp(&b.entity_id));

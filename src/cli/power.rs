@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use super::{PowerCmd, Targets, summarize_failures};
 use crate::bench::Bench;
-use crate::config::{ALL, Device, PowerBinding};
+use crate::config::{ALL, Binding, Device};
 use crate::error::{DeskError, ErrorJson, Result};
 use crate::model::PowerState;
 use crate::output::{Report, table};
@@ -220,22 +220,14 @@ async fn dry_run(bench: &Bench, target: Target, devices: Vec<&Device>) -> Result
     let mut results = Vec::new();
     let mut failures = Vec::new();
     for (d, run) in devices.iter().zip(&plans) {
-        let power_path = d
-            .power
-            .as_ref()
-            .map(PowerBinding::describe)
-            .unwrap_or_default();
+        let power_path = d.power.as_ref().map(Binding::describe).unwrap_or_default();
         match &run.result {
             Ok(p) => {
                 let now = p
                     .before
                     .map_or_else(|| "unknown".to_string(), |b| b.to_string());
                 let would = if p.would_send {
-                    let via = d
-                        .power
-                        .as_ref()
-                        .map(PowerBinding::summary)
-                        .unwrap_or_default();
+                    let via = d.power.as_ref().map(Binding::summary).unwrap_or_default();
                     format!("would switch {} via {via}", p.target)
                 } else {
                     "nothing to do".to_string()

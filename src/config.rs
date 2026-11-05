@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{DeskError, Result};
 use crate::providers;
+use crate::source::Limits;
 
 #[derive(Debug)]
 pub struct Config {
@@ -32,13 +33,17 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub aliases: Vec<String>,
-    pub power: Option<PowerBinding>,
+    pub power: Option<Binding>,
+    /// `voltage_source` capability (bench power supply).
+    pub source: Option<Binding>,
+    /// Bench safety limits, enforced by the core for every driver.
+    pub limits: Limits,
 }
 
 /// How a device gets mains power.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "toml::Table", tag = "kind", rename_all = "lowercase")]
-pub enum PowerBinding {
+pub enum Binding {
     /// The core calls a provider directly: `{ provider = "ha", entity = "switch.x" }`.
     Native {
         provider: String,
@@ -57,18 +62,18 @@ pub enum PowerBinding {
     },
 }
 
-impl PowerBinding {
+impl Binding {
     pub fn timeout(&self) -> Option<Duration> {
         match self {
-            PowerBinding::Native { timeout, .. } | PowerBinding::Script { timeout, .. } => *timeout,
+            Binding::Native { timeout, .. } | Binding::Script { timeout, .. } => *timeout,
         }
     }
 
     /// Very short form for narrow table columns: the provider id, or `script <file>`.
     pub fn summary(&self) -> String {
         match self {
-            PowerBinding::Native { provider, .. } => provider.clone(),
-            PowerBinding::Script { script, .. } => format!(
+            Binding::Native { provider, .. } => provider.clone(),
+            Binding::Script { script, .. } => format!(
                 "script {}",
                 script.file_name().map_or_else(
                     || script.display().to_string(),
@@ -81,7 +86,7 @@ impl PowerBinding {
     /// Short human-readable description, e.g. `sim (endpoint=outlet1)`.
     pub fn describe(&self) -> String {
         match self {
-            PowerBinding::Native {
+            Binding::Native {
                 provider, params, ..
             } => {
                 let params: Vec<String> = params
@@ -97,12 +102,12 @@ impl PowerBinding {
                     format!("{provider} ({})", params.join(", "))
                 }
             }
-            PowerBinding::Script { script, .. } => format!("script {}", script.display()),
+            Binding::Script { script, .. } => format!("script {}", script.display()),
         }
     }
 }
 
-impl TryFrom<toml::Table> for PowerBinding {
+impl TryFrom<toml::Table> for Binding {
     type Error = String;
 
     fn try_from(mut t: toml::Table) -> std::result::Result<Self, String> {
@@ -136,7 +141,7 @@ impl TryFrom<toml::Table> for PowerBinding {
                         "unknown key `{k}` in script binding (allowed: script, params, timeout)"
                     ));
                 }
-                Ok(PowerBinding::Script {
+                Ok(Binding::Script {
                     script,
                     params,
                     timeout,
@@ -147,7 +152,7 @@ impl TryFrom<toml::Table> for PowerBinding {
                     Some(toml::Value::String(s)) => s,
                     _ => return Err("`provider` must be a string".into()),
                 };
-                Ok(PowerBinding::Native {
+                Ok(Binding::Native {
                     provider,
                     params: t,
                     timeout,
@@ -182,7 +187,10 @@ struct RawDevice {
     name: Option<String>,
     #[serde(default)]
     aliases: Vec<String>,
-    power: Option<PowerBinding>,
+    power: Option<Binding>,
+    source: Option<Binding>,
+    #[serde(default)]
+    limits: Limits,
 }
 
 /// Platform default: `~/.config/desk-operator/desk.toml` on Linux, the equivalent elsewhere.
@@ -227,6 +235,8 @@ impl Config {
                 id,
                 aliases: d.aliases,
                 power: d.power.map(|p| resolve_script_path(p, &path)),
+                source: d.source.map(|p| resolve_script_path(p, &path)),
+                limits: d.limits,
             })
             .collect();
 
@@ -282,13 +292,22 @@ impl Config {
                     ));
                 }
             }
-            if let Some(PowerBinding::Native { provider, .. }) = &d.power
-                && !self.providers.contains_key(provider)
-            {
-                problems.push(format!(
-                    "device `{}`: power provider `{provider}` is not defined under [providers]",
-                    d.id
-                ));
+            for (key, binding) in [("power", &d.power), ("source", &d.source)] {
+                if let Some(Binding::Native { provider, .. }) = binding
+                    && !self.providers.contains_key(provider)
+                {
+                    problems.push(format!(
+                        "device `{}`: {key} provider `{provider}` is not defined under [providers]",
+                        d.id
+                    ));
+                }
+            }
+            for (what, v) in [("voltage", d.limits.voltage), ("current", d.limits.current)] {
+                if let Some(v) = v
+                    && !(v.is_finite() && v >= 0.0)
+                {
+                    problems.push(format!("device `{}`: limits.{what} must be >= 0", d.id));
+                }
             }
         }
 
@@ -343,13 +362,13 @@ fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn resolve_script_path(binding: PowerBinding, config_path: &Path) -> PowerBinding {
+fn resolve_script_path(binding: Binding, config_path: &Path) -> Binding {
     match binding {
-        PowerBinding::Script {
+        Binding::Script {
             script,
             params,
             timeout,
-        } if script.is_relative() => PowerBinding::Script {
+        } if script.is_relative() => Binding::Script {
             script: config_path.parent().unwrap_or(Path::new(".")).join(script),
             params,
             timeout,
@@ -389,7 +408,7 @@ mod tests {
         assert_eq!(ids, ["psu", "lamp", "dmm"]);
 
         match &c.devices[0].power {
-            Some(PowerBinding::Native {
+            Some(Binding::Native {
                 provider,
                 params,
                 timeout,
@@ -402,7 +421,7 @@ mod tests {
             other => panic!("unexpected binding {other:?}"),
         }
         match &c.devices[1].power {
-            Some(PowerBinding::Script { script, .. }) => {
+            Some(Binding::Script { script, .. }) => {
                 assert_eq!(script, Path::new("/bench/scripts/lamp.lua"));
             }
             other => panic!("unexpected binding {other:?}"),

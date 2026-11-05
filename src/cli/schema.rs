@@ -70,6 +70,18 @@ pub fn run(bench: Result<Bench>) -> Report {
                     "assumed": "inferred from the command just sent; the path cannot read its state",
                     "none": "state is unknown"
                 }
+            },
+            "voltage_source": {
+                "description": "A bench power supply: setpoints, output terminals, measurements.",
+                "commands": [
+                    "desk source set <device> <5v> <1a> [--on] [--dry-run]",
+                    "desk source output on|off <device> [--dry-run]",
+                    "desk source read <device>"
+                ],
+                "units": "values need units: v, mv, a, ma",
+                "safety": "the core refuses values above the device maximum or the device's `limits` (limit_exceeded, nothing sent); setpoints are applied before the output is switched on",
+                "verified": "per requested value: true = read back and confirmed; absent = the device can't report it (unconfirmed)",
+                "requires": "the device's mains must be on (device_off otherwise)"
             }
         },
         "commands": commands,

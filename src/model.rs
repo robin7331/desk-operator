@@ -11,6 +11,7 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     PowerSwitch,
+    VoltageSource,
 }
 
 /// Mains power state of a device.

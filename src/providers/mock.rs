@@ -11,8 +11,16 @@
 //! Settings: `latency = "200ms"` delays every operation (for timeout tests);
 //! `endpoints = ["outlet1", ...]` is what `desk provider endpoints` lists (plus anything already in
 //! the state file).
+//!
+//! It also simulates bench power supplies (`voltage_source`):
+//! `source = { provider = "sim", endpoint = "psu1", max_voltage = 30, max_current = 5, load_ohms = 10 }`.
+//! With `load_ohms` the output behaves like a resistor is connected (CV, or CC when V/R exceeds
+//! the current setpoint); without it the output is open (0 A). `blind_*` endpoints report only
+//! measurements, no setpoints or output state, like many cheap supplies.
 
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,14 +31,28 @@ use super::{Endpoint, Params, Provider, ProviderInfo};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, Power, PowerFeatures, PowerState};
 use crate::power::PowerSwitch;
+use crate::source::{Reading, SourceInfo, VoltageSource};
 
 pub const KIND: &str = "mock";
 
 /// Serialises read-modify-write of the state file within this process.
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 
-/// `{ "<provider id>": { "<endpoint>": true } }`
-type StateFile = BTreeMap<String, BTreeMap<String, bool>>;
+/// Everything the mock remembers, keyed by provider id, then endpoint.
+#[derive(Default, Serialize, Deserialize)]
+struct StateFile {
+    #[serde(default)]
+    power: BTreeMap<String, BTreeMap<String, bool>>,
+    #[serde(default)]
+    sources: BTreeMap<String, BTreeMap<String, SimPsu>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+struct SimPsu {
+    voltage_set: f64,
+    current_set: f64,
+    output: bool,
+}
 
 pub struct MockProvider {
     inner: Arc<Inner>,
@@ -74,35 +96,26 @@ fn state_path() -> Result<PathBuf> {
 impl Inner {
     fn read(&self) -> Result<StateFile> {
         match std::fs::read_to_string(&self.path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| {
-                DeskError::Internal(format!("corrupt mock state {}: {e}", self.path.display()))
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StateFile::new()),
+            // Older or foreign files simply start empty.
+            Ok(text) => Ok(serde_json::from_str(&text).unwrap_or_default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StateFile::default()),
             Err(e) => Err(e.into()),
         }
     }
 
-    fn get(&self, endpoint: &str) -> Result<bool> {
+    fn view<R>(&self, f: impl FnOnce(&StateFile) -> R) -> Result<R> {
         let _guard = FILE_LOCK
             .lock()
             .map_err(|_| DeskError::Internal("mock lock poisoned".into()))?;
-        let state = self.read()?;
-        Ok(state
-            .get(&self.id)
-            .and_then(|m| m.get(endpoint))
-            .copied()
-            .unwrap_or(false))
+        Ok(f(&self.read()?))
     }
 
-    fn put(&self, endpoint: &str, on: bool) -> Result<()> {
+    fn update<R>(&self, f: impl FnOnce(&mut StateFile) -> R) -> Result<R> {
         let _guard = FILE_LOCK
             .lock()
             .map_err(|_| DeskError::Internal("mock lock poisoned".into()))?;
         let mut state = self.read()?;
-        state
-            .entry(self.id.clone())
-            .or_default()
-            .insert(endpoint.to_string(), on);
+        let result = f(&mut state);
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -111,6 +124,56 @@ impl Inner {
             serde_json::to_string_pretty(&state).map_err(|e| DeskError::Internal(e.to_string()))?;
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, &self.path)?;
+        Ok(result)
+    }
+
+    fn get(&self, endpoint: &str) -> Result<bool> {
+        self.view(|s| {
+            s.power
+                .get(&self.id)
+                .and_then(|m| m.get(endpoint))
+                .copied()
+                .unwrap_or(false)
+        })
+    }
+
+    fn put(&self, endpoint: &str, on: bool) -> Result<()> {
+        self.update(|s| {
+            s.power
+                .entry(self.id.clone())
+                .or_default()
+                .insert(endpoint.to_string(), on);
+        })
+    }
+
+    fn psu(&self, endpoint: &str) -> Result<SimPsu> {
+        self.view(|s| {
+            s.sources
+                .get(&self.id)
+                .and_then(|m| m.get(endpoint))
+                .copied()
+                .unwrap_or_default()
+        })
+    }
+
+    fn update_psu(&self, endpoint: &str, f: impl FnOnce(&mut SimPsu)) -> Result<()> {
+        self.update(|s| {
+            f(s.sources
+                .entry(self.id.clone())
+                .or_default()
+                .entry(endpoint.to_string())
+                .or_default());
+        })
+    }
+
+    async fn simulate(&self, endpoint: &str) -> Result<()> {
+        tokio::time::sleep(self.latency).await;
+        if endpoint.starts_with("fail_") {
+            return Err(DeskError::EndpointUnavailable {
+                endpoint: endpoint.to_string(),
+                message: "simulated failure".into(),
+            });
+        }
         Ok(())
     }
 }
@@ -126,15 +189,9 @@ impl Provider for MockProvider {
 
     async fn endpoints(&self, _capability: Capability) -> Result<Vec<Endpoint>> {
         tokio::time::sleep(self.inner.latency).await;
-        let known = {
-            let _guard = FILE_LOCK
-                .lock()
-                .map_err(|_| DeskError::Internal("mock lock poisoned".into()))?;
-            self.inner
-                .read()?
-                .remove(&self.inner.id)
-                .unwrap_or_default()
-        };
+        let known = self
+            .inner
+            .view(|s| s.power.get(&self.inner.id).cloned().unwrap_or_default())?;
         let mut ids: Vec<String> = self.inner.endpoints.clone();
         ids.extend(
             known
@@ -165,6 +222,23 @@ impl Provider for MockProvider {
             .collect())
     }
 
+    fn voltage_source(&self, params: &toml::Table) -> Result<Box<dyn VoltageSource>> {
+        let params = Params::new(
+            params,
+            format!("source binding for provider `{}`", self.inner.id),
+        );
+        params.only(&["endpoint", "max_voltage", "max_current", "load_ohms"])?;
+        Ok(Box::new(SimSource {
+            inner: self.inner.clone(),
+            endpoint: params.required_str("endpoint")?.to_string(),
+            info: SourceInfo {
+                max_voltage: Some(params.float("max_voltage")?.unwrap_or(30.0)),
+                max_current: Some(params.float("max_current")?.unwrap_or(5.0)),
+            },
+            load_ohms: params.float("load_ohms")?,
+        }))
+    }
+
     fn power_switch(&self, params: &toml::Table) -> Result<Box<dyn PowerSwitch>> {
         let params = Params::new(
             params,
@@ -185,14 +259,7 @@ struct MockSwitch {
 
 impl MockSwitch {
     async fn simulate(&self) -> Result<()> {
-        tokio::time::sleep(self.inner.latency).await;
-        if self.endpoint.starts_with("fail_") {
-            return Err(DeskError::EndpointUnavailable {
-                endpoint: self.endpoint.clone(),
-                message: "simulated failure".into(),
-            });
-        }
-        Ok(())
+        self.inner.simulate(&self.endpoint).await
     }
 }
 
@@ -221,5 +288,60 @@ impl PowerSwitch for MockSwitch {
         Ok(PowerState::real(Power::from_bool(
             self.inner.get(&self.endpoint)?,
         )))
+    }
+}
+
+struct SimSource {
+    inner: Arc<Inner>,
+    endpoint: String,
+    info: SourceInfo,
+    load_ohms: Option<f64>,
+}
+
+#[async_trait]
+impl VoltageSource for SimSource {
+    async fn info(&self) -> Result<SourceInfo> {
+        self.inner.simulate(&self.endpoint).await?;
+        Ok(self.info)
+    }
+
+    async fn set_voltage(&self, volts: f64) -> Result<()> {
+        self.inner.simulate(&self.endpoint).await?;
+        self.inner
+            .update_psu(&self.endpoint, |p| p.voltage_set = volts)
+    }
+
+    async fn set_current(&self, amps: f64) -> Result<()> {
+        self.inner.simulate(&self.endpoint).await?;
+        self.inner
+            .update_psu(&self.endpoint, |p| p.current_set = amps)
+    }
+
+    async fn set_output(&self, on: bool) -> Result<()> {
+        self.inner.simulate(&self.endpoint).await?;
+        self.inner.update_psu(&self.endpoint, |p| p.output = on)
+    }
+
+    async fn read(&self) -> Result<Reading> {
+        self.inner.simulate(&self.endpoint).await?;
+        let p = self.inner.psu(&self.endpoint)?;
+        let (voltage, current) = match (p.output, self.load_ohms) {
+            (false, _) => (0.0, 0.0),
+            (true, None) => (p.voltage_set, 0.0),
+            // CV until V/R exceeds the current setpoint, then CC.
+            (true, Some(r)) if p.voltage_set / r > p.current_set => {
+                (p.current_set * r, p.current_set)
+            }
+            (true, Some(r)) => (p.voltage_set, p.voltage_set / r),
+        };
+        let blind = self.endpoint.starts_with("blind_");
+        Ok(Reading {
+            output: (!blind).then_some(p.output),
+            voltage_set: (!blind).then_some(p.voltage_set),
+            current_set: (!blind).then_some(p.current_set),
+            voltage: Some(voltage),
+            current: Some(current),
+            power: Some(voltage * current),
+        })
     }
 }

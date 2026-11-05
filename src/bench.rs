@@ -4,12 +4,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{Config, Device, PowerBinding};
+use crate::config::{Binding, Config, Device};
 use crate::error::{DeskError, Result};
-use crate::model::{Capability, PowerState};
+use crate::model::{Capability, Confidence, Power, PowerState};
 use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
 use crate::providers::{Endpoint, ProviderInfo, Registry};
-use crate::script::{DeviceInfo, ScriptSwitch};
+use crate::script::{DeviceInfo, ScriptSource, ScriptSpec, ScriptSwitch};
+use crate::source::{self, Report as SourceReport, Request, VoltageSource};
 
 pub struct Bench {
     pub config: Config,
@@ -41,7 +42,7 @@ impl Bench {
             .as_ref()
             .ok_or_else(|| DeskError::NoPowerPath(device.id.clone()))?;
         Ok(match binding {
-            PowerBinding::Native {
+            Binding::Native {
                 provider,
                 params,
                 timeout,
@@ -49,17 +50,13 @@ impl Bench {
                 self.providers.get(provider)?.power_switch(params)?,
                 timeout.unwrap_or(power::DEFAULT_TIMEOUT),
             ),
-            PowerBinding::Script {
+            Binding::Script {
                 script,
                 params,
                 timeout,
             } => {
                 let timeout = timeout.unwrap_or(power::DEFAULT_SCRIPT_TIMEOUT);
-                let info = DeviceInfo {
-                    id: &device.id,
-                    name: &device.name,
-                };
-                let sw = ScriptSwitch::load(info, script, params, timeout, self.providers.clone())?;
+                let sw = ScriptSwitch::load(self.script_spec(device, script, params, timeout))?;
                 (Box::new(sw), timeout)
             }
         })
@@ -86,6 +83,93 @@ impl Bench {
         Run {
             result,
             log: sw.take_log(),
+        }
+    }
+
+    fn script_spec<'a>(
+        &self,
+        device: &'a Device,
+        path: &'a Path,
+        params: &'a toml::Table,
+        timeout: Duration,
+    ) -> ScriptSpec<'a> {
+        ScriptSpec {
+            device: DeviceInfo {
+                id: &device.id,
+                name: &device.name,
+            },
+            path,
+            params,
+            timeout,
+            providers: self.providers.clone(),
+        }
+    }
+
+    fn voltage_source(&self, device: &Device) -> Result<(Box<dyn VoltageSource>, Duration)> {
+        let binding = device
+            .source
+            .as_ref()
+            .ok_or_else(|| DeskError::CapabilityMissing {
+                device: device.id.clone(),
+                key: "source",
+                capability: "voltage_source",
+            })?;
+        let timeout = binding.timeout().unwrap_or(source::DEFAULT_TIMEOUT);
+        let src: Box<dyn VoltageSource> = match binding {
+            Binding::Native {
+                provider, params, ..
+            } => self.providers.get(provider)?.voltage_source(params)?,
+            Binding::Script { script, params, .. } => Box::new(ScriptSource::load(
+                self.script_spec(device, script, params, timeout),
+            )?),
+        };
+        Ok((src, timeout))
+    }
+
+    /// Mains first: a device whose power path reads `off` can't be reached, so say that instead
+    /// of failing later with "port not found". Unknown or unreadable power doesn't block.
+    async fn require_mains(&self, device: &Device) -> Result<()> {
+        if device.power.is_none() {
+            return Ok(());
+        }
+        match self.power_state(device).await.result {
+            Ok(PowerState {
+                state: Power::Off,
+                confidence: Confidence::Real,
+            }) => Err(DeskError::DeviceOff(device.id.clone())),
+            _ => Ok(()),
+        }
+    }
+
+    /// Apply a `voltage_source` request (or just read, if it's empty) in one driver session.
+    pub async fn source(&self, device: &Device, req: Request, dry_run: bool) -> Run<SourceReport> {
+        // Capability and binding errors first: they're about the config, not the device state.
+        let (src, timeout) = match self.voltage_source(device) {
+            Ok(v) => v,
+            Err(e) => {
+                return Run {
+                    result: Err(e),
+                    log: Vec::new(),
+                };
+            }
+        };
+        if let Err(e) = self.require_mains(device).await {
+            return Run {
+                result: Err(e),
+                log: Vec::new(),
+            };
+        }
+        let what = format!("controlling `{}`", device.id);
+        let result = source::session(
+            src.as_ref(),
+            timeout,
+            &what,
+            source::apply(src.as_ref(), req, device.limits, dry_run),
+        )
+        .await;
+        Run {
+            result,
+            log: src.take_log(),
         }
     }
 

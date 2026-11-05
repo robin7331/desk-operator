@@ -2,10 +2,11 @@ use serde::Serialize;
 
 use super::DeviceCmd;
 use crate::bench::Bench;
-use crate::config::{Device, PowerBinding};
+use crate::config::{Binding, Device};
 use crate::error::Result;
 use crate::model::Capability;
 use crate::output::{Report, middle_ellipsis, table};
+use crate::source::{Limits, fmt_a, fmt_v};
 
 #[derive(Serialize)]
 pub(super) struct DeviceView<'a> {
@@ -13,7 +14,14 @@ pub(super) struct DeviceView<'a> {
     name: &'a str,
     aliases: &'a [String],
     capabilities: Vec<Capability>,
-    power: Option<&'a PowerBinding>,
+    power: Option<&'a Binding>,
+    source: Option<&'a Binding>,
+    #[serde(skip_serializing_if = "limits_empty")]
+    limits: Limits,
+}
+
+fn limits_empty(l: &Limits) -> bool {
+    l.voltage.is_none() && l.current.is_none()
 }
 
 impl<'a> DeviceView<'a> {
@@ -22,12 +30,17 @@ impl<'a> DeviceView<'a> {
         if d.power.is_some() {
             capabilities.push(Capability::PowerSwitch);
         }
+        if d.source.is_some() {
+            capabilities.push(Capability::VoltageSource);
+        }
         DeviceView {
             id: &d.id,
             name: &d.name,
             aliases: &d.aliases,
             capabilities,
             power: d.power.as_ref(),
+            source: d.source.as_ref(),
+            limits: d.limits,
         }
     }
 }
@@ -38,14 +51,14 @@ const PATH_WIDTH: usize = 48;
 pub(super) fn power_path(d: &Device) -> String {
     d.power
         .as_ref()
-        .map_or_else(|| "(none)".to_string(), PowerBinding::describe)
+        .map_or_else(|| "(none)".to_string(), Binding::describe)
 }
 
 /// The short "via" column: provider id or script name.
 pub(super) fn via(d: &Device) -> String {
     d.power
         .as_ref()
-        .map_or_else(|| "-".to_string(), PowerBinding::summary)
+        .map_or_else(|| "-".to_string(), Binding::summary)
 }
 
 pub fn run(bench: &Bench, cmd: DeviceCmd) -> Result<Report> {
@@ -87,7 +100,7 @@ pub fn run(bench: &Bench, cmd: DeviceCmd) -> Result<Report> {
             let timeout = d
                 .power
                 .as_ref()
-                .and_then(PowerBinding::timeout)
+                .and_then(Binding::timeout)
                 .map(|t| format!(", timeout {}", humantime::format_duration(t)))
                 .unwrap_or_default();
             let human = format!(
@@ -106,6 +119,17 @@ pub fn run(bench: &Bench, cmd: DeviceCmd) -> Result<Report> {
                 },
                 power_path(d),
             );
+            let mut human = human;
+            if let Some(source) = &d.source {
+                human.push_str(&format!("source:       {}\n", source.describe()));
+            }
+            if !limits_empty(&d.limits) {
+                let parts: Vec<String> = [d.limits.voltage.map(fmt_v), d.limits.current.map(fmt_a)]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                human.push_str(&format!("limits:       {}\n", parts.join(", ")));
+            }
             Ok(Report::new(&serde_json::json!({ "device": view }), human))
         }
     }

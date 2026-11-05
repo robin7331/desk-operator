@@ -19,6 +19,7 @@ Keep it lean: build only what the current milestone needs.
 | **Device** | Something on the bench, such as `psu` or `iron`. It has an id, a name, aliases and capabilities. |
 | **Capability** | A standard, vendor-neutral interface defined by the core: `power_switch` (MVP); later `voltage_source`, `electronic_load`, `meter`, `heater`. |
 | **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which belongs to `voltage_source`. Never mix "power" and "output". |
+| **Capability binding** | One config key per capability: `power` (power_switch), `source` (voltage_source); later `load`, `meter`, … Each is a native provider binding or a Lua script. |
 | **Control path** | How a device is commanded (serial, USBTMC, LAN, …). Post-MVP. |
 | **Provider** | A configured connection to something that can switch or control many things, such as Home Assistant, a Shelly, a USB relay board, or an RF dongle. You configure it once. |
 | **Endpoint** | One thing a provider can list and control, such as an HA entity `switch.desk_outlet_1`. Providers can list their endpoints, which is what makes pickers possible. |
@@ -85,6 +86,7 @@ src/
   config.rs            load/validate desk.toml, Device, PowerBinding, device resolution
   model.rs             Capability, Power, PowerState, PowerFeatures
   power.rs             PowerSwitch trait + switch semantics (idempotent, read-back verification)
+  source.rs            VoltageSource trait + semantics (limits, setpoints before output, verify, sessions)
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
   providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
@@ -95,6 +97,7 @@ skills/desk-operator/  SKILL.md for agents, embedded via include_str! (`desk ski
 tests/cli.rs           end-to-end tests of the binary against the mock provider
 tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
+tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
 ```
 
 ## Development

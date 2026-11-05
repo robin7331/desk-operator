@@ -7,6 +7,7 @@ mod output;
 mod power;
 mod providers;
 mod script;
+mod source;
 
 use clap::Parser;
 use clap::error::ErrorKind;

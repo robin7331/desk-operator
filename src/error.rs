@@ -28,6 +28,24 @@ pub enum DeskError {
     #[error("device `{0}` has no power path configured")]
     NoPowerPath(String),
 
+    #[error("device `{device}` has no `{key}` binding, so it can't do {capability}")]
+    CapabilityMissing {
+        device: String,
+        key: &'static str,
+        capability: &'static str,
+    },
+
+    #[error("device `{0}` is powered off (mains)")]
+    DeviceOff(String),
+
+    #[error("{what} {requested} exceeds the {kind} of {limit}")]
+    LimitExceeded {
+        what: String,
+        requested: String,
+        limit: String,
+        kind: String,
+    },
+
     #[error("provider `{provider}` unreachable: {message}")]
     ProviderUnreachable { provider: String, message: String },
 
@@ -59,6 +77,9 @@ impl DeskError {
             DeskError::DeviceNotFound { .. } => "device_not_found",
             DeskError::DeviceAmbiguous { .. } => "device_ambiguous",
             DeskError::NoPowerPath(_) => "no_power_path",
+            DeskError::CapabilityMissing { .. } => "capability_missing",
+            DeskError::DeviceOff(_) => "device_off",
+            DeskError::LimitExceeded { .. } => "limit_exceeded",
             DeskError::ProviderUnreachable { .. } => "provider_unreachable",
             DeskError::EndpointUnavailable { .. } => "endpoint_unavailable",
             DeskError::StateUnknown(_) => "state_unknown",
@@ -76,13 +97,17 @@ impl DeskError {
             DeskError::Usage(_)
             | DeskError::DeviceNotFound { .. }
             | DeskError::DeviceAmbiguous { .. } => 2,
-            DeskError::ConfigInvalid(_) | DeskError::NoPowerPath(_) => 3,
+            DeskError::ConfigInvalid(_)
+            | DeskError::NoPowerPath(_)
+            | DeskError::CapabilityMissing { .. } => 3,
             DeskError::ProviderUnreachable { .. }
             | DeskError::EndpointUnavailable { .. }
-            | DeskError::StateUnknown(_) => 4,
+            | DeskError::StateUnknown(_)
+            | DeskError::DeviceOff(_) => 4,
             DeskError::ScriptFailed(_) => 5,
             DeskError::Timeout { .. } => 6,
             DeskError::VerifyFailed { .. } => 7,
+            DeskError::LimitExceeded { .. } => 8,
         }
     }
 
@@ -94,6 +119,10 @@ impl DeskError {
             }
             DeskError::NoPowerPath(_) => Some("add a `power = { ... }` binding to the device"),
             DeskError::StateUnknown(_) => Some("use `desk power on` or `desk power off` instead"),
+            DeskError::DeviceOff(_) => Some("switch its mains on first: `desk power on <device>`"),
+            DeskError::LimitExceeded { .. } => Some(
+                "use a lower value (a bench `limit` can be raised in the device's config; a device maximum can't)",
+            ),
             _ => None,
         }
     }
@@ -141,6 +170,21 @@ pub const ERROR_CODES: &[(&str, i32, &str)] = &[
     ),
     ("no_power_path", 3, "the device has no power binding"),
     (
+        "capability_missing",
+        3,
+        "the device has no binding for this capability (e.g. no `source`)",
+    ),
+    (
+        "device_off",
+        4,
+        "the device's mains power is off, so it can't be reached",
+    ),
+    (
+        "limit_exceeded",
+        8,
+        "refused: the value exceeds the device maximum or the bench `limits`; nothing was sent",
+    ),
+    (
         "provider_unreachable",
         4,
         "provider offline, unreachable, or authentication failed",
@@ -183,6 +227,18 @@ mod tests {
             },
             DeskError::ConfigInvalid(String::new()),
             DeskError::NoPowerPath(String::new()),
+            DeskError::CapabilityMissing {
+                device: String::new(),
+                key: "",
+                capability: "",
+            },
+            DeskError::DeviceOff(String::new()),
+            DeskError::LimitExceeded {
+                what: String::new(),
+                requested: String::new(),
+                limit: String::new(),
+                kind: String::new(),
+            },
             DeskError::ProviderUnreachable {
                 provider: String::new(),
                 message: String::new(),
