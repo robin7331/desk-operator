@@ -2,11 +2,11 @@ use serde::Serialize;
 
 use super::DeviceCmd;
 use crate::bench::Bench;
-use crate::config::{Binding, Device};
+use crate::config::{Binding, Device, DeviceLimits};
 use crate::error::Result;
 use crate::model::Capability;
 use crate::output::{Report, middle_ellipsis, table};
-use crate::source::{Limits, fmt_a, fmt_v};
+use crate::source::{fmt_a, fmt_v};
 
 #[derive(Serialize)]
 pub(super) struct DeviceView<'a> {
@@ -18,12 +18,8 @@ pub(super) struct DeviceView<'a> {
     capabilities: Vec<Capability>,
     power: Option<&'a Binding>,
     source: Option<&'a Binding>,
-    #[serde(skip_serializing_if = "limits_empty")]
-    limits: Limits,
-}
-
-fn limits_empty(l: &Limits) -> bool {
-    l.voltage.is_none() && l.current.is_none()
+    #[serde(skip_serializing_if = "DeviceLimits::is_empty")]
+    limits: DeviceLimits,
 }
 
 impl<'a> DeviceView<'a> {
@@ -129,12 +125,13 @@ pub fn run(bench: &Bench, cmd: DeviceCmd) -> Result<Report> {
             if let Some(source) = &d.source {
                 human.push_str(&format!("source:       {}\n", source.describe()));
             }
-            if !limits_empty(&d.limits) {
-                let parts: Vec<String> = [d.limits.voltage.map(fmt_v), d.limits.current.map(fmt_a)]
+            if !d.limits.is_empty() {
+                let l = d.limits.source;
+                let parts: Vec<String> = [l.voltage.map(fmt_v), l.current.map(fmt_a)]
                     .into_iter()
                     .flatten()
                     .collect();
-                human.push_str(&format!("limits:       {}\n", parts.join(", ")));
+                human.push_str(&format!("limits:       source {}\n", parts.join(", ")));
             }
             Ok(Report::new(&serde_json::json!({ "device": view }), human))
         }

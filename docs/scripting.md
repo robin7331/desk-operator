@@ -103,8 +103,8 @@ A script can also be the driver of a capability. For a bench power supply (`volt
 
 ```toml
 [devices.psu]
-source = { script = "drivers/my_psu.lua", timeout = "10s", params = { model = "x" } }
-limits = { voltage = 12, current = 2 }   # bench safety, enforced by desk, not by the driver
+source = { script = "drivers/my_psu.lua", timeout = "10s", ratings = { max_voltage = 30, max_current = 5 } }
+limits = { source = { voltage = 12, current = 2 } }   # bench safety, enforced by desk, not by the driver
 ```
 
 ```lua
@@ -114,10 +114,27 @@ function set_output(ctx, on) ... end       -- required
 function read(ctx)                         -- required: report what the device can tell
   return { output = true, voltage_set = 5, current_set = 1, voltage = 5.01, current = 0.2, power = 1.0 }
 end
-function info(ctx) return { max_voltage = 30, max_current = 5 } end   -- optional, enables max checks
+function info(ctx) return { max_voltage = 30, max_current = 5 } end   -- optional: maximums the device reports
 function open(ctx) ... end                 -- optional: start of a session (connect, handshake)
 function close(ctx) ... end                -- optional: end of a session
 ```
+
+Declare the device's maximums as `ratings` in the binding (`ratings = { max_voltage = 30,
+max_current = 5 }`); desk enforces them (and the stricter value if `info()` also reports some).
+
+**Declare your params** so desk can check them: unknown names, wrong types and missing required
+params become config errors, and defaults are filled in before your functions run.
+
+```lua
+PARAMS = {
+  address   = { type = "integer", required = true, doc = "bus address" },
+  settle_ms = { type = "number", default = 300, doc = "wait before measuring" },
+}
+```
+
+Types: `string`, `number`, `integer`, `boolean`, `table`, `array`. Without `PARAMS`, params are
+passed through unchecked (fine for your own quick scripts; library drivers must declare it, see
+[`definition-format.md`](definition-format.md)).
 
 Drivers only implement primitives. Everything users rely on is done by desk itself, the same for
 every driver:

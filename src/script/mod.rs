@@ -60,6 +60,45 @@ pub struct Engine {
     timeout: Duration,
     deadline: Arc<Mutex<Option<Instant>>>,
     log: Arc<Mutex<Vec<String>>>,
+    params: Option<Vec<ParamSpec>>,
+}
+
+/// One entry of a driver's `PARAMS = { name = { type = …, required = …, default = …, doc = … } }`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ParamSpec {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+}
+
+const PARAM_TYPES: &[&str] = &["string", "number", "integer", "boolean", "table", "array"];
+
+fn toml_type_fits(kind: &str, v: &toml::Value) -> bool {
+    matches!(
+        (kind, v),
+        ("string", toml::Value::String(_))
+            | ("number", toml::Value::Float(_) | toml::Value::Integer(_))
+            | ("integer", toml::Value::Integer(_))
+            | ("boolean", toml::Value::Boolean(_))
+            | ("table", toml::Value::Table(_))
+            | ("array", toml::Value::Array(_))
+    )
+}
+
+fn json_type_fits(kind: &str, v: &serde_json::Value) -> bool {
+    matches!(
+        (kind, v),
+        ("string", serde_json::Value::String(_))
+            | ("number", serde_json::Value::Number(_))
+            | ("boolean", serde_json::Value::Bool(_))
+            | ("table", serde_json::Value::Object(_))
+            | ("array", serde_json::Value::Array(_))
+    ) || (kind == "integer" && v.as_i64().is_some())
 }
 
 impl Engine {
@@ -101,6 +140,7 @@ impl Engine {
             timeout,
             deadline,
             log,
+            params: None,
         };
         engine
             .lua
@@ -109,7 +149,107 @@ impl Engine {
             .exec()
             .map_err(|e| engine.error(e))?;
         *engine.deadline.lock().map_err(poisoned)? = None;
-        Ok(engine)
+        let declared = engine.declared_params()?;
+        if let Some(specs) = &declared {
+            engine.check_params(specs, params)?;
+        }
+        Ok(Engine {
+            params: declared,
+            ..engine
+        })
+    }
+
+    /// The driver's `PARAMS` declaration, if it has one.
+    pub fn params(&self) -> Option<&[ParamSpec]> {
+        self.params.as_deref()
+    }
+
+    fn declared_params(&self) -> Result<Option<Vec<ParamSpec>>> {
+        let bad =
+            |m: String| DeskError::ConfigInvalid(format!("{}: PARAMS: {m}", self.file_name()));
+        let table = match self.lua.globals().get::<Value>("PARAMS") {
+            Ok(Value::Nil) | Err(_) => return Ok(None),
+            Ok(Value::Table(t)) => t,
+            Ok(other) => return Err(bad(format!("must be a table, got {}", other.type_name()))),
+        };
+        let mut specs = Vec::new();
+        for pair in table.pairs::<String, Table>() {
+            let (name, spec) =
+                pair.map_err(|_| bad("entries look like `name = { type = \"number\" }`".into()))?;
+            let kind: String = spec
+                .get("type")
+                .map_err(|_| bad(format!("`{name}` needs `type = \"…\"`")))?;
+            if !PARAM_TYPES.contains(&kind.as_str()) {
+                return Err(bad(format!(
+                    "`{name}`: unknown type `{kind}` (one of: {})",
+                    PARAM_TYPES.join(", ")
+                )));
+            }
+            let required: Option<bool> = spec.get("required").map_err(|e| bad(e.to_string()))?;
+            let default: Value = spec.get("default").map_err(|e| bad(e.to_string()))?;
+            let default = if default.is_nil() {
+                None
+            } else {
+                let v: serde_json::Value = self
+                    .lua
+                    .from_value(default)
+                    .map_err(|e| bad(e.to_string()))?;
+                if !json_type_fits(&kind, &v) {
+                    return Err(bad(format!(
+                        "`{name}`: default doesn't match type `{kind}`"
+                    )));
+                }
+                Some(v)
+            };
+            let doc: Option<String> = spec.get("doc").map_err(|e| bad(e.to_string()))?;
+            specs.push(ParamSpec {
+                name,
+                kind,
+                required: required.unwrap_or(false),
+                default,
+                doc,
+            });
+        }
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Some(specs))
+    }
+
+    /// Validate a binding's params against `PARAMS`, then fill in defaults.
+    fn check_params(&self, specs: &[ParamSpec], given: &toml::Table) -> Result<()> {
+        let bad =
+            |m: String| DeskError::ConfigInvalid(format!("params for {}: {m}", self.file_name()));
+        for (k, v) in given {
+            let Some(spec) = specs.iter().find(|s| s.name == *k) else {
+                let known: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+                return Err(bad(format!(
+                    "unknown param `{k}` (the driver accepts: {})",
+                    if known.is_empty() {
+                        "none".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                )));
+            };
+            if !toml_type_fits(&spec.kind, v) {
+                return Err(bad(format!("`{k}` must be a {}", spec.kind)));
+            }
+        }
+        let params: Table = self.ctx.get("params").map_err(internal)?;
+        for spec in specs {
+            if given.contains_key(&spec.name) {
+                continue;
+            }
+            match &spec.default {
+                Some(d) => params
+                    .set(spec.name.as_str(), self.lua.to_value(d).map_err(internal)?)
+                    .map_err(internal)?,
+                None if spec.required => {
+                    return Err(bad(format!("missing required param `{}`", spec.name)));
+                }
+                None => {}
+            }
+        }
+        Ok(())
     }
 
     /// Whether the script defines a global function `name`.

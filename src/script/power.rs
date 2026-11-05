@@ -29,6 +29,10 @@ impl ScriptSwitch {
         Ok(ScriptSwitch { engine, has_state })
     }
 
+    pub fn params(&self) -> Option<&[super::ParamSpec]> {
+        self.engine.params()
+    }
+
     fn bad_state(&self, got: &str) -> DeskError {
         DeskError::ScriptFailed(format!(
             "{}: state() must return \"on\", \"off\", \"unknown\", a boolean or nil, got {got}",

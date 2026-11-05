@@ -18,7 +18,7 @@ latency = "400ms"
 aliases = ["supply"]
 power   = { provider = "sim", endpoint = "mains" }
 source  = { provider = "sim", endpoint = "psu", max_voltage = 30, max_current = 5, load_ohms = 10 }
-limits  = { voltage = 15, current = 2 }
+limits  = { source = { voltage = 15, current = 2 } }
 
 # Same instrument, no bench limits (to put the device into a state the limited one must refuse).
 [devices.psu_unlimited]
@@ -26,7 +26,7 @@ source = { provider = "sim", endpoint = "psu", max_voltage = 30, max_current = 5
 
 [devices.cheap]
 source = { provider = "sim", endpoint = "blind_psu" }
-limits = { voltage = 12 }
+limits = { source = { voltage = 12 } }
 
 [devices.broken]
 source = { provider = "sim", endpoint = "fail_psu" }
@@ -297,7 +297,7 @@ kind = "home-assistant"
 url = "http://127.0.0.1:9"
 token_file = "t"
 [devices.a]
-limits = { voltage = -1 }
+limits = { source = { voltage = -1 } }
 [devices.b]
 source = { provider = "nope", endpoint = "x" }
 "#,
@@ -305,7 +305,7 @@ source = { provider = "nope", endpoint = "x" }
     let out = b.run(&["--json", "device", "list"]);
     assert_eq!(out.code, 3);
     let msg = out.json()["error"]["message"].as_str().unwrap().to_string();
-    assert!(msg.contains("limits.voltage must be >= 0"), "{msg}");
+    assert!(msg.contains("limits.source.voltage must be >= 0"), "{msg}");
     assert!(msg.contains("source provider `nope`"), "{msg}");
 
     let b = Bench::with(
@@ -347,7 +347,7 @@ fn schema_and_device_views_show_the_capability() {
         .map(|c| c.as_str().unwrap())
         .collect();
     assert_eq!(caps, ["power_switch", "voltage_source"]);
-    assert!(close(&psu["limits"]["voltage"], 15.0));
+    assert!(close(&psu["limits"]["source"]["voltage"], 15.0));
     assert!(d["capabilities"]["voltage_source"].is_object());
     let commands: Vec<&str> = d["commands"]
         .as_array()
@@ -364,8 +364,20 @@ fn schema_and_device_views_show_the_capability() {
             .contains("capabilities: power_switch, voltage_source")
     );
     assert!(
-        out.stdout.contains("limits:       15.00 V, 2.000 A"),
+        out.stdout.contains("limits:       source 15.00 V, 2.000 A"),
         "{}",
         out.stdout
+    );
+}
+
+#[test]
+fn old_style_limits_explain_the_new_form() {
+    let b = Bench::with("[devices.psu]\nlimits = { voltage = 12 }\n");
+    let out = b.run(&["--json", "device", "list"]);
+    assert_eq!(out.code, 3);
+    let msg = out.json()["error"]["message"].as_str().unwrap().to_string();
+    assert!(
+        msg.contains("limits = { source = { voltage = … } }"),
+        "{msg}"
     );
 }

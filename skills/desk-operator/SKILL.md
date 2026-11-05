@@ -107,7 +107,7 @@ model   = "vendor/model"                                        # from `desk lib
 aliases = ["supply"]
 power   = { provider = "ha", entity = "switch.desk_outlet_1" }  # from `desk provider endpoints`
 source  = { port = { serial_number = "…" } }                    # which unit, from `desk port list`
-limits  = { voltage = 12, current = 2 }                         # ask the user for bench limits
+limits  = { source = { voltage = 12, current = 2 } }                         # ask the user for bench limits
 ```
 
 Values in the device merge into the definition's bindings. Never copy bench-specific things

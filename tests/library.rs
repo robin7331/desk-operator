@@ -6,15 +6,15 @@ use std::process::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
-/// A PSU simulated inside the driver (state lives for one command). Its maximum comes from params.
+/// A PSU simulated inside the driver (state lives for one command).
 const SIM_DRIVER: &str = r#"
+PARAMS = { flavor = { type = "string", default = "definition", doc = "which copy of the driver" } }
 local s = { v = 0, a = 0, out = false }
-function info(ctx) return { max_voltage = ctx.params.max, max_current = 5 } end
 function set_voltage(ctx, v) s.v = v end
 function set_current(ctx, a) s.a = a end
 function set_output(ctx, on) s.out = on end
 function read(ctx)
-  ctx.log("driver " .. (ctx.params.flavor or "definition"))
+  ctx.log("driver " .. ctx.params.flavor)
   return { output = s.out, voltage_set = s.v, current_set = s.a, voltage = s.out and s.v or 0 }
 end
 "#;
@@ -23,13 +23,13 @@ const DEFINITION: &str = r#"
 [device]
 id       = "acme/psu-3000"
 name     = "ACME PSU 3000"
-kind     = "bench power supply"
 requires = "desk-operator >= 0.1"
 status   = "community"
+sources  = ["https://example.com/acme-psu-3000-manual.pdf"]
 
 [source]
-script = "../shared/sim.lua"
-params = { max = 30.0 }
+script  = "../shared/sim.lua"
+ratings = { max_voltage = 30.0, max_current = 5.0 }
 "#;
 
 struct Bench {
@@ -95,7 +95,9 @@ impl Bench {
 
 #[test]
 fn model_supplies_bindings_and_name() {
-    let b = Bench::new("[devices.psu]\nmodel = \"acme/psu-3000\"\nlimits = { voltage = 12 }\n");
+    let b = Bench::new(
+        "[devices.psu]\nmodel = \"acme/psu-3000\"\nlimits = { source = { voltage = 12 } }\n",
+    );
     let d = b.run(&["--json", "device", "show", "psu"]).json();
     let dev = &d["data"]["device"];
     assert_eq!(dev["model"], "acme/psu-3000");
@@ -115,7 +117,7 @@ fn model_supplies_bindings_and_name() {
 #[test]
 fn own_values_merge_over_the_definition() {
     let b = Bench::new(
-        "[devices.psu]\nmodel = \"acme/psu-3000\"\nname = \"Mine\"\nsource = { params = { max = 12.0 } }\n",
+        "[devices.psu]\nmodel = \"acme/psu-3000\"\nname = \"Mine\"\nsource = { ratings = { max_voltage = 12.0 } }\n",
     );
     let out = b.run(&["--json", "source", "set", "psu", "13v"]);
     assert_eq!(out.code, 8, "{}", out.stdout);
@@ -139,7 +141,7 @@ fn own_values_merge_over_the_definition() {
 #[test]
 fn own_script_replaces_the_definition() {
     let b = Bench::new(
-        "[devices.psu]\nmodel = \"acme/psu-3000\"\nsource = { script = \"mine.lua\", params = { max = 30.0, flavor = \"mine\" } }\n",
+        "[devices.psu]\nmodel = \"acme/psu-3000\"\nsource = { script = \"mine.lua\", params = { flavor = \"mine\" } }\n",
     );
     b.write("mine.lua", SIM_DRIVER);
     let out = b.run(&["--json", "source", "read", "psu"]);
@@ -199,7 +201,7 @@ fn definitions_may_not_contain_bench_specific_bindings() {
     let b = Bench::new("[devices.x]\nmodel = \"acme/relay\"\n");
     b.write(
         "devices/acme/relay/device.toml",
-        "[device]\nid = \"acme/relay\"\nname = \"Relay\"\n[power]\nprovider = \"ha\"\nentity = \"switch.x\"\n",
+        "[device]\nid = \"acme/relay\"\nname = \"Relay\"\nrequires = \"desk-operator >= 0.1\"\nstatus = \"community\"\n[power]\nprovider = \"ha\"\nentity = \"switch.x\"\n",
     );
     let out = b.run(&["--json", "device", "list"]);
     assert_eq!(out.code, 3);
@@ -344,11 +346,371 @@ fn library_show() {
     let b = Bench::new("");
     let out = b.run(&["library", "show", "acme/psu-3000"]);
     assert_eq!(out.code, 0);
-    assert!(out.stdout.contains("[source.params]"), "{}", out.stdout);
+    assert!(out.stdout.contains("[source.ratings]"), "{}", out.stdout);
     assert!(out.stdout.contains("model = \"acme/psu-3000\""));
     let out = b.run(&["--json", "library", "show", "fnirsi/ips3608"]);
-    assert_eq!(
-        out.json()["data"]["definition"]["status"],
-        "tested on hardware"
+    assert_eq!(out.json()["data"]["definition"]["status"], "tested");
+}
+
+/// A local definition `acme/<model>` with the given [device] fields and [source] body.
+fn definition(b: &Bench, model: &str, device_extra: &str, source: &str) {
+    b.write(
+        &format!("devices/acme/{model}/device.toml"),
+        &format!(
+            "[device]\nid = \"acme/{model}\"\nname = \"X\"\nrequires = \"desk-operator >= 0.1\"\n{device_extra}\n[source]\nscript = \"../shared/sim.lua\"\n{source}\n"
+        ),
     );
+}
+
+fn list_error(b: &Bench, id: &str) -> String {
+    let j = b.run(&["--json", "library", "list"]).json();
+    j["data"]["definitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == id)
+        .unwrap_or_else(|| panic!("{id} not listed"))["error"]["message"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[test]
+fn format_rules_for_definitions() {
+    let b = Bench::new("");
+    let ratings = "ratings = { max_voltage = 30.0, max_current = 5.0 }";
+    definition(&b, "no-ratings", "status = \"community\"", "");
+    definition(
+        &b,
+        "half-ratings",
+        "status = \"community\"",
+        "ratings = { max_voltage = 30.0 }",
+    );
+    definition(
+        &b,
+        "bad-rating",
+        "status = \"community\"",
+        "ratings = { max_voltage = 0.0, max_current = 5.0 }",
+    );
+    definition(
+        &b,
+        "odd-rating",
+        "status = \"community\"",
+        "ratings = { max_volts = 3.0 }",
+    );
+    definition(&b, "bad-status", "status = \"works for me\"", ratings);
+    definition(&b, "untested", "status = \"tested\"", ratings);
+    definition(&b, "no-requires", "status = \"community\"", ratings);
+    b.write(
+        "devices/acme/no-requires/device.toml",
+        &std::fs::read_to_string(b.dir.path().join("devices/acme/no-requires/device.toml"))
+            .unwrap()
+            .replace("requires = \"desk-operator >= 0.1\"\n", ""),
+    );
+    definition(
+        &b,
+        "with-kind",
+        "status = \"community\"\nkind = \"psu\"",
+        ratings,
+    );
+
+    assert!(
+        list_error(&b, "acme/no-ratings")
+            .contains("needs `ratings = { max_voltage = …, max_current = … }`")
+    );
+    assert!(list_error(&b, "acme/half-ratings").contains("max_current = …"));
+    assert!(list_error(&b, "acme/bad-rating").contains("must be > 0"));
+    assert!(list_error(&b, "acme/odd-rating").contains("max_volts"));
+    assert!(list_error(&b, "acme/bad-status").contains("status"));
+    assert!(list_error(&b, "acme/untested").contains("needs `tested ="));
+    assert!(list_error(&b, "acme/no-requires").contains("requires"));
+    assert!(list_error(&b, "acme/with-kind").contains("kind"));
+    assert_eq!(
+        list_error(&b, "acme/psu-3000"),
+        "",
+        "the valid one stays valid"
+    );
+}
+
+#[test]
+fn library_drivers_must_declare_params() {
+    let b = Bench::new("");
+    b.write(
+        "devices/acme/shared/undeclared.lua",
+        &SIM_DRIVER.replace("PARAMS = ", "NOT_PARAMS = "),
+    );
+    definition(
+        &b,
+        "undeclared",
+        "status = \"community\"",
+        "ratings = { max_voltage = 30.0, max_current = 5.0 }",
+    );
+    b.write(
+        "devices/acme/undeclared/device.toml",
+        &std::fs::read_to_string(b.dir.path().join("devices/acme/undeclared/device.toml"))
+            .unwrap()
+            .replace("../shared/sim.lua", "../shared/undeclared.lua"),
+    );
+    let out = b.run(&["--json", "library", "check", "acme/undeclared"]);
+    assert_eq!(out.code, 3, "{}", out.stdout);
+    assert!(
+        out.message().contains("must declare `PARAMS"),
+        "{}",
+        out.message()
+    );
+}
+
+#[test]
+fn params_are_validated_against_the_driver() {
+    let b = Bench::new("");
+    for (model, params, why) in [
+        (
+            "typo",
+            "params = { flavr = \"x\" }",
+            "unknown param `flavr` (the driver accepts: flavor)",
+        ),
+        (
+            "wrong-type",
+            "params = { flavor = 3 }",
+            "`flavor` must be a string",
+        ),
+    ] {
+        definition(
+            &b,
+            model,
+            "status = \"community\"",
+            &format!("ratings = {{ max_voltage = 30.0, max_current = 5.0 }}\n{params}"),
+        );
+        let out = b.run(&["--json", "library", "check", &format!("acme/{model}")]);
+        assert_eq!(out.code, 3, "{model}: {}", out.stdout);
+        assert!(out.message().contains(why), "{model}: {}", out.message());
+    }
+
+    // Required params, and defaults reaching the driver.
+    b.write(
+        "devices/acme/shared/strict.lua",
+        &SIM_DRIVER.replace(
+            "PARAMS = { flavor",
+            "PARAMS = { addr = { type = \"integer\", required = true }, flavor",
+        ),
+    );
+    definition(
+        &b,
+        "strict",
+        "status = \"community\"",
+        "ratings = { max_voltage = 30.0, max_current = 5.0 }",
+    );
+    b.write(
+        "devices/acme/strict/device.toml",
+        &std::fs::read_to_string(b.dir.path().join("devices/acme/strict/device.toml"))
+            .unwrap()
+            .replace("../shared/sim.lua", "../shared/strict.lua"),
+    );
+    let out = b.run(&["--json", "library", "check", "acme/strict"]);
+    assert_eq!(out.code, 3);
+    assert!(
+        out.message().contains("missing required param `addr`"),
+        "{}",
+        out.message()
+    );
+
+    let b = Bench::new("[devices.psu]\nmodel = \"acme/psu-3000\"\n");
+    let out = b.run(&["--json", "source", "read", "psu"]);
+    assert_eq!(
+        out.json()["data"]["log"][0],
+        "driver definition",
+        "default applied"
+    );
+}
+
+#[test]
+fn show_lists_ratings_sources_and_driver_params() {
+    let b = Bench::new("");
+    let out = b.run(&["library", "show", "acme/psu-3000"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert!(
+        out.stdout
+            .contains("ratings = { max_voltage = 30.0, max_current = 5.0 }")
+            || out.stdout.contains("[source.ratings]"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("https://example.com/acme-psu-3000-manual.pdf")
+    );
+    assert!(out.stdout.contains("source driver params:"));
+    assert!(out.stdout.contains("flavor"), "{}", out.stdout);
+
+    let j = b
+        .run(&["--json", "library", "show", "fnirsi/ips3608"])
+        .json();
+    let params = j["data"]["driver_params"]["source"].as_array().unwrap();
+    let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    for n in ["name", "status", "settle_ms", "boot_ms"] {
+        assert!(names.contains(&n), "{n} in {names:?}");
+    }
+    assert_eq!(j["data"]["definition"]["status"], "tested");
+}
+
+/// The JSON Schema for editors must agree with desk: accept every real definition, reject what
+/// desk rejects (as far as a schema can express it).
+#[test]
+fn json_schema_agrees_with_the_definitions() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("schemas/device-definition.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("valid schema");
+    let as_json = |toml_text: &str| -> Value {
+        let t: toml::Table = toml::from_str(toml_text).unwrap();
+        serde_json::to_value(t).unwrap()
+    };
+
+    let mut checked = 0;
+    for vendor in std::fs::read_dir(root.join("devices")).unwrap().flatten() {
+        for model in std::fs::read_dir(vendor.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let file = model.path().join("device.toml");
+            if file.is_file() {
+                let v = as_json(&std::fs::read_to_string(&file).unwrap());
+                let errors: Vec<String> =
+                    validator.iter_errors(&v).map(|e| e.to_string()).collect();
+                assert!(errors.is_empty(), "{}: {errors:?}", file.display());
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 2);
+
+    for (broken, why) in [
+        (
+            DEFINITION.replace("status   = \"community\"", "status = \"works\""),
+            "status",
+        ),
+        (
+            DEFINITION.replace("ratings = { max_voltage = 30.0, max_current = 5.0 }", ""),
+            "ratings",
+        ),
+        (
+            DEFINITION.replace("script  = \"../shared/sim.lua\"", "provider = \"ha\""),
+            "provider",
+        ),
+        (
+            DEFINITION.replace("[device]", "[device]\nkind = \"psu\""),
+            "kind",
+        ),
+    ] {
+        assert!(
+            !validator.is_valid(&as_json(&broken)),
+            "schema should reject: {why}"
+        );
+    }
+}
+
+#[test]
+fn scaffold_creates_a_checkable_definition() {
+    let b = Bench::new("");
+    b.write("devices/acme/README.md", "# ACME, written by hand\n");
+    let out = b.run(&[
+        "--json",
+        "library",
+        "new",
+        "acme/psu-9000",
+        "--capability",
+        "voltage_source",
+        "--name",
+        "ACME PSU 9000",
+        "--max-voltage",
+        "30",
+        "--max-current",
+        "5",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let d = &out.json()["data"];
+    assert_eq!(d["check"]["ok"], true, "{d}");
+    let created: Vec<&str> = d["created"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(
+        created
+            .iter()
+            .any(|p| p.ends_with("acme/psu-9000/driver.lua"))
+    );
+    assert!(
+        created
+            .iter()
+            .any(|p| p.ends_with("acme/psu-9000/device.toml"))
+    );
+    assert!(
+        !created.iter().any(|p| p.ends_with("README.md")),
+        "existing README kept"
+    );
+    let readme = std::fs::read_to_string(b.dir.path().join("devices/acme/README.md")).unwrap();
+    assert_eq!(readme, "# ACME, written by hand\n");
+
+    // It's on the search path right away; the skeleton fails loudly until implemented.
+    let def = b
+        .run(&["--json", "library", "show", "acme/psu-9000"])
+        .json();
+    assert_eq!(def["data"]["definition"]["name"], "ACME PSU 9000");
+    b.write("desk.toml", "[devices.x]\nmodel = \"acme/psu-9000\"\n");
+    let out = b.run(&["--json", "source", "set", "x", "5v"]);
+    assert_eq!(out.code, 5);
+    assert!(
+        out.message().contains("not implemented: set_voltage"),
+        "{}",
+        out.message()
+    );
+
+    // Without maximums the check names them; existing definitions are never overwritten.
+    let out = b.run(&[
+        "--json",
+        "library",
+        "new",
+        "acme/psu-9001",
+        "--capability",
+        "voltage_source",
+    ]);
+    assert_eq!(out.json()["data"]["check"]["ok"], false);
+    assert!(
+        out.stdout.contains("ratings.max_voltage must be > 0"),
+        "{}",
+        out.stdout
+    );
+    let out = b.run(&[
+        "--json",
+        "library",
+        "new",
+        "acme/psu-9000",
+        "--capability",
+        "voltage_source",
+    ]);
+    assert_eq!(out.code, 2);
+    assert!(out.message().contains("already exists"));
+
+    // A power_switch definition reusing an existing driver gets no new driver file.
+    b.write(
+        "devices/acme/shared/relay.lua",
+        "PARAMS = {}\nfunction on(ctx) end\nfunction off(ctx) end\n",
+    );
+    let out = b.run(&[
+        "--json",
+        "library",
+        "new",
+        "acme/relay",
+        "--capability",
+        "power_switch",
+        "--driver",
+        "../shared/relay.lua",
+    ]);
+    assert_eq!(out.json()["data"]["check"]["ok"], true, "{}", out.stdout);
+    assert_eq!(out.json()["data"]["created"].as_array().unwrap().len(), 1);
 }

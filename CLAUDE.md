@@ -98,6 +98,8 @@ src/
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
+docs/definition-format.md  device definition format v1 (spec); schemas/ has its JSON Schema (tested
+                       against every definition in tests/library.rs)
 skills/desk-operator/  SKILL.md for agents, embedded via include_str! (`desk skill`); update it when
                        commands, error codes or semantics change (tests/cli.rs checks codes)
 tests/cli.rs           end-to-end tests of the binary against the mock provider

@@ -15,7 +15,7 @@ repository (`desk-operator-devices`) later, so every definition stays self-conta
 model  = "fnirsi/ips3608"                                    # everything model-specific
 power  = { provider = "ha", entity = "switch.desk_outlet_2" } # yours: how this unit gets mains
 source = { port = { serial_number = "0123456789AB" } }        # yours: which unit (merged in)
-limits = { voltage = 12, current = 2 }                        # yours: bench safety
+limits = { source = { voltage = 12, current = 2 } }                        # yours: bench safety
 ```
 
 Your own values **merge** into the definition's bindings key by key (tables like `port` and
@@ -37,38 +37,26 @@ devices/<vendor>/
   <model>/device.toml        one definition per model
 ```
 
-```toml
-[device]
-id       = "vendor/model"          # must match the folder
-name     = "Vendor Model"
-kind     = "bench power supply"
-requires = "desk-operator >= 0.1"  # the oldest desk the driver works with
-status   = "tested on hardware"    # or "community" (not yet tested on hardware)
-tested   = ["firmware V1.1 / hardware V1.2"]
-
-[source]                           # one table per capability: power, source
-script = "../shared/protocol.lua"  # relative to this file
-port   = { usb_vid = 0x1234, usb_pid = 0x5678 }
-
-[source.params]                    # data for the driver: maximums, offsets, model name, timings
-max_voltage = 36.0
-max_current = 8.0
-```
+The format is specified in [`docs/definition-format.md`](../docs/definition-format.md) (with a JSON
+Schema for editors in [`schemas/`](../schemas/device-definition.schema.json)). In short: `[device]`
+with `id`, `name`, `requires`, `status` (`community` | `tested`), optional `tested` and `sources`;
+one table per capability (`[source]`, `[power]`) with a `script`, the capability's **ratings**
+(e.g. `max_voltage`, `max_current`, enforced by desk), and `params` for the driver, validated
+against the driver's `PARAMS` declaration.
 
 Rules:
 
 - **Scripts only.** A definition may not use `provider = …`: providers (Home Assistant, …) are
   set up per bench.
 - **Model facts only.** No entity ids, no bench limits, no serial numbers.
-- **Prefer data over code.** If two models differ only in numbers (maximums, byte offsets),
-  share one driver and put the numbers in each definition's `params`.
+- **Prefer data over code.** If two models differ only in numbers (byte offsets, timings), share
+  one driver and put the numbers in each definition's `params`.
 - **Identify the model** before sending anything when the USB id isn't unique to it (many
   microcontroller vendors use one generic id for all their customers' products).
-- **Honest status:** `tested on hardware` only after a real smoke test, with firmware versions in
-  `tested`. Drivers report only what the device really tells them (desk shows the rest as *not
-  confirmed*).
+- **Honest status and ratings:** `tested` only after a real smoke test, with versions in `tested`.
+  Leave a rating out rather than guess it. Drivers report only what the device really tells them.
 
-Drivers implement a capability's script contract, see [`docs/scripting.md`](../docs/scripting.md).
+Start a new one with `desk library new vendor/model --capability voltage_source --name "…"`.
 
 ## Checking a definition
 
@@ -85,9 +73,10 @@ library when it becomes its own repository.
 
 ## Contributing a definition
 
-1. Find out how the device talks: manuals, community protocol work, a capture of the vendor's
+1. `desk library new vendor/model --capability … --dir ./devices` (in a checkout of the library).
+2. Find out how the device talks: manuals, community protocol work, a capture of the vendor's
    software. Note sources in the vendor `README.md`.
-2. Reuse a family driver if one fits; otherwise write one against the script contract.
-3. Write the definition, run `desk library check`, add a fake-device test.
-4. Smoke-test on real hardware with nothing connected to the outputs, at low values. Record what
+3. Reuse a family driver if one fits (`--driver ../shared/x.lua`); otherwise implement the skeleton.
+4. Fill in ratings, params and sources, run `desk library check`, add a fake-device test.
+5. Smoke-test on real hardware with nothing connected to the outputs, at low values. Record what
    you observed (boot time, ramps, quirks) in the vendor `README.md`, and set `status`/`tested`.

@@ -11,7 +11,7 @@ use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
 use crate::providers::{Endpoint, ProviderInfo, Registry};
 use crate::script::{DeviceInfo, ScriptSource, ScriptSpec, ScriptSwitch};
 use crate::serial::PortSpec;
-use crate::source::{self, Report as SourceReport, Request, VoltageSource};
+use crate::source::{self, Report as SourceReport, Request, SourceInfo, VoltageSource};
 
 pub struct Bench {
     pub config: Config,
@@ -56,6 +56,7 @@ impl Bench {
                 params,
                 timeout,
                 port,
+                ..
             } => {
                 let timeout = timeout.unwrap_or(power::DEFAULT_SCRIPT_TIMEOUT);
                 let sw = ScriptSwitch::load(self.script_spec(
@@ -115,7 +116,10 @@ impl Bench {
         }
     }
 
-    fn voltage_source(&self, device: &Device) -> Result<(Box<dyn VoltageSource>, Duration)> {
+    fn voltage_source(
+        &self,
+        device: &Device,
+    ) -> Result<(Box<dyn VoltageSource>, Duration, SourceInfo)> {
         let binding = device
             .source
             .as_ref()
@@ -125,6 +129,12 @@ impl Bench {
                 capability: "voltage_source",
             })?;
         let timeout = binding.timeout().unwrap_or(source::DEFAULT_TIMEOUT);
+        let ratings = match binding {
+            Binding::Script { ratings, .. } if !ratings.is_empty() => {
+                source::parse_ratings(ratings).map_err(DeskError::ConfigInvalid)?
+            }
+            _ => SourceInfo::default(),
+        };
         let src: Box<dyn VoltageSource> = match binding {
             Binding::Native {
                 provider, params, ..
@@ -142,7 +152,7 @@ impl Bench {
                 timeout,
             ))?),
         };
-        Ok((src, timeout))
+        Ok((src, timeout, ratings))
     }
 
     /// Mains first: a device whose power path reads `off` can't be reached, so say that instead
@@ -163,7 +173,7 @@ impl Bench {
     /// Apply a `voltage_source` request (or just read, if it's empty) in one driver session.
     pub async fn source(&self, device: &Device, req: Request, dry_run: bool) -> Run<SourceReport> {
         // Capability and binding errors first: they're about the config, not the device state.
-        let (src, timeout) = match self.voltage_source(device) {
+        let (src, timeout, ratings) = match self.voltage_source(device) {
             Ok(v) => v,
             Err(e) => {
                 return Run {
@@ -183,7 +193,7 @@ impl Bench {
             src.as_ref(),
             timeout,
             &what,
-            source::apply(src.as_ref(), req, device.limits, dry_run),
+            source::apply(src.as_ref(), req, device.limits.source, ratings, dry_run),
         )
         .await;
         Run {

@@ -40,8 +40,8 @@ pub struct Device {
     pub power: Option<Binding>,
     /// `voltage_source` capability (bench power supply).
     pub source: Option<Binding>,
-    /// Bench safety limits, enforced by the core for every driver.
-    pub limits: Limits,
+    /// Bench safety limits per capability, enforced by the core for every driver.
+    pub limits: DeviceLimits,
 }
 
 /// How a capability of a device is implemented: by a provider, or by a Lua script.
@@ -66,6 +66,9 @@ pub enum Binding {
         /// The only serial port this script may open (`ctx.serial.open`).
         #[serde(skip_serializing_if = "Option::is_none")]
         port: Option<PortSpec>,
+        /// The device's maximums, in the capability's standard form (e.g. `max_voltage`).
+        #[serde(skip_serializing_if = "toml::Table::is_empty")]
+        ratings: toml::Table,
     },
 }
 
@@ -144,6 +147,11 @@ impl TryFrom<toml::Table> for Binding {
                     Some(toml::Value::Table(p)) => p,
                     Some(_) => return Err("`params` must be a table".into()),
                 };
+                let ratings = match t.remove("ratings") {
+                    None => toml::Table::new(),
+                    Some(toml::Value::Table(r)) => r,
+                    Some(_) => return Err("`ratings` must be a table".into()),
+                };
                 let port = match t.remove("port") {
                     None => None,
                     Some(toml::Value::Table(p)) => Some(PortSpec::try_from(p)?),
@@ -156,7 +164,7 @@ impl TryFrom<toml::Table> for Binding {
                 };
                 if let Some(k) = t.keys().next() {
                     return Err(format!(
-                        "unknown key `{k}` in script binding (allowed: script, params, timeout, port)"
+                        "unknown key `{k}` in script binding (allowed: script, params, ratings, timeout, port)"
                     ));
                 }
                 Ok(Binding::Script {
@@ -164,6 +172,7 @@ impl TryFrom<toml::Table> for Binding {
                     params,
                     timeout,
                     port,
+                    ratings,
                 })
             }
             (false, true) => {
@@ -211,8 +220,49 @@ struct RawDevice {
     // Raw tables: they may be partial overrides of a definition's bindings.
     power: Option<toml::Table>,
     source: Option<toml::Table>,
-    #[serde(default)]
-    limits: Limits,
+    limits: Option<toml::Table>,
+}
+
+/// `limits = { source = { voltage = 12, current = 2 } }`: one table per capability that has limits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct DeviceLimits {
+    #[serde(skip_serializing_if = "Limits::is_empty")]
+    pub source: Limits,
+}
+
+impl DeviceLimits {
+    pub fn is_empty(&self) -> bool {
+        self.source.is_empty()
+    }
+}
+
+fn parse_limits(device: &str, raw: Option<&toml::Table>) -> Result<DeviceLimits> {
+    let Some(raw) = raw else {
+        return Ok(DeviceLimits::default());
+    };
+    let bad = |m: String| DeskError::ConfigInvalid(format!("device `{device}`: limits: {m}"));
+    let mut limits = DeviceLimits::default();
+    for (key, value) in raw {
+        match key.as_str() {
+            "source" => {
+                limits.source = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e: toml::de::Error| bad(format!("source: {}", e.message())))?;
+            }
+            "voltage" | "current" => {
+                return Err(bad(format!(
+                    "limits are per capability: write `limits = {{ source = {{ {key} = … }} }}`"
+                )));
+            }
+            other => {
+                return Err(bad(format!(
+                    "unknown capability `{other}` (limits exist for: source)"
+                )));
+            }
+        }
+    }
+    Ok(limits)
 }
 
 impl RawDevice {
@@ -234,7 +284,7 @@ fn build_binding(
     config_path: &Path,
 ) -> Result<Option<Binding>> {
     let bad = |e: String| DeskError::ConfigInvalid(format!("device `{device}`: `{key}`: {e}"));
-    Ok(match (own, definition) {
+    let binding = match (own, definition) {
         (None, None) => None,
         (None, Some(def)) => Some(Binding::try_from(def.clone()).map_err(bad)?),
         (Some(own), Some(def)) if !own.contains_key("script") && !own.contains_key("provider") => {
@@ -245,7 +295,22 @@ fn build_binding(
             Binding::try_from(own.clone()).map_err(bad)?,
             config_path,
         )),
-    })
+    };
+    if let Some(Binding::Script { ratings, .. }) = &binding {
+        check_ratings(key, ratings).map_err(bad)?;
+    }
+    Ok(binding)
+}
+
+/// Ratings have a standard form per capability.
+pub fn check_ratings(key: &str, ratings: &toml::Table) -> std::result::Result<(), String> {
+    if ratings.is_empty() {
+        return Ok(());
+    }
+    match key {
+        "source" => crate::source::parse_ratings(ratings).map(drop),
+        other => Err(format!("`{other}` bindings have no ratings")),
+    }
 }
 
 /// Platform default: `~/.config/desk-operator/desk.toml` on Linux, the equivalent elsewhere.
@@ -313,7 +378,7 @@ impl Config {
                 aliases: d.aliases.clone(),
                 power,
                 source,
-                limits: d.limits,
+                limits: parse_limits(&id, d.limits.as_ref())?,
                 id,
             });
         }
@@ -380,11 +445,15 @@ impl Config {
                     ));
                 }
             }
-            for (what, v) in [("voltage", d.limits.voltage), ("current", d.limits.current)] {
+            let l = d.limits.source;
+            for (what, v) in [("voltage", l.voltage), ("current", l.current)] {
                 if let Some(v) = v
                     && !(v.is_finite() && v >= 0.0)
                 {
-                    problems.push(format!("device `{}`: limits.{what} must be >= 0", d.id));
+                    problems.push(format!(
+                        "device `{}`: limits.source.{what} must be >= 0",
+                        d.id
+                    ));
                 }
             }
         }
@@ -447,11 +516,13 @@ fn resolve_script_path(binding: Binding, config_path: &Path) -> Binding {
             params,
             timeout,
             port,
+            ratings,
         } if script.is_relative() && !library::is_bundled(&script) => Binding::Script {
             script: config_path.parent().unwrap_or(Path::new(".")).join(script),
             params,
             timeout,
             port,
+            ratings,
         },
         other => other,
     }

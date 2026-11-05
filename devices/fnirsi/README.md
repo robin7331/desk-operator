@@ -2,8 +2,8 @@
 
 | Definition | Model | Maximum | Status |
 |---|---|---|---|
-| `fnirsi/ips3608` | IPS3608 | 36 V, 8 A | **tested on hardware** (firmware V1.1, hardware V1.2) |
-| `fnirsi/dps-150` | DPS-150 | 30 V, 5.1 A | community, not yet tested on hardware |
+| `fnirsi/ips3608` | IPS3608 | 36 V, 8 A | **tested** (firmware V1.1, hardware V1.2) |
+| `fnirsi/dps-150` | DPS-150 | 30 V, 5.1 A | community (not yet tested on hardware) |
 
 Both use one driver, [`shared/dps150_protocol.lua`](shared/dps150_protocol.lua): FNIRSI ships a single
 PC application for "DPS-150 / IPS3608", and the IPS3608 frames match the documented DPS-150 ones.

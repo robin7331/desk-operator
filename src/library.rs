@@ -46,14 +46,35 @@ impl std::fmt::Display for Origin {
     }
 }
 
+/// How far a definition has been verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    /// Written from documentation or community work, not yet run on real hardware.
+    Community,
+    /// Smoke-tested on real hardware (see `tested` for firmware versions).
+    Tested,
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Status::Community => "community",
+            Status::Tested => "tested",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Definition {
     pub id: String,
     pub name: String,
-    pub kind: Option<String>,
-    pub status: Option<String>,
+    pub status: Status,
+    /// Hardware/firmware versions it was tested with.
     pub tested: Vec<String>,
-    pub requires: Option<String>,
+    /// Manuals, protocol documentation, community work the definition is based on.
+    pub sources: Vec<String>,
+    pub requires: String,
     pub origin: Origin,
     /// Where `device.toml` is (a real path, or `bundled:<id>/device.toml`).
     pub file: PathBuf,
@@ -66,11 +87,12 @@ pub struct Definition {
 struct RawHeader {
     id: String,
     name: String,
-    kind: Option<String>,
-    status: Option<String>,
+    status: Status,
     #[serde(default)]
     tested: Vec<String>,
-    requires: Option<String>,
+    #[serde(default)]
+    sources: Vec<String>,
+    requires: String,
 }
 
 enum Root {
@@ -246,7 +268,7 @@ fn bundled_file(rel: &str) -> Option<&'static str> {
         .map(|(_, text)| *text)
 }
 
-fn valid_definition_id(id: &str) -> bool {
+pub fn valid_definition_id(id: &str) -> bool {
     let mut parts = id.split('/');
     let ok = |s: Option<&str>| {
         s.is_some_and(|s| {
@@ -322,8 +344,11 @@ fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Resu
             header.id
         )));
     }
-    if let Some(req) = &header.requires {
-        check_requires(req).map_err(bad)?;
+    check_requires(&header.requires).map_err(bad)?;
+    if header.status == Status::Tested && header.tested.is_empty() {
+        return Err(bad(
+            "status = \"tested\" needs `tested = [\"<hardware/firmware version>\"]`".into(),
+        ));
     }
 
     let mut bindings = IndexMap::new();
@@ -346,6 +371,7 @@ fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Resu
         let Some(toml::Value::String(script)) = binding.get("script") else {
             return Err(bad(format!("`{key}` needs `script = \"...\"`")));
         };
+        required_ratings(&key, &binding).map_err(bad)?;
         let resolved = resolve_relative(&file, script);
         binding.insert(
             "script".into(),
@@ -357,14 +383,47 @@ fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Resu
     Ok(Definition {
         id: header.id,
         name: header.name,
-        kind: header.kind,
         status: header.status,
         tested: header.tested,
+        sources: header.sources,
         requires: header.requires,
         origin,
         file,
         bindings,
     })
+}
+
+/// Ratings every definition must declare per capability (the device's maximums), so the core can
+/// enforce them without trusting a driver.
+pub const REQUIRED_RATINGS: &[(&str, &[&str])] = &[("source", &["max_voltage", "max_current"])];
+
+fn required_ratings(key: &str, binding: &toml::Table) -> std::result::Result<(), String> {
+    let ratings = match binding.get("ratings") {
+        None => toml::Table::new(),
+        Some(toml::Value::Table(r)) => r.clone(),
+        Some(_) => return Err(format!("`{key}.ratings` must be a table")),
+    };
+    crate::config::check_ratings(key, &ratings).map_err(|e| format!("`{key}`: {e}"))?;
+    for (cap, needed) in REQUIRED_RATINGS {
+        if *cap == key {
+            let missing: Vec<&str> = needed
+                .iter()
+                .copied()
+                .filter(|n| !ratings.contains_key(*n))
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "`{key}` needs `ratings = {{ {} }}` (the device's maximums)",
+                    missing
+                        .iter()
+                        .map(|m| format!("{m} = …"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `requires = "desk-operator >= 0.2"`: only `>=` is supported for now.

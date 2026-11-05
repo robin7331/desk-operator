@@ -346,6 +346,26 @@ contributors. The core never references anything in `devices/`.
 - Decision: definition tests stay in Rust (`tests/device_*.rs`) until the library becomes its own
   repository; a Lua fake-device format is only worth it then.
 
+## M5.1 — A defined definition format ✓
+
+Before AI skills generate definitions, the format must be precise: what's required, what's
+optional, what's validated. Found gaps after M5: device maximums hid in free-form `params`
+(convention only, typos silently ignored), `kind`/`status` were free text, bench `limits` were
+device-wide (ambiguous once a device has two capabilities), no scaffold.
+
+- [x] **Bench limits per capability:** `limits = { source = { voltage = 12, current = 2 } }`
+- [x] **Ratings** per capability binding, standardized by the core: `voltage_source` →
+      `ratings = { max_voltage, max_current, max_power? }`, enforced by the core (stricter of
+      ratings and the driver's `info()`); required in definitions
+- [x] **Drivers declare their params** (`PARAMS = { name = { type = "string", doc = … } }`):
+      unknown keys, wrong types and missing required params are config errors; defaults are applied.
+      Required for library drivers
+- [x] **Format v1:** `status` = `community` | `tested`, `kind` dropped (capabilities say it),
+      optional `sources = [urls]`
+- [x] **`desk library new vendor/model --capability voltage_source`** scaffold;
+      `desk library show` lists the driver's params
+- [x] **Spec** `docs/definition-format.md` + JSON Schema for editors
+
 ## M6 — AI skills
 
 A suite of agent skills shipped with desk (like `desk skill`), building on M5's format:

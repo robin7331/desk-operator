@@ -32,6 +32,10 @@ impl ScriptSource {
         Ok(ScriptSource { engine })
     }
 
+    pub fn params(&self) -> Option<&[super::ParamSpec]> {
+        self.engine.params()
+    }
+
     async fn optional(&self, name: &str) -> Result<()> {
         if self.engine.has(name) {
             self.engine.call(name, Value::Nil).await?;

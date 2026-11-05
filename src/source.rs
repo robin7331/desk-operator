@@ -19,11 +19,52 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const TOLERANCE_REL: f64 = 0.005;
 const TOLERANCE_ABS: f64 = 0.011;
 
-/// What the device itself can do (from its driver).
+/// What the device itself can do: its ratings (from the binding) combined with what the driver
+/// reports. Also the format of a `source` binding's `ratings = { … }`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceInfo {
     pub max_voltage: Option<f64>,
     pub max_current: Option<f64>,
+    /// Informational (shown, not enforced yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_power: Option<f64>,
+}
+
+impl SourceInfo {
+    /// The stricter of both, field by field.
+    pub fn stricter(self, other: SourceInfo) -> SourceInfo {
+        let min = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        SourceInfo {
+            max_voltage: min(self.max_voltage, other.max_voltage),
+            max_current: min(self.max_current, other.max_current),
+            max_power: min(self.max_power, other.max_power),
+        }
+    }
+}
+
+/// Parse and check a `source` binding's `ratings = { max_voltage, max_current, max_power }`.
+pub fn parse_ratings(t: &toml::Table) -> std::result::Result<SourceInfo, String> {
+    let r: SourceInfo = toml::Value::Table(t.clone())
+        .try_into()
+        .map_err(|e: toml::de::Error| format!("ratings: {}", e.message()))?;
+    for (what, v) in [
+        ("max_voltage", r.max_voltage),
+        ("max_current", r.max_current),
+        ("max_power", r.max_power),
+    ] {
+        if let Some(v) = v
+            && !(v.is_finite() && v > 0.0)
+        {
+            return Err(format!(
+                "ratings.{what} must be > 0 (the device's maximum), got {v}"
+            ));
+        }
+    }
+    Ok(r)
 }
 
 /// Everything a driver can report. Every field is optional: drivers report what they can read.
@@ -37,12 +78,19 @@ pub struct Reading {
     pub power: Option<f64>,
 }
 
-/// Bench safety limits from the device's `limits = { ... }`, independent of the driver.
+/// Bench safety limits for a voltage source, from the device's `limits = { source = { ... } }`,
+/// independent of the driver.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub voltage: Option<f64>,
     pub current: Option<f64>,
+}
+
+impl Limits {
+    pub fn is_empty(&self) -> bool {
+        self.voltage.is_none() && self.current.is_none()
+    }
 }
 
 #[async_trait]
@@ -125,10 +173,11 @@ pub async fn apply(
     src: &dyn VoltageSource,
     req: Request,
     limits: Limits,
+    ratings: SourceInfo,
     dry_run: bool,
 ) -> Result<Report> {
     validate_values(&req)?;
-    let info = src.info().await?;
+    let info = src.info().await?.stricter(ratings);
     check_limits(&req, &info, &limits)?;
 
     let mut warnings = Vec::new();
@@ -410,6 +459,7 @@ mod tests {
             &f,
             req(Some(5.0), Some(1.0), Some(true)),
             Limits::default(),
+            SourceInfo::default(),
             false,
         ))
         .unwrap();
@@ -425,6 +475,7 @@ mod tests {
             &f,
             req(Some(5.0), None, None),
             Limits::default(),
+            SourceInfo::default(),
             false,
         ))
         .unwrap();
@@ -444,6 +495,7 @@ mod tests {
             &f,
             req(Some(5.0), None, None),
             Limits::default(),
+            SourceInfo::default(),
             false,
         ))
         .unwrap_err();
@@ -456,6 +508,7 @@ mod tests {
             info: SourceInfo {
                 max_voltage: Some(30.0),
                 max_current: Some(5.0),
+                max_power: None,
             },
             ..Fake::default()
         };
@@ -463,14 +516,35 @@ mod tests {
             voltage: Some(12.0),
             current: None,
         };
-        let e = run(apply(&f, req(Some(13.0), None, None), bench, false)).unwrap_err();
+        let e = run(apply(
+            &f,
+            req(Some(13.0), None, None),
+            bench,
+            SourceInfo::default(),
+            false,
+        ))
+        .unwrap_err();
         assert_eq!(e.code(), "limit_exceeded");
         assert!(e.to_string().contains("bench limit"), "{e}");
-        let e = run(apply(&f, req(None, Some(6.0), None), bench, false)).unwrap_err();
+        let e = run(apply(
+            &f,
+            req(None, Some(6.0), None),
+            bench,
+            SourceInfo::default(),
+            false,
+        ))
+        .unwrap_err();
         assert!(e.to_string().contains("device maximum"), "{e}");
         assert!(f.calls().is_empty(), "nothing sent: {:?}", f.calls());
         // Exactly at the limit is fine.
-        run(apply(&f, req(Some(12.0), None, None), bench, false)).unwrap();
+        run(apply(
+            &f,
+            req(Some(12.0), None, None),
+            bench,
+            SourceInfo::default(),
+            false,
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -484,7 +558,14 @@ mod tests {
             voltage: Some(12.0),
             current: None,
         };
-        let e = run(apply(&f, req(None, None, Some(true)), bench, false)).unwrap_err();
+        let e = run(apply(
+            &f,
+            req(None, None, Some(true)),
+            bench,
+            SourceInfo::default(),
+            false,
+        ))
+        .unwrap_err();
         assert_eq!(e.code(), "limit_exceeded");
         assert!(!f.calls().contains(&"out=true".to_string()));
     }
@@ -497,6 +578,7 @@ mod tests {
                 &f,
                 req(Some(v), None, None),
                 Limits::default(),
+                SourceInfo::default(),
                 false,
             ))
             .unwrap_err();
@@ -514,6 +596,7 @@ mod tests {
             &f,
             req(Some(5.0), Some(1.0), Some(true)),
             Limits::default(),
+            SourceInfo::default(),
             true,
         ))
         .unwrap();

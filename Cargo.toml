@@ -26,6 +26,7 @@ tokio = { version = "1.54.1", features = ["rt", "macros", "time", "sync"] }
 toml = { version = "1.2.0", features = ["preserve_order"] }
 
 [dev-dependencies]
+jsonschema = "0.60.2"
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 wiremock = "0.6.5"

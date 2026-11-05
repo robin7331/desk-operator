@@ -259,8 +259,8 @@ fn bench_with(path: &str, extra: &str) -> TempDir {
         format!(
             r#"
 [devices.psu]
-source = {{ script = "{}", port = {{ path = "{path}" }}, timeout = "6s", params = {{ max_voltage = 36.0, max_current = 8.0, telemetry_ms = 800, settle_ms = 120, echo_ms = 300, wait = "0s"{extra} }} }}
-limits = {{ voltage = 24 }}
+source = {{ script = "{}", port = {{ path = "{path}" }}, timeout = "6s", ratings = {{ max_voltage = 36.0, max_current = 8.0 }}, params = {{ telemetry_ms = 800, settle_ms = 120, echo_ms = 300, wait = "0s"{extra} }} }}
+limits = {{ source = {{ voltage = 24 }} }}
 "#,
             driver().display()
         ),

@@ -10,22 +10,18 @@
 --         0xC3 telemetry pushed by the device: Vout, Iout, Pout as float32 LE
 --         0xDE query: model name (ASCII), 0xFF query: full status (139 bytes)
 --
--- params (from the device definition):
---   max_voltage, max_current   device maximums (desk refuses anything above)
---   telemetry_ms               how long read() waits for a measurement (default 1500)
---   settle_ms                  ignore measurements older than this after a command (default 300)
---   echo_ms                    how long set_output() waits for the echo (default 500)
---   wait                       how long open() waits for the port to appear (default "2s")
---   name                       expected model name (query 0xDE). If set, open() refuses other
---                              devices: the USB id is a generic Artery AT32 one shared by others
---   status                     byte offsets in the full status (query 0xFF), e.g.
---                              { voltage_set = 4, current_set = 8, voltage = 12, current = 16,
---                                power = 20, output = 107 }. With it, read() reports setpoints
---                              and output state; without it, only pushed measurements.
---   status_ms                  how long to wait for a query reply (default 700)
---   boot_ms                    right after mains on, the USB port appears before the device
---                              answers (writes fail, queries time out): open() keeps retrying
---                              this long (default 3000)
+-- Device maximums are the definition's `ratings` (enforced by desk); everything the driver needs
+-- beyond that is declared here and validated by desk (unknown or mistyped params are errors).
+PARAMS = {
+  name = { type = "string", doc = "expected model name (query 0xDE); refuse other devices, since the USB id is a generic Artery AT32 one" },
+  status = { type = "table", doc = "byte offsets in the full status (query 0xFF): voltage_set, current_set, voltage, current, power, output. Enables setpoint and output read-back" },
+  settle_ms = { type = "number", default = 300, doc = "ignore measurements older than this after a command (output ramp)" },
+  boot_ms = { type = "number", default = 3000, doc = "after mains on the port appears before the device answers: keep retrying this long" },
+  status_ms = { type = "number", default = 700, doc = "how long to wait for a query reply" },
+  telemetry_ms = { type = "number", default = 1500, doc = "how long read() waits for a pushed measurement (without status)" },
+  echo_ms = { type = "number", default = 500, doc = "how long set_output() waits for the echo (without status)" },
+  wait = { type = "string", default = "2s", doc = "how long open() waits for the port to appear" },
+}
 
 local HOST, DEVICE = 0xF1, 0xF0
 local T_QUERY, T_WRITE, T_CONNECT = 0xA1, 0xB1, 0xC1
@@ -111,13 +107,13 @@ end
 -- Ask the device something; returns the reply frame or nil.
 local function query(ctx, cmd, accept)
   write_frame(T_QUERY, cmd, "\0")
-  return wait_for(ctx, cmd, ctx.params.status_ms or 700, accept)
+  return wait_for(ctx, cmd, ctx.params.status_ms, accept)
 end
 
 -- Connect, and check the model name if the definition gives one. Returns nil when the device
 -- doesn't answer (yet), raises when it's the wrong device.
 local function connect(ctx)
-  port = ctx.serial.open({ baud = 115200, wait = ctx.params.wait or "2s" })
+  port = ctx.serial.open({ baud = 115200, wait = ctx.params.wait })
   port_path = port.path
   rx, output_echo = "", nil
   port:clear()
@@ -139,7 +135,7 @@ local function connect(ctx)
 end
 
 function open(ctx)
-  local deadline = ctx.clock() + (ctx.params.boot_ms or 3000)
+  local deadline = ctx.clock() + ctx.params.boot_ms
   while true do
     local ok, result = pcall(connect, ctx)
     if ok and result then
@@ -175,10 +171,6 @@ function close(ctx)
   end
 end
 
-function info(ctx)
-  return { max_voltage = ctx.params.max_voltage, max_current = ctx.params.max_current }
-end
-
 function set_voltage(ctx, volts)
   send(ctx, T_WRITE, C_SET_V, string.pack("<f", volts))
 end
@@ -193,14 +185,14 @@ function set_output(ctx, on)
   -- The DPS-150 echoes this command; with the echo, read() can report the output state. With a
   -- status layout, read() asks the device instead (the IPS3608 doesn't echo).
   if not ctx.params.status then
-    wait_for(ctx, C_OUTPUT, ctx.params.echo_ms or 500)
+    wait_for(ctx, C_OUTPUT, ctx.params.echo_ms)
   end
 end
 
 -- Everything from the full status, using the definition's byte offsets.
 local function read_status(ctx, layout)
   -- Let the device settle after our last command, then ask.
-  local settle_until = last_command + (ctx.params.settle_ms or 300)
+  local settle_until = last_command + ctx.params.settle_ms
   if ctx.clock() < settle_until then
     ctx.sleep(settle_until - ctx.clock())
   end
@@ -208,7 +200,7 @@ local function read_status(ctx, layout)
     return #f.data >= 24
   end)
   if not reply then
-    error(string.format("no status reply from the device within %d ms", ctx.params.status_ms or 700))
+    error(string.format("no status reply from the device within %d ms", ctx.params.status_ms))
   end
   local d = reply.data
   local function float_at(offset)
@@ -234,8 +226,8 @@ function read(ctx)
   if ctx.params.status then
     return read_status(ctx, ctx.params.status)
   end
-  local wait = ctx.params.telemetry_ms or 1500
-  local fresh_after = last_command + (ctx.params.settle_ms or 300)
+  local wait = ctx.params.telemetry_ms
+  local fresh_after = last_command + ctx.params.settle_ms
   local t = wait_for(ctx, C_TELEMETRY, wait, function(f)
     return #f.data >= 12 and ctx.clock() >= fresh_after
   end)

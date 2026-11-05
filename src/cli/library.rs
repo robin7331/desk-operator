@@ -7,13 +7,13 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::Serialize;
 
-use super::LibraryCmd;
+use super::{CapabilityArg, LibraryCmd};
 use crate::config::{self, Binding};
 use crate::error::{DeskError, ErrorJson, Result};
 use crate::library::{self, Definition, Library};
 use crate::output::{Report, table};
 use crate::providers::Registry;
-use crate::script::{DeviceInfo, ScriptSource, ScriptSpec, ScriptSwitch};
+use crate::script::{DeviceInfo, ParamSpec, ScriptSource, ScriptSpec, ScriptSwitch};
 
 pub fn run(config_path: Option<&Path>, cmd: LibraryCmd) -> Result<Report> {
     let config_path = config_path
@@ -25,6 +25,31 @@ pub fn run(config_path: Option<&Path>, cmd: LibraryCmd) -> Result<Report> {
         LibraryCmd::List => list(&library),
         LibraryCmd::Show { id } => show(&library.find(&id)?),
         LibraryCmd::Check { targets } => check(&library, &targets),
+        LibraryCmd::New {
+            id,
+            capability,
+            name,
+            driver,
+            max_voltage,
+            max_current,
+            dir,
+        } => {
+            let root = dir.unwrap_or_else(|| {
+                config_path
+                    .parent()
+                    .map(|p| p.join("devices"))
+                    .unwrap_or_else(|| PathBuf::from("devices"))
+            });
+            scaffold(
+                &root,
+                &id,
+                capability,
+                name,
+                driver,
+                max_voltage,
+                max_current,
+            )
+        }
     }
 }
 
@@ -34,9 +59,7 @@ struct ListEntry<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'a str>,
+    status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
     capabilities: Vec<&'a str>,
@@ -71,8 +94,7 @@ fn list(library: &Library) -> Result<Report> {
             ListEntry {
                 id: &l.id,
                 name: def.map(|d| d.name.as_str()),
-                kind: def.and_then(|d| d.kind.as_deref()),
-                status: def.and_then(|d| d.status.as_deref()),
+                status: def.map(|d| d.status.to_string()),
                 origin: def.map(|d| d.origin.to_string()),
                 capabilities: caps.clone(),
                 shadowed: l.shadowed,
@@ -91,7 +113,8 @@ fn list(library: &Library) -> Result<Report> {
             vec![
                 e.id.to_string(),
                 e.name.unwrap_or("-").to_string(),
-                e.status.unwrap_or("-").to_string(),
+                e.status.clone().unwrap_or_else(|| "-".into()),
+                e.capabilities.join(", "),
                 match &e.error {
                     Some(err) => format!("error: {}", err.message),
                     None => from,
@@ -102,7 +125,10 @@ fn list(library: &Library) -> Result<Report> {
     let mut human = if rows.is_empty() {
         "no device definitions found\n".to_string()
     } else {
-        table(&["DEFINITION", "NAME", "STATUS", "FROM"], &rows)
+        table(
+            &["DEFINITION", "NAME", "STATUS", "CAPABILITIES", "FROM"],
+            &rows,
+        )
     };
     if !rows.is_empty() {
         human.push_str("\nuse one in a device with: model = \"<DEFINITION>\" (details: desk library show <id>)\n");
@@ -115,16 +141,21 @@ fn list(library: &Library) -> Result<Report> {
 
 fn show(def: &Definition) -> Result<Report> {
     let mut human = format!(
-        "id:           {}\nname:         {}\nkind:         {}\nstatus:       {}\nfrom:         {}\nfile:         {}\n",
+        "id:           {}\nname:         {}\nstatus:       {}\ncapabilities: {}\nrequires:     {}\nfrom:         {}\nfile:         {}\n",
         def.id,
         def.name,
-        def.kind.as_deref().unwrap_or("-"),
-        def.status.as_deref().unwrap_or("-"),
+        def.status,
+        capabilities(def).join(", "),
+        def.requires,
         def.origin,
         def.file.display(),
     );
     if !def.tested.is_empty() {
         human.push_str(&format!("tested:       {}\n", def.tested.join(", ")));
+    }
+    for (i, src) in def.sources.iter().enumerate() {
+        let label = if i == 0 { "sources:" } else { "" };
+        human.push_str(&format!("{label:<14}{src}\n"));
     }
     for (key, binding) in &def.bindings {
         // Serialize under its capability key, so nested tables print as [source.params] etc.
@@ -133,14 +164,107 @@ fn show(def: &Definition) -> Result<Report> {
         human.push('\n');
         human.push_str(&toml::to_string(&wrapped).unwrap_or_default());
     }
+    // What the drivers accept, from their PARAMS declarations.
+    let mut drivers = serde_json::Map::new();
+    for (key, params) in driver_params(def) {
+        match &params {
+            Ok(specs) => {
+                human.push_str(&format!("\n{key} driver params:\n"));
+                let rows: Vec<Vec<String>> = specs
+                    .iter()
+                    .map(|p| {
+                        vec![
+                            format!("  {}", p.name),
+                            p.kind.clone(),
+                            match (&p.default, p.required) {
+                                (Some(d), _) => format!("default {d}"),
+                                (None, true) => "required".into(),
+                                (None, false) => "optional".into(),
+                            },
+                            p.doc.clone().unwrap_or_default(),
+                        ]
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    human.push_str("  (none)\n");
+                } else {
+                    human.push_str(&table(&["  NAME", "TYPE", "", "MEANING"], &rows));
+                }
+            }
+            Err(e) => human.push_str(&format!("\n{key} driver: error: {e}\n")),
+        }
+        drivers.insert(
+            key,
+            match params {
+                Ok(p) => serde_json::to_value(p).unwrap_or_default(),
+                Err(e) => serde_json::json!({ "error": e.to_json() }),
+            },
+        );
+    }
     human.push_str(&format!(
         "\nuse it:\n  [devices.<name>]\n  model = \"{}\"\n  # plus your own power path, limits, and e.g. port = {{ serial_number = \"…\" }}\n",
         def.id
     ));
     Ok(Report::new(
-        &serde_json::json!({ "definition": def }),
+        &serde_json::json!({ "definition": def, "driver_params": drivers }),
         human,
     ))
+}
+
+/// Load each script binding's driver (sandboxed, no hardware) and return its declared params.
+fn driver_params(def: &Definition) -> Vec<(String, Result<Vec<ParamSpec>>)> {
+    let providers = Arc::new(Registry::new(IndexMap::new(), PathBuf::new()));
+    def.bindings
+        .iter()
+        .map(|(key, table)| {
+            let result = Binding::try_from(table.clone())
+                .map_err(DeskError::ConfigInvalid)
+                .and_then(|binding| {
+                    let Binding::Script {
+                        script,
+                        params,
+                        port,
+                        ..
+                    } = &binding
+                    else {
+                        return Ok(Vec::new());
+                    };
+                    let spec = spec_for(def, script, params, port.as_ref(), &providers);
+                    let declared = match key.as_str() {
+                        "power" => ScriptSwitch::load(spec)?.params().map(<[_]>::to_vec),
+                        "source" => ScriptSource::load(spec)?.params().map(<[_]>::to_vec),
+                        _ => None,
+                    };
+                    declared.ok_or_else(|| {
+                        DeskError::ConfigInvalid(format!(
+                            "{}: library drivers must declare `PARAMS = {{ … }}` (may be empty)",
+                            script.display()
+                        ))
+                    })
+                });
+            (key.clone(), result)
+        })
+        .collect()
+}
+
+fn spec_for<'a>(
+    def: &'a Definition,
+    script: &'a Path,
+    params: &'a toml::Table,
+    port: Option<&'a crate::serial::PortSpec>,
+    providers: &Arc<Registry>,
+) -> ScriptSpec<'a> {
+    ScriptSpec {
+        device: DeviceInfo {
+            id: "check",
+            name: &def.name,
+        },
+        path: script,
+        params,
+        port,
+        timeout: Duration::from_secs(5),
+        providers: providers.clone(),
+    }
 }
 
 #[derive(Serialize)]
@@ -229,36 +353,206 @@ fn check(library: &Library, targets: &[String]) -> Result<Report> {
     Ok(Report::new(&serde_json::json!({ "results": results }), human).with_failure(failure))
 }
 
+/// Load every driver: required functions present, `PARAMS` declared, the definition's params valid.
 fn check_drivers(def: &Definition) -> Result<()> {
-    let providers = Arc::new(Registry::new(IndexMap::new(), PathBuf::new()));
-    for (key, table) in &def.bindings {
-        let binding = Binding::try_from(table.clone())
-            .map_err(|e| DeskError::ConfigInvalid(format!("`{key}`: {e}")))?;
-        let Binding::Script {
-            script,
-            params,
-            port,
-            ..
-        } = &binding
-        else {
-            continue;
-        };
-        let spec = ScriptSpec {
-            device: DeviceInfo {
-                id: "check",
-                name: &def.name,
-            },
-            path: script,
-            params,
-            port: port.as_ref(),
-            timeout: Duration::from_secs(5),
-            providers: providers.clone(),
-        };
-        match key.as_str() {
-            "power" => ScriptSwitch::load(spec).map(drop)?,
-            "source" => ScriptSource::load(spec).map(drop)?,
-            _ => {}
-        }
+    for (_, result) in driver_params(def) {
+        result?;
     }
     Ok(())
+}
+
+const DRIVER_SOURCE: &str = r#"-- Driver for {name} (voltage_source). Contract: docs/scripting.md.
+-- desk does limits, ordering (voltage, current, output) and verification; the driver only talks
+-- to the device. Return from read() only what the device really reports.
+
+-- Every param the definition may set, validated by desk (unknown or mistyped params are errors).
+PARAMS = {
+  -- example = { type = "number", default = 300, doc = "what it means" },
+}
+
+-- Optional: start/end of one command's session (connect, handshake, release the front panel).
+-- function open(ctx) end
+-- function close(ctx) end
+
+function set_voltage(ctx, volts)
+  error("not implemented: set_voltage")
+end
+
+function set_current(ctx, amps)
+  error("not implemented: set_current")
+end
+
+function set_output(ctx, on)
+  error("not implemented: set_output")
+end
+
+function read(ctx)
+  -- e.g. return { output = true, voltage_set = 5.0, current_set = 1.0, voltage = 4.99, current = 0.1, power = 0.5 }
+  error("not implemented: read")
+end
+"#;
+
+const POWER_DRIVER_SOURCE: &str = r#"-- Driver for {name} (power_switch). Contract: docs/scripting.md.
+
+PARAMS = {}
+
+function on(ctx)
+  error("not implemented: on")
+end
+
+function off(ctx)
+  error("not implemented: off")
+end
+
+-- Optional, enables read-back verification and toggle: return "on", "off" or "unknown".
+-- function state(ctx) end
+"#;
+
+const VENDOR_README: &str = r#"# {vendor}
+
+| Definition | Model | Status |
+|---|---|---|
+| `{id}` | {model} | community, not yet tested on hardware |
+
+## Protocol
+
+How the devices talk (transport, framing, commands), with sources.
+
+## Known gaps
+
+## Observed behavior
+
+What a smoke test on real hardware showed (boot time, ramps, quirks), with firmware versions.
+"#;
+
+fn scaffold(
+    root: &Path,
+    id: &str,
+    capability: CapabilityArg,
+    name: Option<String>,
+    driver: Option<String>,
+    max_voltage: Option<f64>,
+    max_current: Option<f64>,
+) -> Result<Report> {
+    if !library::valid_definition_id(id) {
+        return Err(DeskError::Usage(format!(
+            "`{id}` is not a definition id: use vendor/model (lowercase, digits, `-`, `_`)"
+        )));
+    }
+    let (vendor, model) = id.split_once('/').unwrap_or((id, id));
+    let dir = root.join(vendor).join(model);
+    let file = dir.join("device.toml");
+    if file.exists() {
+        return Err(DeskError::Usage(format!(
+            "{} already exists",
+            file.display()
+        )));
+    }
+    std::fs::create_dir_all(&dir)?;
+    let mut created = Vec::new();
+
+    let (key, template) = match capability {
+        CapabilityArg::VoltageSource => ("source", DRIVER_SOURCE),
+        CapabilityArg::PowerSwitch => ("power", POWER_DRIVER_SOURCE),
+    };
+    let script = match driver {
+        Some(d) => d,
+        None => {
+            let path = dir.join("driver.lua");
+            std::fs::write(&path, template.replace("{name}", id))?;
+            created.push(path);
+            "driver.lua".to_string()
+        }
+    };
+    let ratings = match capability {
+        CapabilityArg::VoltageSource => {
+            let v = |x: Option<f64>| x.map_or("0.0".to_string(), |x| format!("{x:?}"));
+            let todo = if max_voltage.is_none() || max_current.is_none() {
+                "   # TODO: the device's maximums"
+            } else {
+                ""
+            };
+            format!(
+                "ratings = {{ max_voltage = {}, max_current = {} }}{todo}\n",
+                v(max_voltage),
+                v(max_current)
+            )
+        }
+        CapabilityArg::PowerSwitch => String::new(),
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let requires = version.rsplit_once('.').map_or(version, |(mm, _)| mm);
+    // Point editors at the JSON Schema when creating inside a library checkout (schemas/ next to
+    // the library folder); elsewhere there's nothing to point at.
+    let schema = if root
+        .join("../schemas/device-definition.schema.json")
+        .is_file()
+    {
+        "#:schema ../../../schemas/device-definition.schema.json\n"
+    } else {
+        ""
+    };
+    let (name, name_todo) = match name {
+        Some(n) => (n, ""),
+        None => (
+            model.to_string(),
+            "   # TODO: the model's name, e.g. \"Vendor Model 3000\"",
+        ),
+    };
+    std::fs::write(
+        &file,
+        format!(
+            r#"{schema}# Device definition: true for every unit of this model, nothing about any particular bench.
+# Format: docs/definition-format.md
+
+[device]
+id       = "{id}"
+name     = {name:?}{name_todo}
+requires = "desk-operator >= {requires}"
+status   = "community"   # "tested" after a smoke test on real hardware (then list versions in `tested`)
+sources  = []            # manuals, protocol docs, community work this is based on
+
+[{key}]
+script = "{script}"
+# port = {{ usb_vid = 0x0000, usb_pid = 0x0000 }}   # from `desk port list`, if the device has a USB id
+{ratings}"#,
+        ),
+    )?;
+    created.push(file.clone());
+
+    let readme = root.join(vendor).join("README.md");
+    if !readme.exists() {
+        std::fs::write(
+            &readme,
+            VENDOR_README
+                .replace("{vendor}", vendor)
+                .replace("{id}", id)
+                .replace("{model}", model),
+        )?;
+        created.push(readme);
+    }
+
+    // Check what was created, so the next steps are concrete.
+    let check = library::load_file(&file).and_then(|d| check_drivers(&d));
+    let mut human: String = created
+        .iter()
+        .map(|p| format!("created {}\n", p.display()))
+        .collect();
+    match &check {
+        Ok(()) => human.push_str("check: ok\n"),
+        Err(e) => human.push_str(&format!("check: {e}\n")),
+    }
+    human.push_str(&format!(
+        "\nnext: fill in {}, implement the driver, then `desk library check {}`\n",
+        file.display(),
+        file.display()
+    ));
+    Ok(Report::new(
+        &serde_json::json!({
+            "id": id,
+            "created": created,
+            "check": match &check { Ok(()) => serde_json::json!({ "ok": true }), Err(e) => serde_json::json!({ "ok": false, "error": e.to_json() }) },
+        }),
+        human,
+    ))
 }

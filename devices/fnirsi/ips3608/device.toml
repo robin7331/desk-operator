@@ -1,24 +1,26 @@
+#:schema ../../../schemas/device-definition.schema.json
 # Device definition: true for every FNIRSI IPS3608, nothing about any particular bench.
-# Format draft: desk loads definitions from M5 on (until then, see ../../README.md for manual use).
 
 [device]
 id       = "fnirsi/ips3608"
 name     = "FNIRSI IPS3608"
-kind     = "bench power supply"
 requires = "desk-operator >= 0.1"
-status   = "tested on hardware" # by desk-operator, Nov 2026: firmware V1.1, hardware V1.2
-tested   = ["firmware V1.1 / hardware V1.2"]
+status   = "tested"
+tested   = ["firmware V1.1 / hardware V1.2 (Nov 2026)"]
+sources  = [
+  "https://github.com/hamsternz/fnirsi_psu",
+  "https://philipp-iot.github.io/fnirsi_protocol/protocol/reference",
+]
 
 [source]
-script = "../shared/dps150_protocol.lua"
+script  = "../shared/dps150_protocol.lua"
 # 2e3c:5740 is Artery's generic AT32 virtual COM port id, shared by other gadgets: the driver
 # checks the model name before sending anything, and users should bind by serial_number.
-port   = { usb_vid = 0x2e3c, usb_pid = 0x5740 }
+port    = { usb_vid = 0x2e3c, usb_pid = 0x5740 }
+ratings = { max_voltage = 36.0, max_current = 8.0 }   # max_power: unclear (status reports 150, retail 285 W)
 
 [source.params]
-max_voltage = 36.0
-max_current = 8.0
-name        = "IPS3608"
-settle_ms   = 1000   # the output ramps up for several hundred ms after switching on
+name      = "IPS3608"
+settle_ms = 1000   # the output ramps up for several hundred ms after switching on
 # Byte offsets in the full status (query 0xFF), found by diffing status snapshots on hardware.
-status      = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, output = 107 }
+status    = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, output = 107 }

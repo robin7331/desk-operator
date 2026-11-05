@@ -464,7 +464,7 @@ fn lua_driver_limits_come_from_info_and_bench() {
     let b = source_bench(
         SIM_DRIVER,
         r#", params = { max = 12 }"#,
-        "limits = { current = 2 }",
+        "limits = { source = { current = 2 } }",
     );
     let out = b.run(&["--json", "source", "set", "psu", "13v"]);
     assert_eq!(out.code, 8);

@@ -154,6 +154,36 @@ pub enum LibraryCmd {
         /// Definition ids or paths to device.toml files [default: all]
         targets: Vec<String>,
     },
+    /// Create a new definition: device.toml, a driver skeleton and a vendor README
+    New {
+        /// Definition id: vendor/model (lowercase, digits, `-`, `_`)
+        id: String,
+        /// The capability the definition implements
+        #[arg(long, value_enum)]
+        capability: CapabilityArg,
+        /// Human-readable model name, e.g. "ACME PSU 9000"
+        #[arg(long)]
+        name: Option<String>,
+        /// Use an existing driver (path relative to the new device.toml, e.g. ../shared/x.lua)
+        #[arg(long)]
+        driver: Option<String>,
+        /// The device's maximum voltage (voltage_source)
+        #[arg(long)]
+        max_voltage: Option<f64>,
+        /// The device's maximum current (voltage_source)
+        #[arg(long)]
+        max_current: Option<f64>,
+        /// Library folder to create it in [default: devices/ next to the config]
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum CapabilityArg {
+    VoltageSource,
+    PowerSwitch,
 }
 
 #[derive(Debug, Subcommand)]
