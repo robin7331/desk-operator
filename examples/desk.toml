@@ -1,0 +1,36 @@
+# Example bench, runnable without hardware:
+#
+#   cargo run -- --config examples/desk.toml status
+#   cargo run -- --config examples/desk.toml power on psu iron
+#
+# The `mock` provider simulates outlets and keeps their state in a JSON file
+# ($DESK_MOCK_STATE, or mock-state.json in your platform state dir).
+# Swap `provider = "sim"` for a real provider (Home Assistant arrives in M1).
+
+[providers.sim]
+kind = "mock"
+# latency = "150ms"        # make the simulation feel like a network round-trip
+
+[devices.psu]
+name    = "FNIRSI IPS3608"
+aliases = ["supply", "power supply"]
+power   = { provider = "sim", endpoint = "outlet1" }
+
+[devices.load]
+name    = "DC load"
+aliases = ["dc load"]
+power   = { provider = "sim", endpoint = "outlet2" }
+
+[devices.dmm]
+name    = "Multimeter"
+aliases = ["meter", "multimeter"]
+power   = { provider = "sim", endpoint = "outlet3" }
+
+[devices.iron]
+name    = "Soldering iron"
+aliases = ["soldering iron", "solder"]
+power   = { provider = "sim", endpoint = "outlet4", timeout = "5s" }
+
+# A device without a power path is fine: it simply has no power_switch capability (yet).
+[devices.scope]
+name = "Oscilloscope"
