@@ -179,11 +179,12 @@ code come from the first failure.
 - [x] Smoke test against a real HA 2026.10 with a Shelly Power Strip 4 Gen4: on/off with verification
   in ≈0.2 s.
 
-Noticed during the real test (refine later, not blocking):
-- A real HA lists ~80 switchable entities (camera toggles etc.); `--search` is essential, and the
-  "bind a device with" example uses the first entity in the list, which is arbitrary.
-- Long entity ids make the POWER PATH column in `status` very wide; show the HA friendly name, or
-  truncate.
+Noticed during the real test (resolved in the polish pass after M3):
+- A real HA lists ~80 switchable entities: `provider endpoints` now suggests `--search` above 20
+  results and shows a `<ENDPOINT>` placeholder instead of an arbitrary first entity.
+- Long entity ids made tables very wide: `status` and dry-run show a short VIA column, and
+  `device list` shortens paths in the middle. Full bindings stay in `device show` and JSON.
+- JSON: `desk status` entries use `device` (like `power status`), not `id`.
 
 **Done when:** the HA tests pass, and a smoke test switches a real HA entity on/off with verification.
 

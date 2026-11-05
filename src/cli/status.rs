@@ -1,7 +1,7 @@
 use futures_util::future::join_all;
 use serde::Serialize;
 
-use super::device::power_path;
+use super::device::via;
 use crate::bench::Bench;
 use crate::error::{ErrorJson, Result};
 use crate::model::PowerState;
@@ -15,7 +15,7 @@ struct StatusData<'a> {
 
 #[derive(Serialize)]
 struct DeviceStatus<'a> {
-    id: &'a str,
+    device: &'a str,
     name: &'a str,
     /// `null` when the device has no power path.
     power: Option<PowerState>,
@@ -59,9 +59,9 @@ pub async fn run(bench: &Bench) -> Result<Report> {
             Some(Ok(s)) => (Some(s), None, s.to_string()),
             Some(Err(e)) => (None, Some(e.to_json()), format!("error: {e}")),
         };
-        dev_rows.push(vec![d.id.clone(), d.name.clone(), cell, power_path(d)]);
+        dev_rows.push(vec![d.id.clone(), d.name.clone(), cell, via(d)]);
         dev_data.push(DeviceStatus {
-            id: &d.id,
+            device: &d.id,
             name: &d.name,
             power,
             error,
@@ -94,10 +94,7 @@ pub async fn run(bench: &Bench) -> Result<Report> {
     if dev_rows.is_empty() {
         human.push_str("no devices configured\n");
     } else {
-        human.push_str(&table(
-            &["DEVICE", "NAME", "POWER", "POWER PATH"],
-            &dev_rows,
-        ));
+        human.push_str(&table(&["DEVICE", "NAME", "POWER", "VIA"], &dev_rows));
     }
     if !prov_rows.is_empty() {
         human.push('\n');

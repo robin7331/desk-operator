@@ -64,6 +64,20 @@ impl PowerBinding {
         }
     }
 
+    /// Very short form for narrow table columns: the provider id, or `script <file>`.
+    pub fn summary(&self) -> String {
+        match self {
+            PowerBinding::Native { provider, .. } => provider.clone(),
+            PowerBinding::Script { script, .. } => format!(
+                "script {}",
+                script.file_name().map_or_else(
+                    || script.display().to_string(),
+                    |n| n.to_string_lossy().into_owned()
+                )
+            ),
+        }
+    }
+
     /// Short human-readable description, e.g. `sim (endpoint=outlet1)`.
     pub fn describe(&self) -> String {
         match self {

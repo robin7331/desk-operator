@@ -93,6 +93,9 @@ fn list(bench: &Bench) -> Result<Report> {
     ))
 }
 
+/// Suggest `--search` when a listing is longer than this.
+const SEARCH_HINT_OVER: usize = 20;
+
 fn render_endpoints(provider: &str, endpoints: &[Endpoint]) -> String {
     let Some(first) = endpoints.first() else {
         return format!("provider `{provider}` offers no matching endpoints\n");
@@ -108,14 +111,26 @@ fn render_endpoints(provider: &str, endpoints: &[Endpoint]) -> String {
         })
         .collect();
     let mut out = table(&["ENDPOINT", "NAME", "STATE"], &rows);
+    // With exactly one match, show its real binding; otherwise a placeholder for the id.
     let params: Vec<String> = first
         .params
         .iter()
-        .map(|(k, v)| format!("{k} = {v}"))
+        .map(|(k, v)| match v {
+            toml::Value::String(s) if endpoints.len() > 1 && *s == first.id => {
+                format!("{k} = \"<ENDPOINT>\"")
+            }
+            other => format!("{k} = {other}"),
+        })
         .collect();
     out.push_str(&format!(
         "\nbind a device with: power = {{ provider = \"{provider}\", {} }}\n",
         params.join(", ")
     ));
+    if endpoints.len() > SEARCH_HINT_OVER {
+        out.push_str(&format!(
+            "{} endpoints; narrow them down with: desk provider endpoints {provider} --search <text>\n",
+            endpoints.len()
+        ));
+    }
     out
 }

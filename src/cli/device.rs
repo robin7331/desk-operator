@@ -5,7 +5,7 @@ use crate::bench::Bench;
 use crate::config::{Device, PowerBinding};
 use crate::error::Result;
 use crate::model::Capability;
-use crate::output::{Report, table};
+use crate::output::{Report, middle_ellipsis, table};
 
 #[derive(Serialize)]
 pub(super) struct DeviceView<'a> {
@@ -32,10 +32,20 @@ impl<'a> DeviceView<'a> {
     }
 }
 
+/// Max width of the power path column in `device list`; `device show` prints it in full.
+const PATH_WIDTH: usize = 48;
+
 pub(super) fn power_path(d: &Device) -> String {
     d.power
         .as_ref()
         .map_or_else(|| "(none)".to_string(), PowerBinding::describe)
+}
+
+/// The short "via" column: provider id or script name.
+pub(super) fn via(d: &Device) -> String {
+    d.power
+        .as_ref()
+        .map_or_else(|| "-".to_string(), PowerBinding::summary)
 }
 
 pub fn run(bench: &Bench, cmd: DeviceCmd) -> Result<Report> {
@@ -49,7 +59,7 @@ pub fn run(bench: &Bench, cmd: DeviceCmd) -> Result<Report> {
                         d.id.clone(),
                         d.name.clone(),
                         d.aliases.join(", "),
-                        power_path(d),
+                        middle_ellipsis(&power_path(d), PATH_WIDTH),
                     ]
                 })
                 .collect();

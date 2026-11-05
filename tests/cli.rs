@@ -234,7 +234,7 @@ fn status_reports_errors_inline() {
     assert_eq!(out.code, 0, "status itself succeeds even if devices fail");
     let j = out.json();
     let devices = j["data"]["devices"].as_array().unwrap();
-    let find = |id: &str| devices.iter().find(|d| d["id"] == id).unwrap();
+    let find = |id: &str| devices.iter().find(|d| d["device"] == id).unwrap();
     assert_eq!(find("psu")["power"]["state"], "off");
     assert_eq!(find("broken")["error"]["code"], "endpoint_unavailable");
     assert!(find("scope")["power"].is_null());

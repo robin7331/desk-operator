@@ -231,7 +231,12 @@ async fn dry_run(bench: &Bench, target: Target, devices: Vec<&Device>) -> Result
                     .before
                     .map_or_else(|| "unknown".to_string(), |b| b.to_string());
                 let would = if p.would_send {
-                    format!("would switch {} via {power_path}", p.target)
+                    let via = d
+                        .power
+                        .as_ref()
+                        .map(PowerBinding::summary)
+                        .unwrap_or_default();
+                    format!("would switch {} via {via}", p.target)
                 } else {
                     "nothing to do".to_string()
                 };

@@ -44,7 +44,10 @@ pub fn emit(json_mode: bool, result: Result<Report, DeskError>) -> i32 {
                 print_json(&env);
             } else {
                 print!("{}", report.human);
-                if let Some((err, _)) = &report.failure {
+                // A single failure is already in the table; only summaries need an extra line.
+                if let Some((err, _)) = &report.failure
+                    && !report.human.contains(&err.message)
+                {
                     eprintln!("error: {}", err.message);
                 }
             }
@@ -73,6 +76,20 @@ fn print_json(v: &Value) {
         "{}",
         serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
     );
+}
+
+/// Shorten `s` to at most `max` characters by cutting out the middle, keeping the (usually
+/// distinctive) end: `switch.workbench_…_outlet_2`.
+pub fn middle_ellipsis(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max || max < 5 {
+        return s.to_string();
+    }
+    let head = (max - 1) / 3;
+    let tail = max - 1 - head;
+    let start: String = s.chars().take(head).collect();
+    let end: String = s.chars().skip(len - tail).collect();
+    format!("{start}…{end}")
 }
 
 /// Left-aligned text table; the last column is not padded.
@@ -105,6 +122,17 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn middle_ellipsis_keeps_the_end() {
+        assert_eq!(middle_ellipsis("short", 10), "short");
+        let s =
+            "ha (entity=switch.desk_outlet_1)";
+        let m = middle_ellipsis(s, 48);
+        assert_eq!(m.chars().count(), 48);
+        assert!(m.starts_with("ha (entity="));
+        assert!(m.ends_with("desk_outlet_1)"));
+    }
 
     #[test]
     fn aligns_columns() {
