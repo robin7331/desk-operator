@@ -32,10 +32,13 @@ struct DeviceResult<'a> {
     changed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ErrorJson>,
+    /// Lines logged by a script binding (`ctx.log` / `print`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    log: Vec<String>,
 }
 
 impl<'a> DeviceResult<'a> {
-    fn failed(device: &'a str, e: &DeskError) -> Self {
+    fn failed(device: &'a str, e: &DeskError, log: Vec<String>) -> Self {
         DeviceResult {
             device,
             ok: false,
@@ -43,6 +46,7 @@ impl<'a> DeviceResult<'a> {
             before: None,
             changed: None,
             error: Some(e.to_json()),
+            log,
         }
     }
 }
@@ -82,8 +86,8 @@ async fn act(bench: &Bench, target: Target, t: Targets) -> Result<Report> {
     let mut rows = Vec::new();
     let mut results = Vec::new();
     let mut failures = Vec::new();
-    for (d, outcome) in devices.iter().zip(&outcomes) {
-        match outcome {
+    for (d, run) in devices.iter().zip(&outcomes) {
+        match &run.result {
             Ok(o) => {
                 let note = match (o.changed, o.before) {
                     (false, _) => format!("already {}", o.after.state),
@@ -98,11 +102,12 @@ async fn act(bench: &Bench, target: Target, t: Targets) -> Result<Report> {
                     before: o.before,
                     changed: Some(o.changed),
                     error: None,
+                    log: run.log.clone(),
                 });
             }
             Err(e) => {
                 rows.push(vec![d.id.clone(), "-".into(), format!("error: {e}")]);
-                results.push(DeviceResult::failed(&d.id, e));
+                results.push(DeviceResult::failed(&d.id, e, run.log.clone()));
                 failures.push(e);
             }
         }
@@ -127,8 +132,8 @@ async fn status(bench: &Bench, queries: Vec<String>) -> Result<Report> {
     let mut rows = Vec::new();
     let mut results = Vec::new();
     let mut failures = Vec::new();
-    for (d, state) in devices.iter().zip(&states) {
-        match state {
+    for (d, run) in devices.iter().zip(&states) {
+        match &run.result {
             Ok(s) => {
                 rows.push(vec![d.id.clone(), d.name.clone(), s.to_string()]);
                 results.push(DeviceResult {
@@ -138,11 +143,12 @@ async fn status(bench: &Bench, queries: Vec<String>) -> Result<Report> {
                     before: None,
                     changed: None,
                     error: None,
+                    log: run.log.clone(),
                 });
             }
             Err(e) => {
                 rows.push(vec![d.id.clone(), d.name.clone(), format!("error: {e}")]);
-                results.push(DeviceResult::failed(&d.id, e));
+                results.push(DeviceResult::failed(&d.id, e, run.log.clone()));
                 failures.push(e);
             }
         }

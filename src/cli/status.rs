@@ -44,7 +44,7 @@ pub async fn run(bench: &Bench) -> Result<Report> {
         join_all(devices.iter().map(|d| async move {
             match d.power {
                 None => None,
-                Some(_) => Some(bench.power_state(d).await),
+                Some(_) => Some(bench.power_state(d).await.result),
             }
         })),
         join_all(providers.iter().map(|(id, _)| bench.test_provider(id))),

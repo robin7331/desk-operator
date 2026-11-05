@@ -37,9 +37,19 @@ power   = { provider = "sim", endpoint = "outlet3" }
 
 [devices.iron]
 name    = "Soldering iron"
-aliases = ["soldering iron", "solder"]
+aliases = ["soldering iron"]
 power   = { provider = "sim", endpoint = "outlet4", timeout = "5s" }
 
 # A device without a power path is fine: it simply has no power_switch capability (yet).
 [devices.scope]
 name = "Oscilloscope"
+
+# Script power paths (Lua): see docs/scripting.md and examples/scripts/.
+[devices.station]
+name    = "Iron + fume extractor"
+aliases = ["solder station"]
+power   = { script = "scripts/iron_with_extractor.lua", params = { iron = { provider = "sim", endpoint = "outlet4" }, extractor = { provider = "sim", endpoint = "outlet5" } } }
+
+[devices.lamp]
+name  = "Bench lamp (RF remote)"
+power = { script = "scripts/double_press.lua", params = { remote = { provider = "sim", endpoint = "blind_lamp" } } }

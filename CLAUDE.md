@@ -86,10 +86,12 @@ src/
   power.rs             PowerSwitch trait + switch semantics (idempotent, read-back verification)
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
   providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
-  script/              (M2) mlua engine, sandbox, host API
-examples/desk.toml     sample bench on the mock provider
+  script/              mlua engine, sandbox, host API (`ctx`), timeout hook
+examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
+docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
 tests/cli.rs           end-to-end tests of the binary against the mock provider
 tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
+tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
 ```
 
 ## Development

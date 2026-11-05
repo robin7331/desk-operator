@@ -100,42 +100,14 @@ without it the state is `unknown`, or `assumed` after a successful set.
 
 ### Lua script contract
 
-```lua
--- scripts/lamp.lua
-function on(ctx)
-  local ha = ctx.provider("ha")
-  ha:turn_on(ctx.params.entity)
-  ctx.sleep(50)
-  ha:turn_on(ctx.params.entity)          -- device quirk: needs a second press
-  ctx.log("lamp on")
-end
+Implemented in M2; the user-facing reference is [`docs/scripting.md`](docs/scripting.md).
 
-function off(ctx)
-  ctx.provider("ha"):turn_off(ctx.params.entity)
-end
-
-function state(ctx)                      -- optional: return "on" | "off" | "unknown"
-  return ctx.provider("ha"):state(ctx.params.entity).state
-end
-```
-
-Host API (MVP, keep it this small):
-
-| Function | Notes |
-|---|---|
-| `ctx.device` | `{ id, name }` |
-| `ctx.params` | table from the binding's `params` |
-| `ctx.provider(id)` | returns a provider handle; errors for unknown ids |
-| `ha:turn_on(entity)`, `ha:turn_off(entity)` | domain taken from the entity id |
-| `ha:state(entity)` | `{ state, attributes }` |
-| `ha:call(domain, service, data)` | escape hatch for any HA service |
-| `mock:turn_on/turn_off/state` | same shape as HA, for tests |
-| `ctx.sleep(ms)` | async (tokio) |
-| `ctx.log(msg)` | goes to stderr; included in the `--json` result as `log: [...]` |
-
-Sandbox: `Lua::new_with(TABLE | STRING | MATH | UTF8 | COROUTINE)`, so there is no `io`/`os`/`package`/`debug`.
-The whole call is wrapped in `tokio::time::timeout` (default 30 s). Lua errors are mapped to
-`script_failed` with the message and line.
+- `on(ctx)` / `off(ctx)` are required, `state(ctx)` is optional. Success = return, failure = `error(...)`.
+- Host API: `ctx.device`, `ctx.params`, `ctx.power(binding)` (handle with `on/off/toggle/state/set`),
+  `ctx.sleep(ms | "1.5s")`, `ctx.log(...)` (`print` = log).
+- Sandbox: `string`, `table`, `math`, `utf8`, `coroutine` only; no `dofile`/`loadfile`. The timeout
+  (default 30 s) is enforced with an instruction hook too, so busy loops can't hang the CLI.
+- Host errors keep their codes. Script-raised errors become `script_failed` with file and line.
 
 ### Home Assistant provider
 
@@ -174,7 +146,7 @@ global: --json  --config <path>  --dry-run  -v
 | Exit | JSON `error.code` |
 |---|---|
 | 0 | — |
-| 1 | `internal`, `unsupported` |
+| 1 | `internal` |
 | 2 | `usage`, `device_not_found`, `device_ambiguous` |
 | 3 | `config_invalid`, `no_power_path` |
 | 4 | `provider_unreachable`, `endpoint_unavailable`, `state_unknown` |
@@ -216,9 +188,9 @@ Noticed during the real test (refine later, not blocking):
 **Done when:** the HA tests pass, and a smoke test switches a real HA entity on/off with verification.
 
 ### M2 — Lua script bindings
-- [ ] mlua engine with a sandboxed stdlib, async host API (`ctx.provider`, `sleep`, `log`, `params`, `device`)
-- [ ] `ScriptPowerSwitch` with timeout and error mapping; script logs shown in output
-- [ ] Example scripts (double-press quirk, sequence with a wait); tests against mock
+- [x] mlua 0.12 (Lua 5.4, vendored) with a sandboxed stdlib and an async host API (`ctx.power`, `sleep`, `log`, `params`, `device`)
+- [x] `ScriptSwitch` with timeout (including busy loops) and error mapping; script logs on stderr and in `--json` (`log`)
+- [x] Example scripts (`iron_with_extractor.lua`, `double_press.lua`), `docs/scripting.md`; 16 tests in `tests/scripts.rs`
 
 **Done when:** scripted bindings work end to end in tests (against mock and fake HA), and a failing or
 hanging script reports a useful error.
@@ -250,6 +222,10 @@ hanging script reports a useful error.
 
 - **Lua (mlua) from day one, not Rhai:** familiar to many users, natively async with tokio, and
   scripts are optional per device. The declarative step DSL is dropped for now because Lua covers it.
+- **`ctx.power{...}` instead of provider-specific script APIs (`ha:turn_on`):** scripts use the same
+  binding syntax as the config, so they work with every provider, present and future, and get the
+  same idempotent, verified switching. `p:set()` is the raw escape hatch. Provider-specific calls
+  (e.g. arbitrary HA services) get added when a real device needs them.
 - **Single crate for the MVP:** split into a workspace when the daemon or UI needs a shared core library.
 - **No daemon in the MVP:** HA is stateless HTTP. The daemon arrives with serial devices.
 - **"power" = mains, "output" = PSU terminals:** never conflate the two.

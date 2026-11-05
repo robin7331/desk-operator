@@ -35,9 +35,6 @@ power = { provider = "sim", endpoint = "blind_lamp" }
 [devices.laggy]
 power = { provider = "slow", endpoint = "x", timeout = "100ms" }
 
-[devices.scripted]
-power = { script = "scripts/lamp.lua" }
-
 [devices.scope]
 name = "Oscilloscope"
 "#;
@@ -206,14 +203,6 @@ fn device_without_power_path() {
     let out = b.run(&["--json", "power", "on", "scope"]);
     assert_eq!(out.code, 3);
     assert_eq!(out.json()["error"]["code"], "no_power_path");
-}
-
-#[test]
-fn script_bindings_not_yet_supported() {
-    let b = Bench::new();
-    let out = b.run(&["--json", "power", "on", "scripted"]);
-    assert_eq!(out.code, 1);
-    assert_eq!(out.json()["error"]["code"], "unsupported");
 }
 
 #[test]

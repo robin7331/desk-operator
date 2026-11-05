@@ -10,6 +10,8 @@ use crate::model::{Power, PowerFeatures, PowerState};
 
 /// Used when a binding doesn't set `timeout`.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Scripts typically wait for devices, so they get more time by default.
+pub const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Poll interval while waiting for a state change to show up.
 const SETTLE_POLL: Duration = Duration::from_millis(150);
@@ -21,6 +23,10 @@ pub trait PowerSwitch: Send + Sync {
     fn features(&self) -> PowerFeatures;
     async fn set(&self, on: bool) -> Result<()>;
     async fn state(&self) -> Result<PowerState>;
+    /// Log lines produced since the last call (scripts use `ctx.log`); most paths have none.
+    fn take_log(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

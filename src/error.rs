@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum DeskError {
     #[error("{0}")]
     Usage(String),
@@ -37,7 +37,6 @@ pub enum DeskError {
     #[error("power state of `{0}` is unknown, cannot toggle")]
     StateUnknown(String),
 
-    #[allow(dead_code)] // constructed by Lua bindings (M2)
     #[error("script failed: {0}")]
     ScriptFailed(String),
 
@@ -46,9 +45,6 @@ pub enum DeskError {
 
     #[error("verification failed: expected {expected}, device reports {actual}")]
     VerifyFailed { expected: String, actual: String },
-
-    #[error("{0}")]
-    Unsupported(String),
 
     #[error("{0}")]
     Internal(String),
@@ -69,7 +65,6 @@ impl DeskError {
             DeskError::ScriptFailed(_) => "script_failed",
             DeskError::Timeout { .. } => "timeout",
             DeskError::VerifyFailed { .. } => "verify_failed",
-            DeskError::Unsupported(_) => "unsupported",
             DeskError::Internal(_) => "internal",
         }
     }
@@ -77,7 +72,7 @@ impl DeskError {
     /// Process exit code. See `plan.md` for the table.
     pub fn exit_code(&self) -> i32 {
         match self {
-            DeskError::Internal(_) | DeskError::Unsupported(_) => 1,
+            DeskError::Internal(_) => 1,
             DeskError::Usage(_)
             | DeskError::DeviceNotFound { .. }
             | DeskError::DeviceAmbiguous { .. } => 2,
