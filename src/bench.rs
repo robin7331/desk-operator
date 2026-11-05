@@ -10,6 +10,7 @@ use crate::model::{Capability, Confidence, Power, PowerState};
 use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
 use crate::providers::{Endpoint, ProviderInfo, Registry};
 use crate::script::{DeviceInfo, ScriptSource, ScriptSpec, ScriptSwitch};
+use crate::serial::PortSpec;
 use crate::source::{self, Report as SourceReport, Request, VoltageSource};
 
 pub struct Bench {
@@ -54,9 +55,16 @@ impl Bench {
                 script,
                 params,
                 timeout,
+                port,
             } => {
                 let timeout = timeout.unwrap_or(power::DEFAULT_SCRIPT_TIMEOUT);
-                let sw = ScriptSwitch::load(self.script_spec(device, script, params, timeout))?;
+                let sw = ScriptSwitch::load(self.script_spec(
+                    device,
+                    script,
+                    params,
+                    port.as_ref(),
+                    timeout,
+                ))?;
                 (Box::new(sw), timeout)
             }
         })
@@ -91,6 +99,7 @@ impl Bench {
         device: &'a Device,
         path: &'a Path,
         params: &'a toml::Table,
+        port: Option<&'a PortSpec>,
         timeout: Duration,
     ) -> ScriptSpec<'a> {
         ScriptSpec {
@@ -100,6 +109,7 @@ impl Bench {
             },
             path,
             params,
+            port,
             timeout,
             providers: self.providers.clone(),
         }
@@ -119,9 +129,18 @@ impl Bench {
             Binding::Native {
                 provider, params, ..
             } => self.providers.get(provider)?.voltage_source(params)?,
-            Binding::Script { script, params, .. } => Box::new(ScriptSource::load(
-                self.script_spec(device, script, params, timeout),
-            )?),
+            Binding::Script {
+                script,
+                params,
+                port,
+                ..
+            } => Box::new(ScriptSource::load(self.script_spec(
+                device,
+                script,
+                params,
+                port.as_ref(),
+                timeout,
+            ))?),
         };
         Ok((src, timeout))
     }

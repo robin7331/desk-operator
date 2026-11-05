@@ -88,6 +88,7 @@ src/
   power.rs             PowerSwitch trait + switch semantics (idempotent, read-back verification)
   source.rs            VoltageSource trait + semantics (limits, setpoints before output, verify, sessions)
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
+  serial.rs            PortSpec matching, `desk port list`, async Port handle (exclusive opens)
   providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
@@ -98,6 +99,7 @@ tests/cli.rs           end-to-end tests of the binary against the mock provider
 tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
 tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
+tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
 ```
 
 ## Development

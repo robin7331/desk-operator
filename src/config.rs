@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{DeskError, Result};
 use crate::providers;
+use crate::serial::PortSpec;
 use crate::source::Limits;
 
 #[derive(Debug)]
@@ -40,7 +41,7 @@ pub struct Device {
     pub limits: Limits,
 }
 
-/// How a device gets mains power.
+/// How a capability of a device is implemented: by a provider, or by a Lua script.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "toml::Table", tag = "kind", rename_all = "lowercase")]
 pub enum Binding {
@@ -52,13 +53,16 @@ pub enum Binding {
         #[serde(serialize_with = "ser_opt_duration")]
         timeout: Option<Duration>,
     },
-    /// A Lua script implements `on(ctx)` / `off(ctx)` / `state(ctx)`.
+    /// A Lua script implements the capability (`on`/`off`/`state`, `set_voltage`/`read`, …).
     Script {
         /// Resolved against the config file's directory.
         script: PathBuf,
         params: toml::Table,
         #[serde(serialize_with = "ser_opt_duration")]
         timeout: Option<Duration>,
+        /// The only serial port this script may open (`ctx.serial.open`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port: Option<PortSpec>,
     },
 }
 
@@ -102,7 +106,10 @@ impl Binding {
                     format!("{provider} ({})", params.join(", "))
                 }
             }
-            Binding::Script { script, .. } => format!("script {}", script.display()),
+            Binding::Script { script, port, .. } => match port {
+                Some(port) => format!("script {} on {port}", script.display()),
+                None => format!("script {}", script.display()),
+            },
         }
     }
 }
@@ -120,11 +127,9 @@ impl TryFrom<toml::Table> for Binding {
         };
 
         match (t.contains_key("script"), t.contains_key("provider")) {
-            (true, true) => {
-                Err("a power binding uses either `provider` or `script`, not both".into())
-            }
+            (true, true) => Err("a binding uses either `provider` or `script`, not both".into()),
             (false, false) => {
-                Err("a power binding needs `provider = \"...\"` or `script = \"...\"`".into())
+                Err("a binding needs `provider = \"...\"` or `script = \"...\"`".into())
             }
             (true, false) => {
                 let script = match t.remove("script") {
@@ -136,15 +141,26 @@ impl TryFrom<toml::Table> for Binding {
                     Some(toml::Value::Table(p)) => p,
                     Some(_) => return Err("`params` must be a table".into()),
                 };
+                let port = match t.remove("port") {
+                    None => None,
+                    Some(toml::Value::Table(p)) => Some(PortSpec::try_from(p)?),
+                    Some(_) => {
+                        return Err(
+                            "`port` must be a table, e.g. { usb_vid = 0x1a86, usb_pid = 0x7523 }"
+                                .into(),
+                        );
+                    }
+                };
                 if let Some(k) = t.keys().next() {
                     return Err(format!(
-                        "unknown key `{k}` in script binding (allowed: script, params, timeout)"
+                        "unknown key `{k}` in script binding (allowed: script, params, timeout, port)"
                     ));
                 }
                 Ok(Binding::Script {
                     script,
                     params,
                     timeout,
+                    port,
                 })
             }
             (false, true) => {
@@ -368,10 +384,12 @@ fn resolve_script_path(binding: Binding, config_path: &Path) -> Binding {
             script,
             params,
             timeout,
+            port,
         } if script.is_relative() => Binding::Script {
             script: config_path.parent().unwrap_or(Path::new(".")).join(script),
             params,
             timeout,
+            port,
         },
         other => other,
     }

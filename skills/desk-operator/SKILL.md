@@ -47,6 +47,7 @@ desk power on <device>... --dry-run --json          # what would be sent; nothin
 desk device list|show <device> --json
 desk provider list|test <id> --json
 desk provider endpoints <id> --search <text> --json # e.g. Home Assistant entities
+desk port list --json                               # USB serial ports (for a binding's port = {…})
 
 desk source read <device> --json                    # output state, setpoints, measured V/A/W
 desk source set <device> 5v 1a [--on] --json        # units required: v, mv, a, ma

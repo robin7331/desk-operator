@@ -23,6 +23,7 @@ power = { script = "scripts/iron_with_extractor.lua", timeout = "15s", params = 
 | `script` | Path to the `.lua` file, relative to the config file (or absolute) |
 | `params` | Any table; passed to the script as `ctx.params`. Use it to keep scripts reusable |
 | `timeout` | Limit for each call (`on`, `off`, `state`), default `30s` |
+| `port` | The serial port the script may open (see below) |
 
 ## The script
 
@@ -62,6 +63,38 @@ A power handle `p` (both `p:on()` and `p.on()` work):
 Errors raised by the host (an unreachable provider, an unavailable entity, a failed verification)
 keep their own error code (`provider_unreachable`, `endpoint_unavailable`, `verify_failed`, …) unless
 the script catches them with `pcall`.
+
+## Serial ports (`ctx.serial`)
+
+A script binding can name **one** serial port. The script can open that port and no other:
+
+```toml
+source = { script = "drivers/my_psu.lua", port = { usb_vid = 0x1a86, usb_pid = 0x7523 } }
+# or: port = { path = "/dev/serial/by-id/usb-…" }, optionally with serial_number = "…"
+```
+
+Find the values with `desk port list` (`--all` also shows non-USB ports). Every given field must
+match; if several ports match, add `serial_number` or `path`.
+
+```lua
+local port = ctx.serial.open{ baud = 115200 }   -- opens the binding's port
+port:write(string.pack("<BBf", 0xF1, 0xC1, 5.0)) -- bytes are Lua strings
+local reply = port:read(17, 500)                 -- up to 17 bytes within 500 ms (may be fewer, or "")
+port:clear()                                     -- drop input that arrived but wasn't read
+port:close()                                     -- also happens automatically after the command
+```
+
+| `open{…}` option | Default | |
+|---|---|---|
+| `baud` | `9600` | |
+| `data_bits`, `parity`, `stop_bits` | `8`, `"none"`, `1` | `parity`: `"none"`, `"odd"`, `"even"` |
+| `flow` | `"none"` | `"software"`, `"hardware"` |
+| `dtr` | unchanged | some USB devices only talk with DTR set |
+| `wait` | `0` | keep looking for the port, e.g. `"3s"` right after switching mains on |
+
+Ports are opened **exclusively**: while one command uses a port, nothing else can, and
+`endpoint_unavailable` says "port is busy". Binary protocols are easy with Lua 5.4's
+`string.pack`/`string.unpack` (`"<f"` = little-endian float32, `"B"` = byte, `">H"` = big-endian u16).
 
 ## Instrument drivers (`source = { script = … }`)
 

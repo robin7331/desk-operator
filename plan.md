@@ -266,8 +266,9 @@ desk source read psu                            # output, setpoints, measured V/
       `output on` when the device already holds a setpoint above the bench limits.
 - [x] **M4.2** Lua source drivers: shared script engine (`script::Engine`) for power and source
       scripts, sessions with guaranteed `close`, driver logs kept in errors, `docs/scripting.md`
-- [ ] **M4.3** Serial host API: port matching, `ctx.serial.open`, read/write/timeouts; tested over a
-      pseudo-terminal pair (Unix)
+- [x] **M4.3** Serial host API: `port = { … }` in script bindings, `ctx.serial.open{…}` with
+      write/read/clear/close, `wait` for ports to appear, exclusive opens, `desk port list`
+      (USB only unless `--all`). Tested over pseudo-terminal pairs (Unix), stable over 30 repeated runs
 - [ ] **M4.4** `drivers/fnirsi_dps150.lua`, tested against a fake device that speaks the protocol
       over a pty (setpoints, output echo, pushed telemetry)
 - [ ] **M4.5** Smoke test on a real IPS3608 (nothing connected to the output), only with the user's go-ahead

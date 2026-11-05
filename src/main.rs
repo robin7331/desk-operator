@@ -7,6 +7,7 @@ mod output;
 mod power;
 mod providers;
 mod script;
+mod serial;
 mod source;
 
 use clap::Parser;
