@@ -58,7 +58,8 @@ default.
 - **The core owns hardware.** Scripts get handles from the host API. They never open arbitrary
   ports or network connections themselves (the Lua stdlib is sandboxed: no `io`, `os`, `package`
   or `debug`).
-- **Secrets are never in plaintext config.** Tokens come from env vars (keyring later).
+- **Secrets are never in the config file.** Tokens come from an env var or a separate `token_file`
+  (keyring later), and are never printed or logged.
 - **Cross-platform.** No platform-specific code without `cfg`-gated alternatives. Note: global
   hotkeys don't work on Wayland. The UI will expose a `desk palette` command for compositor
   keybinds.
@@ -84,10 +85,11 @@ src/
   model.rs             Capability, Power, PowerState, PowerFeatures
   power.rs             PowerSwitch trait + switch semantics (idempotent, read-back verification)
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
-  providers/           Provider trait, lazy Registry, Params helper; mock.rs (home_assistant.rs in M1)
+  providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
   script/              (M2) mlua engine, sandbox, host API
 examples/desk.toml     sample bench on the mock provider
 tests/cli.rs           end-to-end tests of the binary against the mock provider
+tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 ```
 
 ## Development

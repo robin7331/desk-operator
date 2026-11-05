@@ -8,7 +8,9 @@
 //! * `stuck_*` — `set` succeeds but the state never changes (→ `verify_failed`)
 //! * `blind_*` — send-only: no readback, state is unknown
 //!
-//! Setting `latency = "200ms"` delays every operation (for timeout tests).
+//! Settings: `latency = "200ms"` delays every operation (for timeout tests);
+//! `endpoints = ["outlet1", ...]` is what `desk provider endpoints` lists (plus anything already in
+//! the state file).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,9 +19,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use super::{Params, Provider, ProviderInfo};
+use super::{Endpoint, Params, Provider, ProviderInfo};
 use crate::error::{DeskError, Result};
-use crate::model::{Power, PowerFeatures, PowerState};
+use crate::model::{Capability, Power, PowerFeatures, PowerState};
 use crate::power::PowerSwitch;
 
 pub const KIND: &str = "mock";
@@ -38,16 +40,22 @@ struct Inner {
     id: String,
     latency: Duration,
     path: PathBuf,
+    endpoints: Vec<String>,
 }
 
 impl MockProvider {
     pub fn new(id: &str, settings: &Params) -> Result<Self> {
-        settings.only(&["latency"])?;
+        settings.only(&["latency", "endpoints"])?;
         Ok(MockProvider {
             inner: Arc::new(Inner {
                 id: id.to_string(),
                 latency: settings.duration("latency")?.unwrap_or_default(),
                 path: state_path()?,
+                endpoints: settings
+                    .str_list("endpoints")?
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
             }),
         })
     }
@@ -116,6 +124,47 @@ impl Provider for MockProvider {
         })
     }
 
+    async fn endpoints(&self, _capability: Capability) -> Result<Vec<Endpoint>> {
+        tokio::time::sleep(self.inner.latency).await;
+        let known = {
+            let _guard = FILE_LOCK
+                .lock()
+                .map_err(|_| DeskError::Internal("mock lock poisoned".into()))?;
+            self.inner
+                .read()?
+                .remove(&self.inner.id)
+                .unwrap_or_default()
+        };
+        let mut ids: Vec<String> = self.inner.endpoints.clone();
+        ids.extend(
+            known
+                .keys()
+                .filter(|k| !ids.contains(k))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        Ok(ids
+            .into_iter()
+            .map(|id| {
+                let state = if id.starts_with("blind_") {
+                    "unknown"
+                } else if known.get(&id).copied().unwrap_or(false) {
+                    "on"
+                } else {
+                    "off"
+                };
+                let mut params = toml::Table::new();
+                params.insert("endpoint".into(), toml::Value::String(id.clone()));
+                Endpoint {
+                    id,
+                    name: None,
+                    state: Some(state.into()),
+                    params,
+                }
+            })
+            .collect())
+    }
+
     fn power_switch(&self, params: &toml::Table) -> Result<Box<dyn PowerSwitch>> {
         let params = Params::new(
             params,
@@ -152,6 +201,7 @@ impl PowerSwitch for MockSwitch {
     fn features(&self) -> PowerFeatures {
         PowerFeatures {
             readback: !self.endpoint.starts_with("blind_"),
+            settle: Duration::ZERO,
         }
     }
 

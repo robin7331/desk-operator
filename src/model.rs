@@ -1,6 +1,7 @@
 //! Vendor-neutral domain types.
 
 use std::fmt;
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -84,8 +85,10 @@ impl fmt::Display for PowerState {
 }
 
 /// What a power path can do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowerFeatures {
     /// The real state can be read back (enables verification and idempotent switching).
     pub readback: bool,
+    /// How long the read-back state may lag behind a command. Zero means "read once".
+    pub settle: Duration,
 }

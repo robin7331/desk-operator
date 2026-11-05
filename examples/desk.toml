@@ -5,10 +5,19 @@
 #
 # The `mock` provider simulates outlets and keeps their state in a JSON file
 # ($DESK_MOCK_STATE, or mock-state.json in your platform state dir).
-# Swap `provider = "sim"` for a real provider (Home Assistant arrives in M1).
+# Swap `provider = "sim"` for a real provider, e.g. Home Assistant:
+#
+#   [providers.ha]
+#   kind       = "home-assistant"
+#   url        = "http://homeassistant.local:8123"
+#   token_env  = "HA_TOKEN"     # default; or: token_file = "ha.token" (relative to this file, or ~/...)
+#
+#   then find your outlets with:  desk provider endpoints ha --search outlet
+#   and bind:                     power = { provider = "ha", entity = "switch.desk_outlet_1" }
 
 [providers.sim]
 kind = "mock"
+endpoints = ["outlet1", "outlet2", "outlet3", "outlet4"]   # what `desk provider endpoints sim` lists
 # latency = "150ms"        # make the simulation feel like a network round-trip
 
 [devices.psu]

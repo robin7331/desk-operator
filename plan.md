@@ -195,10 +195,18 @@ code come from the first failure.
 **Done when:** `desk --config examples/desk.toml power on psu && desk ... power status --json` works and is tested.
 
 ### M1 — Home Assistant: first real bench test ✦ *MVP is usable here*
-- [ ] HA provider: `test`, `endpoints`, `set`, `state` (+ `wiremock` tests)
-- [ ] `provider list|test|endpoints`
-- [ ] Native semantics: read-back verification
-- [ ] Your real `desk.toml` with the IPS3608 and the iron on Shelly outlets
+- [x] HA provider: `test`, `endpoints`, `set`, `state` (+ end-to-end tests against a stateful fake HA in `tests/home_assistant.rs`)
+- [x] `provider list|test|endpoints [--search]`; endpoints include the binding params to paste
+- [x] Native semantics: read-back verification, polling within a per-provider settle window (HA: 3 s)
+- [x] Token from `token_env` (default `HA_TOKEN`) or `token_file`; a missing token only breaks that provider's devices
+- [x] Real `desk.toml` (HA 2026.10.2, Shelly Power Strip 4 Gen4): Switched on/off and verified on real hardware (≈0.2 s per switch including verification).
+
+Noticed during the real test (refine later, not blocking):
+- A real HA lists ~80 switchable entities (camera toggles etc.); `--search` is essential, and the
+  "bind a device with" example uses the first entity in the list, which is arbitrary.
+- Long entity ids make the POWER PATH column in `status` very wide; show the HA friendly name, or
+  truncate.
+- The soldering iron isn't on the strip yet.
 
 **Done when:** `desk power on psu` switches the real outlet and `status` reports `on (real)`.
 
@@ -239,6 +247,12 @@ code come from the first failure.
 - **Single crate for the MVP:** split into a workspace when the daemon or UI needs a shared core library.
 - **No daemon in the MVP:** HA is stateless HTTP. The daemon arrives with serial devices.
 - **"power" = mains, "output" = PSU terminals:** never conflate the two.
+- **Verification polls instead of reading once:** HA/Shelly can report the old state briefly after
+  a service call. Each power path declares a `settle` window (`PowerFeatures::settle`).
+- **`token_file` besides `token_env`:** lets a token live in a 0600 file next to the config, so
+  it's available to every shell (and agents) without being exported everywhere.
+- **HA switchable domains:** `switch`, `light`, `fan`, `input_boolean`. Entity ids are validated
+  strictly (`domain.object_id`, `[a-z0-9_]`), which also keeps them URL-safe.
 
 ## Open questions
 

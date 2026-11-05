@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use crate::config::{Config, Device, PowerBinding};
 use crate::error::{DeskError, Result};
-use crate::model::PowerState;
+use crate::model::{Capability, PowerState};
 use crate::power::{self, Outcome, PowerSwitch, Target};
-use crate::providers::{ProviderInfo, Registry};
+use crate::providers::{Endpoint, ProviderInfo, Registry};
 
 pub struct Bench {
     pub config: Config,
@@ -17,7 +17,12 @@ pub struct Bench {
 impl Bench {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let config = Config::load(path)?;
-        let providers = Registry::new(config.providers.clone());
+        let base_dir = config
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let providers = Registry::new(config.providers.clone(), base_dir);
         Ok(Bench { config, providers })
     }
 
@@ -67,6 +72,17 @@ impl Bench {
             .await
             .map_err(|_| DeskError::Timeout {
                 what: format!("testing provider `{id}`"),
+                after,
+            })?
+    }
+
+    pub async fn endpoints(&self, id: &str, capability: Capability) -> Result<Vec<Endpoint>> {
+        let provider = self.providers.get(id)?;
+        let after = power::DEFAULT_TIMEOUT;
+        tokio::time::timeout(after, provider.endpoints(capability))
+            .await
+            .map_err(|_| DeskError::Timeout {
+                what: format!("listing endpoints of provider `{id}`"),
                 after,
             })?
     }

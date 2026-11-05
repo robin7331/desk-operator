@@ -11,6 +11,9 @@ use crate::model::{Power, PowerFeatures, PowerState};
 /// Used when a binding doesn't set `timeout`.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Poll interval while waiting for a state change to show up.
+const SETTLE_POLL: Duration = Duration::from_millis(150);
+
 /// One switchable mains path. Providers (and later Lua scripts) implement this; the core never
 /// knows what an "entity" or "endpoint" is.
 #[async_trait]
@@ -39,7 +42,7 @@ pub struct Outcome {
 
 /// Switch a power path, idempotently and with verification where possible:
 ///
-/// * readback: read the state, skip if already there, set, read again, verify.
+/// * readback: read the state, skip if already there, set, then verify (polling within `settle`).
 /// * no readback: set and report the result as `assumed`. Toggle is refused because the current
 ///   state is unknown.
 pub async fn switch(device_id: &str, sw: &dyn PowerSwitch, target: Target) -> Result<Outcome> {
@@ -77,18 +80,31 @@ pub async fn switch(device_id: &str, sw: &dyn PowerSwitch, target: Target) -> Re
     }
 
     sw.set(on).await?;
-    let after = sw.state().await?;
-    if after.state != wanted {
-        return Err(DeskError::VerifyFailed {
-            expected: wanted.to_string(),
-            actual: after.state.to_string(),
-        });
-    }
+    let after = settle(sw, wanted).await?;
     Ok(Outcome {
         before: Some(before),
         after,
         changed: true,
     })
+}
+
+/// Read the state until it matches `wanted`, for at most the path's settle window. Providers such
+/// as Home Assistant may report the old state for a moment after a command.
+async fn settle(sw: &dyn PowerSwitch, wanted: Power) -> Result<PowerState> {
+    let deadline = tokio::time::Instant::now() + sw.features().settle;
+    loop {
+        let state = sw.state().await?;
+        if state.state == wanted {
+            return Ok(state);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(DeskError::VerifyFailed {
+                expected: wanted.to_string(),
+                actual: state.state.to_string(),
+            });
+        }
+        tokio::time::sleep(SETTLE_POLL).await;
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +140,7 @@ mod tests {
         fn features(&self) -> PowerFeatures {
             PowerFeatures {
                 readback: self.readback,
+                settle: Duration::ZERO,
             }
         }
         async fn set(&self, on: bool) -> Result<()> {

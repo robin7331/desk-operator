@@ -3,6 +3,7 @@
 
 mod device;
 mod power;
+mod provider;
 mod status;
 
 use std::path::PathBuf;
@@ -45,6 +46,11 @@ pub enum Command {
         #[command(subcommand)]
         action: DeviceCmd,
     },
+    /// Inspect providers (Home Assistant, ...) and what they can control
+    Provider {
+        #[command(subcommand)]
+        action: ProviderCmd,
+    },
     /// Overview of all devices and providers
     Status,
 }
@@ -76,6 +82,25 @@ pub struct Targets {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ProviderCmd {
+    /// List configured providers and the devices using them
+    List,
+    /// Check that a provider is reachable and authenticated
+    Test {
+        /// Provider id from [providers.<id>]
+        provider: String,
+    },
+    /// List what a provider can switch, e.g. Home Assistant entities, to use in a power binding
+    Endpoints {
+        /// Provider id from [providers.<id>]
+        provider: String,
+        /// Only show endpoints whose id or name contains this text (case-insensitive)
+        #[arg(long, short)]
+        search: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum DeviceCmd {
     /// List configured devices
     List,
@@ -91,6 +116,7 @@ pub async fn run(cli: Cli) -> Result<Report> {
     match cli.command {
         Command::Power { action } => power::run(&bench, action).await,
         Command::Device { action } => device::run(&bench, action),
+        Command::Provider { action } => provider::run(&bench, action).await,
         Command::Status => status::run(&bench).await,
     }
 }

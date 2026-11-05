@@ -28,7 +28,6 @@ pub enum DeskError {
     #[error("device `{0}` has no power path configured")]
     NoPowerPath(String),
 
-    #[allow(dead_code)] // constructed by network providers (M1)
     #[error("provider `{provider}` unreachable: {message}")]
     ProviderUnreachable { provider: String, message: String },
 
