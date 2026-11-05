@@ -77,6 +77,7 @@ the first failure only.
 | `capability_missing` | That device can't do this (e.g. no `source`); say so |
 | `device_off` | Its mains power is off. Ask before switching it on with `desk power on` |
 | `limit_exceeded` | Refused, nothing was sent. Tell the user the limit; never work around it or edit `limits` unasked |
+| `protection_tripped` | A protection (OVP, OCP, …) switched the output off; nothing was sent. Tell the user which one. Use `--clear-protection` only after they found the cause and asked you to switch on again |
 
 ## Power supplies (`desk source`)
 
@@ -86,7 +87,12 @@ the first failure only.
 - `--on` switches the output on *after* the setpoints. Use it only when the user wants the output on.
 - Read `data.verified`: `true` means the value was read back and confirmed. A missing entry means
   the device can't report it, so say "set, but not confirmed by the device".
-- Also report `data.warnings` and the measured values (`data.reading`).
+- Also report `data.warnings` and the measured values (`data.reading`). Depending on the device,
+  `reading` also has `mode` (`cv`, or `cc` = the current limit is reached, e.g. a short or a
+  charging battery), `protection` (`none` or what tripped), `temperature`, `input_voltage`, and
+  `charge`/`energy` (Ah/Wh counters). `null` means the device doesn't report it.
+- A tripped protection blocks `output on` (`protection_tripped`). `--clear-protection` overrides
+  that and switches the output back on, so it's the user's call, never yours.
 - When in doubt, `--dry-run` first: it checks the limits and shows what would be sent.
 
 ## Safety

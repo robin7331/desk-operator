@@ -6,7 +6,9 @@ use super::{OnOff, SourceCmd};
 use crate::bench::Bench;
 use crate::error::{DeskError, Result};
 use crate::output::{Report, table};
-use crate::source::{Reading, Report as SourceReport, Request, fmt_a, fmt_v, fmt_w};
+use crate::source::{
+    Mode, Protection, Reading, Report as SourceReport, Request, fmt_a, fmt_v, fmt_w,
+};
 
 #[derive(Serialize)]
 struct Data<'a> {
@@ -23,26 +25,39 @@ pub async fn run(bench: &Bench, cmd: SourceCmd) -> Result<Report> {
             device,
             values,
             on,
+            clear_protection,
             dry_run,
         } => {
             let mut req = parse_values(&values)?;
             if on {
                 req.output = Some(true);
             }
+            req.clear_protection = clear_protection;
             (device, req, dry_run)
         }
         SourceCmd::Output {
             state,
             device,
+            clear_protection,
             dry_run,
-        } => (
-            device,
-            Request {
-                output: Some(matches!(state, OnOff::On)),
-                ..Request::default()
-            },
-            dry_run,
-        ),
+        } => {
+            let on = matches!(state, OnOff::On);
+            if clear_protection && !on {
+                return Err(DeskError::Usage(
+                    "--clear-protection only applies to `output on` (switching off is always allowed)"
+                        .into(),
+                ));
+            }
+            (
+                device,
+                Request {
+                    output: Some(on),
+                    clear_protection,
+                    ..Request::default()
+                },
+                dry_run,
+            )
+        }
         SourceCmd::Read { device } => (device, Request::default(), false),
     };
 
@@ -118,6 +133,12 @@ fn render(device: &str, r: &SourceReport) -> String {
         voltage,
         current,
         power,
+        mode,
+        protection,
+        temperature,
+        input_voltage,
+        charge,
+        energy,
     } = r.reading;
     let output = match output {
         Some(true) => "on",
@@ -135,6 +156,27 @@ fn render(device: &str, r: &SourceReport) -> String {
         &["DEVICE", "OUTPUT", "SET", "MEASURED"],
         &[vec![device.to_string(), output.into(), set, measured]],
     );
+    // What else the device reports, only what it has.
+    let extra: Vec<String> = [
+        mode.map(|m| match m {
+            Mode::Cv => "CV (constant voltage)".to_string(),
+            Mode::Cc => "CC (current limit reached)".to_string(),
+        }),
+        protection.map(|p| match p {
+            Protection::None => "no protection tripped".to_string(),
+            p => format!("{} TRIPPED", p.name()),
+        }),
+        temperature.map(|t| format!("{t:.1} °C")),
+        input_voltage.map(|v| format!("input {}", fmt_v(v))),
+        charge.map(|c| format!("{c:.3} Ah")),
+        energy.map(|e| format!("{e:.3} Wh")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !extra.is_empty() {
+        out.push_str(&format!("{}\n", extra.join(" · ")));
+    }
 
     let req = r.requested;
     if !req.is_empty() {

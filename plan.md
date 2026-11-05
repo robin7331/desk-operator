@@ -440,6 +440,37 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
       every skill mentions only real commands and error codes
 - [ ] Validate the add-device skill end to end on a second real device (with the user)
 
+## Roadmap to going public (agreed 2026-11-05)
+
+1. **IPS3608 complete:** research the full protocol (every command, status field, push rate),
+   probe the real unit read-only, then bring every feature it really has into desk: generic
+   `voltage_source` extensions where they fit (e.g. CV/CC mode, protections, counters), driver and
+   definition updated. The add-device skill gets an "improve an existing definition" section.
+   - [x] Research (25+ sources, decompiles of the official app) and read-only probes on the unit:
+         README corrected (offset 24 = temperature, 76–92 = protection thresholds, DF = hardware /
+         E0 = firmware), full command table and status layout, never send type C0 (firmware mode)
+   - [x] `voltage_source` `read()`: optional `mode` (cv|cc), `protection`, `temperature`,
+         `input_voltage`, `charge` (Ah), `energy` (Wh); mode dropped while the output is off
+   - [x] Core: a tripped protection refuses `output on` (`protection_tripped`, also for dry runs and
+         trips right after switching on) unless `--clear-protection`; warnings on every read
+   - [x] Driver: 50 ms quiet gap after writes (dropped writes), all status fields, input via query
+         C0 (IPS3608); definitions: IPS3608 285 W + versions fixed, DPS-150 gets USB id, name check
+         and status layout (still community)
+   - [x] Fake-device tests: every field, the gap (fails without it), a latched trip; sim PSU with
+         CV/CC and `tripping_*`; read verified on the real IPS3608
+   - Not exposed (they write stored settings): protection thresholds, presets, metering on/off and
+     counter reset, brightness, volume. CC on the IPS3608 needs a load to confirm.
+2. **Streaming:** `desk source watch <device> --json` (one session, one JSON line per measurement),
+   maybe with a cutoff in desk (`--until … --then output-off`) so it holds even if the script dies.
+   Rate is device-bound (IPS3608 pushes every ~0.5 s). Watching while controlling needs stdin
+   commands or the daemon later.
+3. **Dogfood as a user (before going public):** install the local build (`cargo install --path .`,
+   `desk skill install --global`), add a device in a fresh session with only the
+   installed skills. The device must fit an existing capability (else `meter` first, for the DMM).
+4. **Public:** license, two GitHub repos (desk-operator, desk-operator-devices; decide how the
+   binary gets definitions and where definition tests live), release CI for Linux/macOS/Windows,
+   `curl | sh` installer that offers `desk skill install`.
+
 ## After M6 (rough order, re-evaluate each time)
 
 1. **Config editing from the CLI:** `device add`, `device power <dev>` with interactive provider/entity pickers (`toml_edit`, `inquire`)

@@ -1,60 +1,95 @@
 # FNIRSI power supplies (DPS-150 protocol family)
 
-| Definition | Model | Maximum | Status |
+| Definition | Model | Rating | Status |
 |---|---|---|---|
-| `fnirsi/ips3608` | IPS3608 | 36 V, 8 A | **tested** (firmware V1.1, hardware V1.2) |
-| `fnirsi/dps-150` | DPS-150 | 30 V, 5.1 A | community (not yet tested on hardware) |
+| `fnirsi/ips3608` | IPS3608 | 36 V, 8 A, 285 W | **tested** (hardware V1.1, firmware V1.2) |
+| `fnirsi/dps-150` | DPS-150 | 30 V, 5.1 A, 150 W | community (protocol verified on hardware by others, not with desk) |
 
-Both use one driver, [`shared/dps150_protocol.lua`](shared/dps150_protocol.lua): FNIRSI ships a single
-PC application for "DPS-150 / IPS3608", and the IPS3608 frames match the documented DPS-150 ones.
-They connect over USB as a CDC-ACM serial port (`/dev/ttyACM*` on Linux).
+Both use one driver, [`shared/dps150_protocol.lua`](shared/dps150_protocol.lua): FNIRSI ships a
+single PC application for "DPS-150 / IPS3608", and both speak the same protocol. They connect over
+USB as a CDC-ACM serial port (`/dev/ttyACM*` on Linux).
+
+What desk reads from them: output state, setpoints, measured V/A/W, regulation mode (CV/CC),
+protection state, temperature, input voltage, and the Ah/Wh counters.
 
 ## Protocol
 
 Binary frames `dir, type, cmd, len, data…, checksum` with `checksum = (cmd + len + Σdata) & 0xFF`,
 `dir` = `0xF1` (to the device) or `0xF0` (from the device), float32 little-endian values.
 
-| | Frame |
-|---|---|
-| Connect / disconnect | `F1 C1 00 01 01 02` / `F1 C1 00 01 00 01` (the front panel is locked while connected) |
-| Set voltage / current | `F1 B1 C1 04 <float>` / `F1 B1 C2 04 <float>`, no reply |
-| Output on / off | `F1 B1 DB 01 01 DD` / `F1 B1 DB 01 00 DC`; echoed by the DPS-150, **not** by the IPS3608 |
-| Measurements | pushed by the device, about every 0.5–0.6 s: `F0 A1 C3 0C <V> <A> <W>` |
-| Model name | query `F1 A1 DE 01 00 DF` → ASCII, e.g. `IPS3608` (`DF` firmware, `E0` hardware version) |
-| Full status | query `F1 A1 FF 01 00 00` → 139 bytes (layout below) |
+Types: `A1` query/response, `B1` write, `C1` session. **Never send type `C0`**: it switches the
+device into its firmware-update mode (USB mass storage, id `2e3c:5720`, the serial port
+disappears). Type `B0` sets a baud index with unknown effect. The driver sends neither.
 
-**IPS3608 full status** (offsets in bytes, float32 LE unless noted), found on hardware by diffing
-snapshots with the output off, on, off:
+| cmd | | Meaning | Data |
+|---|---|---|---|
+| `00` | `C1` | connect (1) / disconnect (0); the front panel is locked while connected | u8 |
+| `C0` | query | input voltage | f32 V |
+| `C1` / `C2` | write | voltage / current setpoint (no reply) | f32 |
+| `C3` | pushed, query | measured V, A, W | 3 × f32 |
+| `C4` | pushed, query | temperature | f32 °C |
+| `C5`–`D0` | write | presets M1–M6 (V, A pairs; stored on the device) | f32 |
+| `D1`–`D5` | write | OVP V / OCP A / OPP W / OTP °C / LVP V (input under-voltage) thresholds (stored) | f32 |
+| `D6` / `D7` | write | brightness / volume (stored) | u8 |
+| `D8` | write, query | metering (Ah/Wh counting) on/off | u8 |
+| `D9` / `DA` | pushed | charge Ah / energy Wh | f32 |
+| `DB` | write, query | output on/off. **`DB=1` also clears a latched protection** | u8 |
+| `DC` | query | protection: 0 none, 1 OVP, 2 OCP, 3 OPP, 4 OTP, 5 LVP | u8 |
+| `DD` | query | mode: 1 CV, 0 CC (DPS-150; **not** on the IPS3608, see below) | u8 |
+| `DE` / `DF` / `E0` | query | model name / **hardware** version / **firmware** version (ASCII) | |
+| `E1` | query | device address (1) | u8 |
+| `E2` / `E3` | query | maximum settable V / A right now | f32 |
+| `E4`–`E8` | query | ceilings of the protection settings | f32 |
+| `FF` | query | full status, 139 bytes (layout below) | |
 
-| Offset | Field |
-|---|---|
-| 0 | input/bus voltage (48 V) |
-| 4 / 8 | **voltage / current setpoint** |
-| 12 / 16 / 20 | measured voltage / current / power |
-| 24 | internal rail voltage (~30.3 V, also pushed as `C4`) |
-| 28–75 | six presets (V, A pairs) |
-| 76 / 80 / 84 | maximum voltage (36), current (8), power (150) |
-| 99 / 103 | counters, also pushed as `D9` / `DA` (meaning unknown) |
-| 107 | **output on/off** (byte, 1 = on) |
+Queries are `F1 A1 <cmd> 01 00 <cmd+1>`. No command exists for the push rate, key lock, preset
+recall, counter reset or a soft reset. **The devices don't validate written values** (a DPS-150
+accepts 31 V or −1 V), so desk's ratings and limits are the only guard. A write is **dropped when
+the next frame follows within a few ms**: the driver waits `gap_ms` (50) after every write.
 
-The IPS3608 also pushes `C4` (rail voltage) and `D9`/`DA` (counters) with every measurement cycle.
+**Full status** (`FF`), offsets in bytes, float32 LE unless noted (same on both models):
 
-Sources: [hamsternz/fnirsi_psu](https://github.com/hamsternz/fnirsi_psu) (a working C tool for this
-power supply), [DPS-150 protocol reference](https://philipp-iot.github.io/fnirsi_protocol/protocol/reference),
-[FNIRSI software downloads](https://www.fnirsi.com/pages/software).
+| Offset | Field | Offset | Field |
+|---|---|---|---|
+| 0 | input voltage (IPS3608: constant 48.0) | 96 / 97 / 98 | brightness / volume / metering (u8) |
+| 4 / 8 | **voltage / current setpoint** | 99 / 103 | **charge Ah / energy Wh** |
+| 12 / 16 / 20 | measured V / A / W | 107 | **output on** (u8) |
+| 24 | **temperature °C** | 108 | **protection** (u8, codes as `DC`) |
+| 28–75 | presets M1–M6 (V, A pairs) | 109 | **mode** (u8, 1 CV / 0 CC) |
+| 76–92 | OVP / OCP / OPP / OTP / LVP thresholds | 110 | address (u8) |
+| | | 111 / 115 | max V / A (`E2`/`E3`) |
+| | | 119–135 | ceilings of the five protection settings |
 
-## Known gaps
+Protections: OVP, OCP, OPP and OTP **latch** (output off until cleared); LVP clears by itself.
+The host can only clear a latched trip with `DB=1`, which **switches the output on at the same
+time**. desk therefore refuses `output on` while a protection is tripped, unless the user passes
+`--clear-protection`.
 
-- **USB id `2e3c:5740` is Artery's generic AT32 id**, not FNIRSI-specific: other gadgets share it.
-  The IPS3608 definition checks the model name (`DE`) before sending anything; bind by
-  `serial_number` in your own config.
-- **DPS-150:** USB id, status layout and the name query are from documentation only, not verified
-  on hardware. Without a status layout the driver can't read setpoints back (reported as *not
-  confirmed*) and knows the output state only from the echo.
-- **DPS-150 output state at power-up** is not documented. Check before connecting a load.
+Sources (best first): [mmgalushka/dps150](https://github.com/mmgalushka/dps150) (DPS-150
+systematically probed on hardware), [Puyodead1/fnirsi-psu](https://github.com/Puyodead1/fnirsi-psu)
+and [brandonjank/ips3608-control](https://github.com/brandonjank/ips3608-control) (decompiles of
+the official app plus hardware tests; the latter on IPS3608s),
+[cho45/fnirsi-dps-150](https://github.com/cho45/fnirsi-dps-150) (the original reverse
+engineering), [hamsternz/fnirsi_psu](https://github.com/hamsternz/fnirsi_psu),
+[Philipp-IoT/fnirsi_protocol](https://github.com/Philipp-IoT/fnirsi_protocol) (raw captures are
+useful; several interpretations are wrong), [FNIRSI IPS3608](https://www.fnirsi.com/products/ips3608)
+(ratings), [FNIRSI software](https://www.fnirsi.com/pages/software-downloads).
 
-## Behavior observed on the IPS3608 (firmware V1.1)
+## Observed on the IPS3608 (hardware V1.1, firmware V1.2, Nov 2026)
 
+Read-only probes with `desk port probe`, output switched only through desk, nothing connected:
+
+- **Pushed** while connected, about every **550 ms**: `DA`, `D9`, `C3`, `C4`. Unlike the DPS-150,
+  no `C0`, `E2`, `E3` pushes. The Ah/Wh counters are pushed with the output off, too.
+- **Every documented query answers** (`DE` … `E8`, `C0`–`C4`, `DB`, `DC`, `DD`, `FF`). The full
+  status replies within about 20 ms, also at 10 queries per second.
+- **Mode: use status offset 109.** With the output on and no load, offset 109 reads 1 (CV) while
+  query `DD` reads 0 in every state. CC (0) is from the sources; not yet seen on this unit (needs a
+  load).
+- **Input voltage: use query `C0`** (44.7–46.2 V, moves with load); status offset 0 stays 48.0.
+- Protection thresholds as shipped: OVP 36 V, OCP 8 A, OPP 150 W, OTP 60 °C, LVP 40 V. Ceilings:
+  36 V, 8.2 A, 288 W, 99 °C, 48 V. `E2` answers input − 0.2 V (44.5 V) while status offset 111
+  says 36.0; desk uses the ratings either way.
 - **After a mains cut it comes back with the output off** and keeps its setpoints.
 - **Right after mains on**, the USB port appears within about a second, but the first writes fail
   ("broken pipe") until the device has booted (under 2 s). The driver retries for `boot_ms`.
@@ -62,8 +97,20 @@ power supply), [DPS-150 protocol reference](https://philipp-iot.github.io/fnirsi
   so the definition waits `settle_ms = 1000` before measuring.
 - It does **not echo** the output command; the output state comes from the full status.
 
+## Known gaps
+
+- **USB id `2e3c:5740` is Artery's generic AT32 id**, not FNIRSI-specific: other gadgets share it.
+  Both definitions check the model name (`DE`) before sending anything; bind by `serial_number` in
+  your own config.
+- **Not exposed by desk yet:** protection thresholds, presets, metering on/off and counter reset
+  (turning metering off and on resets it per the DPS-150 manual; unverified), brightness, volume.
+  All of these write settings stored on the device.
+- **DPS-150:** not yet run with desk on hardware. Its output state at power-up isn't documented:
+  check before connecting a load.
+
 ## Tests
 
 `tests/device_fnirsi_dps150.rs` runs the driver against a fake device that speaks this protocol
 over a pseudo-terminal: connect/disconnect, setpoints, output echo (or none), pushed telemetry,
-garbage and resynchronization, a silent device, the name check and the IPS3608 status layout.
+garbage and resynchronization, a silent device, the name check, the IPS3608 status layout with
+every field, the quiet gap after writes, and a latched protection.

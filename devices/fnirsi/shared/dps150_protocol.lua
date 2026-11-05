@@ -4,7 +4,9 @@
 -- Frame: dir, type, cmd, len, data..., checksum      checksum = (cmd + len + sum(data)) & 0xFF
 --   dir   0xF1 host -> device, 0xF0 device -> host
 --   type  0xA1 query/response, 0xB1 write, 0xC1 connect control
+--         (0xB0 and 0xC0 also exist: 0xC0 enters the firmware-update mode. Never sent here.)
 --   cmd   0x00 connect (data 1) / disconnect (data 0)
+--         0xC0 query: input voltage (float32 LE)
 --         0xC1 set voltage, 0xC2 set current (float32 LE, no reply)
 --         0xDB output on/off (data 1/0; echoed by the DPS-150, not by the IPS3608)
 --         0xC3 telemetry pushed by the device: Vout, Iout, Pout as float32 LE
@@ -14,7 +16,9 @@
 -- beyond that is declared here and validated by desk (unknown or mistyped params are errors).
 PARAMS = {
   name = { type = "string", doc = "expected model name (query 0xDE); refuse other devices, since the USB id is a generic Artery AT32 one" },
-  status = { type = "table", doc = "byte offsets in the full status (query 0xFF): voltage_set, current_set, voltage, current, power, output. Enables setpoint and output read-back" },
+  status = { type = "table", doc = "byte offsets in the full status (query 0xFF): voltage_set, current_set, voltage, current, power, temperature, input_voltage, charge, energy (float32), output, protection, mode (byte). Enables read-back; read() reports the fields given" },
+  input_query = { type = "boolean", default = false, doc = "read the input voltage with query 0xC0 (on the IPS3608 the status field is a constant)" },
+  gap_ms = { type = "number", default = 50, doc = "quiet time after every frame that changes something: the device drops a write that is followed too quickly" },
   settle_ms = { type = "number", default = 300, doc = "ignore measurements older than this after a command (output ramp)" },
   boot_ms = { type = "number", default = 3000, doc = "after mains on the port appears before the device answers: keep retrying this long" },
   status_ms = { type = "number", default = 700, doc = "how long to wait for a query reply" },
@@ -25,9 +29,12 @@ PARAMS = {
 
 local HOST, DEVICE = 0xF1, 0xF0
 local T_QUERY, T_WRITE, T_CONNECT = 0xA1, 0xB1, 0xC1
-local C_CONNECT, C_SET_V, C_SET_I, C_OUTPUT, C_TELEMETRY = 0x00, 0xC1, 0xC2, 0xDB, 0xC3
+local C_CONNECT, C_INPUT, C_SET_V, C_SET_I, C_OUTPUT, C_TELEMETRY = 0x00, 0xC0, 0xC1, 0xC2, 0xDB, 0xC3
 local C_NAME, C_STATUS = 0xDE, 0xFF
 local MAX_LEN = 160 -- longest known frame (full status) is 139 bytes of data
+-- Status bytes: regulation mode and protection state.
+local MODES = { [0] = "cc", [1] = "cv" }
+local PROTECTIONS = { [0] = "none", [1] = "ovp", [2] = "ocp", [3] = "opp", [4] = "otp", [5] = "uvp" }
 
 local port        -- open during a session
 local port_path   -- for messages
@@ -47,10 +54,12 @@ local function write_frame(kind, cmd, data)
   port:write(string.char(HOST, kind, cmd, #data) .. data .. string.char(checksum(cmd, data)))
 end
 
--- A command that changes the device (measurements before it are stale).
+-- A command that changes the device (measurements before it are stale). The device drops it when
+-- the next frame follows within a few ms, so keep quiet for `gap_ms`.
 local function send(ctx, kind, cmd, data)
   write_frame(kind, cmd, data)
   last_command = ctx.clock()
+  ctx.sleep(ctx.params.gap_ms)
 end
 
 -- Next complete, valid frame from the device, or nil. Skips garbage and resynchronizes.
@@ -208,9 +217,21 @@ local function read_status(ctx, layout)
       return (string.unpack("<f", d, offset + 1))
     end
   end
+  local function byte_at(offset)
+    if offset and #d > offset then
+      return d:byte(offset + 1)
+    end
+  end
   local output = output_echo
-  if layout.output and #d > layout.output then
-    output = d:byte(layout.output + 1) == 1
+  if byte_at(layout.output) then
+    output = byte_at(layout.output) == 1
+  end
+  local input = float_at(layout.input_voltage)
+  if ctx.params.input_query then
+    local r = query(ctx, C_INPUT, function(f)
+      return #f.data == 4
+    end)
+    input = r and (string.unpack("<f", r.data)) or nil
   end
   return {
     output = output,
@@ -219,6 +240,12 @@ local function read_status(ctx, layout)
     voltage = float_at(layout.voltage),
     current = float_at(layout.current),
     power = float_at(layout.power),
+    mode = MODES[byte_at(layout.mode)],
+    protection = byte_at(layout.protection) and (PROTECTIONS[byte_at(layout.protection)] or "other"),
+    temperature = float_at(layout.temperature),
+    input_voltage = input,
+    charge = float_at(layout.charge),
+    energy = float_at(layout.energy),
   }
 end
 

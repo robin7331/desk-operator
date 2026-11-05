@@ -5,10 +5,22 @@
 id       = "fnirsi/dps-150"
 name     = "FNIRSI DPS-150"
 requires = "desk-operator >= 0.1"
-status   = "community" # from documentation; not yet tested on hardware
-sources  = ["https://philipp-iot.github.io/fnirsi_protocol/protocol/reference"]
+status   = "community" # protocol verified on hardware by others (sources), not yet with desk
+sources  = [
+  "https://github.com/mmgalushka/dps150",
+  "https://github.com/Puyodead1/fnirsi-psu",
+  "https://github.com/cho45/fnirsi-dps-150",
+  "https://github.com/Philipp-IoT/fnirsi_protocol",
+]
 
 [source]
 script  = "../shared/dps150_protocol.lua"
-# port: USB id not verified on hardware yet (`desk port list` output welcome)
+# Generic Artery AT32 id (confirmed on DPS-150 hardware by the sources): the driver checks the
+# model name first; bind by serial_number in your config.
+port    = { usb_vid = 0x2e3c, usb_pid = 0x5740 }
 ratings = { max_voltage = 30.0, max_current = 5.1, max_power = 150.0 }
+
+[source.params]
+name   = "DPS-150"
+# Byte offsets in the full status (query 0xFF), from a real DPS-150 dump (mmgalushka/dps150).
+status = { input_voltage = 0, voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, temperature = 24, charge = 99, energy = 103, output = 107, protection = 108, mode = 109 }

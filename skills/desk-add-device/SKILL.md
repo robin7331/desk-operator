@@ -1,6 +1,6 @@
 ---
 name: desk-add-device
-description: Add a bench device that the `desk` CLI doesn't support yet: research its protocol, write and test a device definition, smoke-test it with the user, configure it, optionally publish it. Use when the user wants desk to control a new instrument.
+description: Add a bench device that the `desk` CLI doesn't support yet, or improve an existing definition: research the protocol, write and test the definition, smoke-test it with the user, configure it, optionally publish it. Use when desk should control a new instrument or more of one.
 ---
 
 # Adding a device to `desk`
@@ -195,6 +195,25 @@ ask the user. Then, depending on what's available:
   (`tar czf <vendor>-<model>.tar.gz -C <devices dir> <vendor>`) and tell the user to attach it to
   an issue or upload it in the web UI.
 
+## Improving an existing definition
+
+Same workflow, starting from `desk library show <vendor/model>` instead of `desk library new`:
+research, probe, update the driver and its fake-device test, smoke-test, update the vendor README.
+
+- **`community` → `tested`:** someone with the device runs the smoke test (step 9); then set
+  `status` and `tested`.
+- **New firmware or hardware revision** behaves differently: record it in the README, fix the
+  driver, add the version to `tested`.
+- **More of what the device reports:** check what the capability defines first (`desk schema
+  --json`, `capabilities`; for drivers the `read()` fields in `docs/scripting.md`), then probe which
+  fields the device really has. Re-check old findings while you're at it: research on the IPS3608
+  showed that a field once read as "rail voltage" is the temperature, and "maximums" are the
+  user's protection thresholds.
+- **Another model of a known family:** a new definition with only data (`params`).
+- **A feature the capability doesn't have** (e.g. writing protection thresholds): that's a change
+  to desk's core, for every device of that kind. Stop and tell the user; never squeeze it into
+  `params` or a driver-only side channel.
+
 ## Driver essentials
 
 A driver is Lua 5.4 in a sandbox (no `io`, `os`, `require`, `debug`): it reaches the device only
@@ -213,7 +232,8 @@ function set_voltage(ctx, volts) ... end      -- voltage_source: required
 function set_current(ctx, amps) ... end
 function set_output(ctx, on) ... end
 function read(ctx)   -- return only fields the device reported
-  return { output = true, voltage_set = 5, current_set = 1, voltage = 5.01, current = 0.2 }
+  return { output = true, voltage_set = 5, current_set = 1, voltage = 5.01, current = 0.2,
+           mode = "cv", protection = "none", temperature = 31.5 }   -- see docs/scripting.md
 end
 function close(ctx) ... end                   -- optional: runs even after errors (unlock the panel)
 -- power_switch drivers: on(ctx), off(ctx), optional state(ctx)
@@ -224,6 +244,8 @@ function close(ctx) ... end                   -- optional: runs even after error
 - `ctx.sleep(ms)`, `ctx.clock()` (monotonic ms), `ctx.log(...)`, `ctx.params`.
 - Fail with `error("what went wrong")`; it becomes `script_failed` with the message.
 - Parse robustly: resynchronize after garbage, check checksums, time out every wait.
+- Some devices drop a write that's followed too quickly by the next frame: keep a quiet gap
+  after writes (the FNIRSI driver's `gap_ms`).
 - **Prefer data over code:** if models differ only in numbers (offsets, timings, names), share one
   driver in `devices/<vendor>/shared/` and put the numbers in each definition's `params`.
 - desk does the rest for every driver: one session per command, limits before anything is sent,

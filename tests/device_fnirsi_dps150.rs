@@ -30,6 +30,8 @@ struct Behavior {
     status: bool,
     /// Ignore this many name queries first (a device that's still booting).
     booting: usize,
+    /// Start with this protection latched (1 OVP, 2 OCP, ...): output off until `DB=1`.
+    tripped: u8,
 }
 
 impl Default for Behavior {
@@ -42,6 +44,7 @@ impl Default for Behavior {
             name: None,
             status: false,
             booting: 0,
+            tripped: 0,
         }
     }
 }
@@ -63,13 +66,18 @@ fn status_blob(s: &State) -> Vec<u8> {
     let mut d = vec![0u8; 139];
     let mut put = |offset: usize, v: f32| d[offset..offset + 4].copy_from_slice(&v.to_le_bytes());
     let vout = if s.output { s.vset } else { 0.0 };
-    put(0, 48.0);
+    put(0, 48.0); // constant on the IPS3608; the real input voltage comes from query 0xC0
     put(4, s.vset);
     put(8, s.iset);
     put(12, vout);
-    put(76, 36.0);
-    put(80, 8.0);
+    put(24, 31.5); // temperature
+    put(76, 36.0); // OVP threshold
+    put(80, 8.0); // OCP threshold
+    put(99, 0.25); // Ah
+    put(103, 1.5); // Wh
     d[107] = s.output as u8;
+    d[108] = s.protection;
+    d[109] = 1; // CV (the IPS3608 reports 1 with the output off, too)
     d
 }
 
@@ -79,8 +87,11 @@ struct State {
     vset: f32,
     iset: f32,
     output: bool,
+    protection: u8,
     /// Commands received, in order.
     log: Vec<String>,
+    /// When each frame arrived, in order.
+    times: Vec<Instant>,
     bad_frames: usize,
     name_queries: usize,
 }
@@ -119,7 +130,10 @@ impl FakePsu {
         drop(guard);
         master.set_timeout(Duration::from_millis(10)).unwrap();
 
-        let state = Arc::new(Mutex::new(State::default()));
+        let state = Arc::new(Mutex::new(State {
+            protection: behavior.tripped,
+            ..State::default()
+        }));
         let stop = Arc::new(AtomicBool::new(false));
         let (st, sp) = (state.clone(), stop.clone());
         std::thread::spawn(move || {
@@ -150,6 +164,7 @@ impl FakePsu {
                         s.bad_frames += 1;
                         continue;
                     }
+                    s.times.push(Instant::now());
                     let float = || f32::from_le_bytes(data[..4].try_into().unwrap());
                     match (kind, cmd) {
                         (0xC1, 0x00) if data == [1] => {
@@ -186,8 +201,15 @@ impl FakePsu {
                                 let _ = master.write_all(&device_frame(0xFF, &status_blob(&s)));
                             }
                         }
+                        (0xA1, 0xC0) => {
+                            s.log.push("query input".into());
+                            let _ = master.write_all(&device_frame(0xC0, &floats(&[44.7])));
+                        }
                         (0xB1, 0xDB) if len == 1 => {
                             s.output = data[0] == 1;
+                            if s.output {
+                                s.protection = 0; // like the real device: DB=1 clears a trip
+                            }
                             s.log.push(format!("output {}", data[0]));
                             if behavior.echo_output {
                                 let _ = master.write_all(&device_frame(0xDB, &data));
@@ -219,6 +241,17 @@ impl FakePsu {
 
     fn log(&self) -> Vec<String> {
         self.state.lock().unwrap().log.clone()
+    }
+
+    /// Log entries with the time since the previous frame.
+    fn timed_log(&self) -> Vec<(String, Duration)> {
+        let s = self.state.lock().unwrap();
+        s.log
+            .iter()
+            .zip(&s.times)
+            .zip(std::iter::once(None).chain(s.times.iter().map(Some)))
+            .map(|((l, t), prev)| (l.clone(), prev.map_or(Duration::ZERO, |p| *t - *p)))
+            .collect()
     }
 }
 
@@ -550,4 +583,122 @@ fn a_device_that_is_still_booting_is_retried() {
         "answered on the second attempt: {:?}",
         psu.log()
     );
+}
+
+/// The bundled IPS3608 definition against a fake IPS3608, with the timings of the definition.
+fn bundled_ips3608(behavior: Behavior) -> (FakePsu, TempDir) {
+    let psu = FakePsu::start(behavior);
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("desk.toml"),
+        format!(
+            r#"
+[devices.psu]
+model  = "fnirsi/ips3608"
+source = {{ port = {{ path = "{}" }}, params = {{ wait = "0s", boot_ms = 1500, status_ms = 300, settle_ms = 120 }} }}
+"#,
+            psu.path
+        ),
+    )
+    .unwrap();
+    (psu, dir)
+}
+
+#[test]
+fn ips3608_reports_everything_its_status_has() {
+    let (psu, dir) = bundled_ips3608(Behavior::ips3608());
+    let d = run(dir.path(), &["--json", "source", "read", "psu"]).data();
+    let r = &d["reading"];
+    assert_eq!(r["output"], false);
+    assert!(r["mode"].is_null(), "no mode while the output is off: {r}");
+    assert_eq!(r["protection"], "none");
+    assert!(close(&r["temperature"], 31.5));
+    assert!(
+        close(&r["input_voltage"], 44.7),
+        "from query 0xC0, not the constant 48: {r}"
+    );
+    assert!(close(&r["charge"], 0.25));
+    assert!(close(&r["energy"], 1.5));
+    assert!(close(&d["info"]["max_power"], 285.0));
+
+    let out = run(
+        dir.path(),
+        &["--json", "source", "set", "psu", "5v", "1a", "--on"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert_eq!(out.data()["reading"]["mode"], "cv");
+
+    let out = run(dir.path(), &["source", "read", "psu"]);
+    assert!(
+        out.stdout.contains("CV (constant voltage)"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("31.5 °C"), "{}", out.stdout);
+
+    // Only documented frame types were sent (never 0xB0/0xC0: 0xC0 is the firmware-update mode).
+    assert!(
+        !psu.log().iter().any(|l| l.starts_with("unknown")),
+        "{:?}",
+        psu.log()
+    );
+}
+
+#[test]
+fn ips3608_keeps_quiet_after_every_write() {
+    let (psu, dir) = bundled_ips3608(Behavior::ips3608());
+    let out = run(
+        dir.path(),
+        &["--json", "source", "set", "psu", "5v", "1a", "--on"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let log = psu.timed_log();
+    let writes = ["connect", "vset", "iset", "output"];
+    for pair in log.windows(2) {
+        let ((first, _), (next, gap)) = (&pair[0], &pair[1]);
+        if writes.iter().any(|w| first.starts_with(w)) {
+            assert!(
+                *gap >= Duration::from_millis(45),
+                "{next} only {gap:?} after {first}: {log:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ips3608_with_a_tripped_protection_stays_off_until_cleared() {
+    let (psu, dir) = bundled_ips3608(Behavior {
+        tripped: 2, // OCP
+        ..Behavior::ips3608()
+    });
+    let d = run(dir.path(), &["--json", "source", "read", "psu"]).data();
+    assert_eq!(d["reading"]["protection"], "ocp");
+
+    let out = run(dir.path(), &["--json", "source", "output", "on", "psu"]);
+    assert_eq!(
+        out.json()["error"]["code"],
+        "protection_tripped",
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !psu.log().iter().any(|l| l.starts_with("output")),
+        "nothing sent: {:?}",
+        psu.log()
+    );
+
+    let out = run(
+        dir.path(),
+        &[
+            "--json",
+            "source",
+            "output",
+            "on",
+            "psu",
+            "--clear-protection",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert_eq!(out.data()["reading"]["protection"], "none");
+    assert_eq!(out.data()["reading"]["output"], true);
 }

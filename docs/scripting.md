@@ -119,6 +119,19 @@ function open(ctx) ... end                 -- optional: start of a session (conn
 function close(ctx) ... end                -- optional: end of a session
 ```
 
+`read()` fields, all optional (leave out what the device doesn't report):
+
+| Field | Meaning |
+|---|---|
+| `output` | output terminals on (`true`) or off |
+| `voltage_set`, `current_set` | setpoints, V and A |
+| `voltage`, `current`, `power` | measured at the output, V, A, W |
+| `mode` | `"cv"` (holding the voltage) or `"cc"` (current limit reached); ignored while the output is off |
+| `protection` | `"none"`, or what tripped: `"ovp"`, `"ocp"`, `"opp"`, `"otp"`, `"uvp"` (input under-voltage), `"other"` |
+| `temperature` | internal temperature, °C |
+| `input_voltage` | the supply's own input (e.g. its internal bus), V |
+| `charge`, `energy` | the device's delivered-charge and energy counters, Ah and Wh |
+
 Declare the device's maximums as `ratings` in the binding (`ratings = { max_voltage = 30,
 max_current = 5 }`); desk enforces them (and the stricter value if `info()` also reports some).
 
@@ -145,6 +158,9 @@ every driver:
   the driver is called. Switching the output on is also refused when the device *already* holds a
   setpoint above the bench limits (as far as `read()` reports it).
 - **Order:** voltage, then current, then output.
+- **Protections:** while `read()` reports a tripped `protection`, switching the output on is
+  refused (`protection_tripped`) unless the user passes `--clear-protection`. If a protection trips
+  right after switching on, that's reported as `protection_tripped` too.
 - **Verification:** after the steps, `read()` is compared with the request. Fields `read()` doesn't
   return are reported as *not confirmed*, never as confirmed. Return only what the device really
   reports.

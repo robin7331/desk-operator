@@ -76,6 +76,65 @@ pub struct Reading {
     pub voltage: Option<f64>,
     pub current: Option<f64>,
     pub power: Option<f64>,
+    /// Regulating voltage (CV) or limiting current (CC).
+    pub mode: Option<Mode>,
+    /// A protection that tripped and switched the output off, or `none`.
+    pub protection: Option<Protection>,
+    /// Internal temperature, °C.
+    pub temperature: Option<f64>,
+    /// The supply's own input voltage (e.g. its internal bus), V.
+    pub input_voltage: Option<f64>,
+    /// Charge delivered since the device's counter was reset, Ah.
+    pub charge: Option<f64>,
+    /// Energy delivered since the device's counter was reset, Wh.
+    pub energy: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Constant voltage: the output holds the voltage setpoint.
+    Cv,
+    /// Constant current: the current limit is reached, the voltage drops.
+    Cc,
+}
+
+/// Protection state as the device reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protection {
+    /// Nothing tripped.
+    None,
+    /// Over-voltage.
+    Ovp,
+    /// Over-current.
+    Ocp,
+    /// Over-power.
+    Opp,
+    /// Over-temperature.
+    Otp,
+    /// Input under-voltage.
+    Uvp,
+    /// Another protection the capability has no name for.
+    Other,
+}
+
+impl Protection {
+    pub fn tripped(self) -> bool {
+        self != Protection::None
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Protection::None => "none",
+            Protection::Ovp => "OVP (over-voltage)",
+            Protection::Ocp => "OCP (over-current)",
+            Protection::Opp => "OPP (over-power)",
+            Protection::Otp => "OTP (over-temperature)",
+            Protection::Uvp => "UVP (input under-voltage)",
+            Protection::Other => "a device protection",
+        }
+    }
 }
 
 /// Bench safety limits for a voltage source, from the device's `limits = { source = { ... } }`,
@@ -125,6 +184,9 @@ pub struct Request {
     pub current: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<bool>,
+    /// Switch the output on although a protection tripped (on many devices that also clears it).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub clear_protection: bool,
 }
 
 impl Request {
@@ -181,26 +243,37 @@ pub async fn apply(
     check_limits(&req, &info, &limits)?;
 
     let mut warnings = Vec::new();
-    // Switching the output on with setpoints we didn't set: make sure those are within limits too.
-    if req.output == Some(true) && (limits.voltage.is_some() || limits.current.is_some()) {
+    if req.output == Some(true) {
         let now = src.read().await?;
-        let effective = Request {
-            voltage: req.voltage.or(now.voltage_set),
-            current: req.current.or(now.current_set),
-            output: None,
-        };
-        check_limits(&effective, &info, &limits)?;
-        if effective.voltage.is_none() || effective.current.is_none() {
-            warnings.push(
-                "the device doesn't report its setpoints, so the bench limits could only be \
-                 checked for values set in this command"
-                    .into(),
-            );
+        // A tripped protection means something went wrong (a short, an overload). Switching on
+        // would bring it back, and on many devices "output on" also clears the trip silently.
+        if let Some(p) = now.protection.filter(|p| p.tripped()) {
+            if !req.clear_protection {
+                return Err(DeskError::ProtectionTripped(p.name().to_string()));
+            }
+            warnings.push(format!("{} was tripped; switching on clears it", p.name()));
+        }
+        // Switching on with setpoints we didn't set: make sure those are within limits too.
+        if limits.voltage.is_some() || limits.current.is_some() {
+            let effective = Request {
+                voltage: req.voltage.or(now.voltage_set),
+                current: req.current.or(now.current_set),
+                ..Request::default()
+            };
+            check_limits(&effective, &info, &limits)?;
+            if effective.voltage.is_none() || effective.current.is_none() {
+                warnings.push(
+                    "the device doesn't report its setpoints, so the bench limits could only be \
+                     checked for values set in this command"
+                        .into(),
+                );
+            }
         }
     }
 
     if dry_run {
         let reading = src.read().await?;
+        protection_warning(&reading, &mut warnings);
         return Ok(Report {
             requested: req,
             reading,
@@ -222,6 +295,12 @@ pub async fn apply(
     }
 
     let reading = src.read().await?;
+    // Switched on, and a protection tripped right away (the cause is still there).
+    if req.output == Some(true)
+        && let Some(p) = reading.protection.filter(|p| p.tripped())
+    {
+        return Err(DeskError::ProtectionTripped(p.name().to_string()));
+    }
     let verified = Verified {
         voltage: req
             .voltage
@@ -258,6 +337,7 @@ pub async fn apply(
             });
         }
     }
+    protection_warning(&reading, &mut warnings);
     Ok(Report {
         requested: req,
         reading,
@@ -266,6 +346,16 @@ pub async fn apply(
         warnings,
         applied: !req.is_empty(),
     })
+}
+
+fn protection_warning(reading: &Reading, warnings: &mut Vec<String>) {
+    if let Some(p) = reading.protection.filter(|p| p.tripped()) {
+        warnings.push(format!(
+            "{} tripped: the device switched its output off. Check the circuit; switching on \
+             again needs --clear-protection",
+            p.name()
+        ));
+    }
 }
 
 fn validate_values(req: &Request) -> Result<()> {
@@ -446,6 +536,7 @@ mod tests {
             voltage: v,
             current: a,
             output: out,
+            ..Request::default()
         }
     }
 

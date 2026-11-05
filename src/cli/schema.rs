@@ -75,13 +75,15 @@ pub fn run(bench: Result<Bench>) -> Report {
                 "description": "A bench power supply: setpoints, output terminals, measurements.",
                 "commands": [
                     "desk source set <device> <5v> <1a> [--on] [--dry-run]",
-                    "desk source output on|off <device> [--dry-run]",
+                    "desk source output on|off <device> [--clear-protection] [--dry-run]",
                     "desk source read <device>"
                 ],
                 "units": "values need units: v, mv, a, ma",
                 "safety": "the core refuses values above the device maximum or the device's `limits` (limit_exceeded, nothing sent); setpoints are applied before the output is switched on",
                 "verified": "per requested value: true = read back and confirmed; absent = the device can't report it (unconfirmed)",
-                "requires": "the device's mains must be on (device_off otherwise)"
+                "requires": "the device's mains must be on (device_off otherwise)",
+                "reading": "output, voltage_set, current_set, voltage, current, power; and if the device reports them: mode (cv|cc), protection (none|ovp|ocp|opp|otp|uvp|other), temperature (°C), input_voltage (V), charge (Ah), energy (Wh). null = not reported",
+                "protection": "while a protection is tripped, output on is refused (protection_tripped) unless --clear-protection is given; switching off is always allowed"
             }
         },
         "commands": commands,

@@ -168,6 +168,9 @@ pub enum SourceCmd {
         /// Then switch the output on (after the setpoints)
         #[arg(long)]
         on: bool,
+        /// With --on: switch on although a protection (OVP, OCP, ...) tripped, which clears it
+        #[arg(long, requires = "on")]
+        clear_protection: bool,
         /// Check limits and show what would be sent, without sending anything
         #[arg(long)]
         dry_run: bool,
@@ -178,11 +181,15 @@ pub enum SourceCmd {
         state: OnOff,
         /// Device id, alias or name
         device: String,
+        /// With `on`: switch on although a protection (OVP, OCP, ...) tripped, which clears it
+        #[arg(long)]
+        clear_protection: bool,
         /// Check limits and show what would be sent, without sending anything
         #[arg(long)]
         dry_run: bool,
     },
-    /// Read output state, setpoints and measured voltage, current and power
+    /// Read output state, setpoints, measurements, and whatever else the device reports (mode,
+    /// protection, temperature, ...)
     Read {
         /// Device id, alias or name
         device: String,

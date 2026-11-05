@@ -40,6 +40,10 @@ source = { provider = "sim", endpoint = "psu2" }
 
 [devices.lamp]
 power = { provider = "sim", endpoint = "lamp" }
+
+# Trips its over-current protection instead of limiting (10 Ω: trips above V/10 > current setpoint).
+[devices.fragile]
+source = { provider = "sim", endpoint = "tripping_psu", load_ohms = 10 }
 "#;
 
 struct Bench {
@@ -379,5 +383,126 @@ fn old_style_limits_explain_the_new_form() {
     assert!(
         msg.contains("limits = { source = { voltage = … } }"),
         "{msg}"
+    );
+}
+
+#[test]
+fn mode_follows_the_load() {
+    let b = Bench::new();
+    let out = b.run(&["--json", "source", "set", "psu", "5v", "1a", "--on"]);
+    assert_eq!(
+        out.data()["reading"]["mode"],
+        "cv",
+        "0.5 A into 10 Ω is below 1 A"
+    );
+    assert_eq!(out.data()["reading"]["protection"], "none");
+    let out = b.run(&["--json", "source", "set", "psu", "200ma"]);
+    assert_eq!(
+        out.data()["reading"]["mode"],
+        "cc",
+        "the current limit is reached"
+    );
+    assert!(close(&out.data()["reading"]["voltage"], 2.0));
+    let out = b.run(&["source", "read", "psu"]);
+    assert!(
+        out.stdout.contains("CC (current limit reached)"),
+        "{}",
+        out.stdout
+    );
+    let out = b.run(&["--json", "source", "output", "off", "psu"]);
+    assert!(out.data()["reading"]["mode"].is_null(), "no mode while off");
+    // Fields a device doesn't report stay null.
+    assert!(out.data()["reading"]["temperature"].is_null());
+}
+
+#[test]
+fn a_tripped_protection_blocks_output_on_until_cleared() {
+    let b = Bench::new();
+    // 5 V into 10 Ω wants 0.5 A, above the 0.2 A setpoint: the supply trips at switch-on.
+    let out = b.run(&["--json", "source", "set", "fragile", "5v", "200ma", "--on"]);
+    assert_eq!(out.code, 4, "{}", out.stdout);
+    assert_eq!(out.code_str(), "protection_tripped");
+    assert!(
+        out.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("OCP")
+    );
+    assert!(
+        out.json()["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("--clear-protection")
+    );
+
+    // Reading says so, as a warning.
+    let out = b.run(&["--json", "source", "read", "fragile"]);
+    assert_eq!(out.code, 0);
+    assert_eq!(out.data()["reading"]["protection"], "ocp");
+    assert_eq!(out.data()["reading"]["output"], false);
+    let warnings = out.data()["warnings"].to_string();
+    assert!(warnings.contains("--clear-protection"), "{warnings}");
+
+    // Switching on is refused (also as a dry run), and nothing is sent.
+    for args in [
+        &["--json", "source", "output", "on", "fragile"][..],
+        &["--json", "source", "output", "on", "fragile", "--dry-run"][..],
+        &["--json", "source", "set", "fragile", "1v", "--on"][..],
+    ] {
+        let out = b.run(args);
+        assert_eq!(
+            out.code_str(),
+            "protection_tripped",
+            "{args:?}: {}",
+            out.stdout
+        );
+    }
+    let out = b.run(&["--json", "source", "read", "fragile"]);
+    assert!(
+        close(&out.data()["reading"]["voltage_set"], 5.0),
+        "the refused set sent nothing"
+    );
+
+    // Setpoints alone are fine, and switching off is always allowed.
+    assert_eq!(b.run(&["--json", "source", "set", "fragile", "1v"]).code, 0);
+    assert_eq!(
+        b.run(&["--json", "source", "output", "off", "fragile"])
+            .code,
+        0
+    );
+
+    // With the cause fixed (1 V into 10 Ω = 0.1 A), --clear-protection switches on.
+    let out = b.run(&[
+        "--json",
+        "source",
+        "output",
+        "on",
+        "fragile",
+        "--clear-protection",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert_eq!(out.data()["requested"]["clear_protection"], true);
+    assert_eq!(out.data()["reading"]["protection"], "none");
+    assert_eq!(out.data()["verified"]["output"], true);
+    assert!(out.data()["warnings"].to_string().contains("was tripped"));
+}
+
+#[test]
+fn clear_protection_needs_switching_on() {
+    let b = Bench::new();
+    let out = b.run(&[
+        "--json",
+        "source",
+        "output",
+        "off",
+        "psu",
+        "--clear-protection",
+    ]);
+    assert_eq!(out.code_str(), "usage");
+    let out = b.run(&["--json", "source", "set", "psu", "5v", "--clear-protection"]);
+    assert_eq!(
+        out.code, 2,
+        "--clear-protection requires --on: {}",
+        out.stdout
     );
 }

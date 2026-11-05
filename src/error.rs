@@ -38,6 +38,9 @@ pub enum DeskError {
     #[error("device `{0}` is powered off (mains)")]
     DeviceOff(String),
 
+    #[error("{0} protection is tripped: the device switched its output off")]
+    ProtectionTripped(String),
+
     #[error("{what} {requested} exceeds the {kind} of {limit}")]
     LimitExceeded {
         what: String,
@@ -80,6 +83,7 @@ impl DeskError {
             DeskError::CapabilityMissing { .. } => "capability_missing",
             DeskError::DeviceOff(_) => "device_off",
             DeskError::LimitExceeded { .. } => "limit_exceeded",
+            DeskError::ProtectionTripped(_) => "protection_tripped",
             DeskError::ProviderUnreachable { .. } => "provider_unreachable",
             DeskError::EndpointUnavailable { .. } => "endpoint_unavailable",
             DeskError::StateUnknown(_) => "state_unknown",
@@ -103,7 +107,8 @@ impl DeskError {
             DeskError::ProviderUnreachable { .. }
             | DeskError::EndpointUnavailable { .. }
             | DeskError::StateUnknown(_)
-            | DeskError::DeviceOff(_) => 4,
+            | DeskError::DeviceOff(_)
+            | DeskError::ProtectionTripped(_) => 4,
             DeskError::ScriptFailed(_) => 5,
             DeskError::Timeout { .. } => 6,
             DeskError::VerifyFailed { .. } => 7,
@@ -120,6 +125,9 @@ impl DeskError {
             DeskError::NoPowerPath(_) => Some("add a `power = { ... }` binding to the device"),
             DeskError::StateUnknown(_) => Some("use `desk power on` or `desk power off` instead"),
             DeskError::DeviceOff(_) => Some("switch its mains on first: `desk power on <device>`"),
+            DeskError::ProtectionTripped(_) => Some(
+                "find out why (short, overload, heat) first; then switch on with `--clear-protection`",
+            ),
             DeskError::LimitExceeded { .. } => Some(
                 "use a lower value (a bench `limit` can be raised in the device's config; a device maximum can't)",
             ),
@@ -180,6 +188,11 @@ pub const ERROR_CODES: &[(&str, i32, &str)] = &[
         "the device's mains power is off, so it can't be reached",
     ),
     (
+        "protection_tripped",
+        4,
+        "a protection (OVP, OCP, ...) tripped and switched the output off; output on is refused without --clear-protection",
+    ),
+    (
         "limit_exceeded",
         8,
         "refused: the value exceeds the device maximum or the bench `limits`; nothing was sent",
@@ -233,6 +246,7 @@ mod tests {
                 capability: "",
             },
             DeskError::DeviceOff(String::new()),
+            DeskError::ProtectionTripped(String::new()),
             DeskError::LimitExceeded {
                 what: String::new(),
                 requested: String::new(),

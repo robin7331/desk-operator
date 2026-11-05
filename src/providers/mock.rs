@@ -16,7 +16,9 @@
 //! `source = { provider = "sim", endpoint = "psu1", max_voltage = 30, max_current = 5, load_ohms = 10 }`.
 //! With `load_ohms` the output behaves like a resistor is connected (CV, or CC when V/R exceeds
 //! the current setpoint); without it the output is open (0 A). `blind_*` endpoints report only
-//! measurements, no setpoints or output state, like many cheap supplies.
+//! measurements, no setpoints or output state, like many cheap supplies. `tripping_*` endpoints
+//! trip their over-current protection instead of going into CC: the output switches off and stays
+//! off until it's switched on again (which clears the trip, like many real supplies).
 
 use std::collections::BTreeMap;
 
@@ -31,7 +33,7 @@ use super::{Endpoint, Params, Provider, ProviderInfo};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, Power, PowerFeatures, PowerState};
 use crate::power::PowerSwitch;
-use crate::source::{Reading, SourceInfo, VoltageSource};
+use crate::source::{Mode, Protection, Reading, SourceInfo, VoltageSource};
 
 pub const KIND: &str = "mock";
 
@@ -52,6 +54,8 @@ struct SimPsu {
     voltage_set: f64,
     current_set: f64,
     output: bool,
+    #[serde(default)]
+    tripped: bool,
 }
 
 pub struct MockProvider {
@@ -320,7 +324,16 @@ impl VoltageSource for SimSource {
 
     async fn set_output(&self, on: bool) -> Result<()> {
         self.inner.simulate(&self.endpoint).await?;
-        self.inner.update_psu(&self.endpoint, |p| p.output = on)
+        let trips = self.endpoint.starts_with("tripping_");
+        let load = self.load_ohms;
+        self.inner.update_psu(&self.endpoint, |p| {
+            p.output = on;
+            if on {
+                // Switching on clears a trip; it trips again at once if the load is still too much.
+                p.tripped = trips && load.is_some_and(|r| p.voltage_set / r > p.current_set);
+                p.output = !p.tripped;
+            }
+        })
     }
 
     async fn read(&self) -> Result<Reading> {
@@ -336,6 +349,11 @@ impl VoltageSource for SimSource {
             (true, Some(r)) => (p.voltage_set, p.voltage_set / r),
         };
         let blind = self.endpoint.starts_with("blind_");
+        let mode = match (p.output, self.load_ohms) {
+            (false, _) => None,
+            (true, Some(r)) if p.voltage_set / r > p.current_set => Some(Mode::Cc),
+            (true, _) => Some(Mode::Cv),
+        };
         Ok(Reading {
             output: (!blind).then_some(p.output),
             voltage_set: (!blind).then_some(p.voltage_set),
@@ -343,6 +361,13 @@ impl VoltageSource for SimSource {
             voltage: Some(voltage),
             current: Some(current),
             power: Some(voltage * current),
+            mode: if blind { None } else { mode },
+            protection: (!blind).then_some(if p.tripped {
+                Protection::Ocp
+            } else {
+                Protection::None
+            }),
+            ..Reading::default()
         })
     }
 }
