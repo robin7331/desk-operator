@@ -89,6 +89,18 @@ pub enum Command {
     Schema,
     /// Agent skills (SKILL.md) matching this version of desk: print, list or install them
     Skill(SkillArgs),
+    /// Run the background daemon that keeps device sessions open for `desk source watch`.
+    /// Started automatically; while it runs, `desk power` and `desk source` go through it
+    Serve {
+        /// Exit after this long without connections or sessions ("never": run until stopped)
+        #[arg(
+            long,
+            env = "DESK_DAEMON_IDLE",
+            default_value = "30s",
+            value_name = "DURATION"
+        )]
+        idle: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -193,6 +205,18 @@ pub enum SourceCmd {
     Read {
         /// Device id, alias or name
         device: String,
+    },
+    /// Stream readings until stopped (Ctrl-C), one per interval; with --json one JSON line each.
+    /// Other commands keep working meanwhile (the background daemon holds the session)
+    Watch {
+        /// Device id, alias or name
+        device: String,
+        /// Time between readings ("0": as fast as the device answers)
+        #[arg(long, default_value = "100ms", value_name = "DURATION")]
+        interval: String,
+        /// Stop after this many readings
+        #[arg(long, value_name = "N")]
+        count: Option<u64>,
     },
 }
 
@@ -321,6 +345,31 @@ pub enum DeviceCmd {
 pub async fn run(cli: Cli) -> Result<Report> {
     // These work without a (valid) config.
     match cli.command {
+        Command::Serve { idle } => {
+            let idle = match idle.as_str() {
+                "never" => None,
+                d => Some(parse_duration("--idle", d)?),
+            };
+            return crate::daemon::serve(cli.config.as_deref(), idle).await;
+        }
+        Command::Source {
+            action: SourceCmd::Watch {
+                interval, count, ..
+            },
+        } => {
+            let watched = async {
+                parse_interval(&interval)?;
+                if count == Some(0) {
+                    return Err(DeskError::Usage("--count must be at least 1".into()));
+                }
+                let args = crate::daemon::own_args();
+                crate::daemon::watch(cli.config.as_deref(), &args, cli.json, count).await
+            };
+            // A stream's error is one more JSON line, like the ones before it.
+            return Ok(watched
+                .await
+                .unwrap_or_else(|e| Report::streamed(Some((e.to_json(), e.exit_code())))));
+        }
         Command::Schema => return Ok(schema::run(Bench::load(cli.config.as_deref()))),
         Command::Port { action } => {
             return match action {
@@ -332,16 +381,51 @@ pub async fn run(cli: Cli) -> Result<Report> {
         Command::Skill(SkillArgs { name, action }) => return skill::run(name, action, cli.json),
         _ => {}
     }
+    // A running daemon may hold the device's session: then it runs the command.
+    if routed(&cli.command)
+        && let Some(report) =
+            crate::daemon::forward(cli.config.as_deref(), &crate::daemon::own_args()).await?
+    {
+        return Ok(report);
+    }
     let bench = Bench::load(cli.config.as_deref())?;
-    match cli.command {
-        Command::Schema | Command::Skill(_) | Command::Port { .. } | Command::Library { .. } => {
-            unreachable!("handled above")
-        }
-        Command::Power { action } => power::run(&bench, action).await,
-        Command::Source { action } => source::run(&bench, action).await,
-        Command::Device { action } => device::run(&bench, action),
-        Command::Provider { action } => provider::run(&bench, action).await,
-        Command::Status => status::run(&bench).await,
+    dispatch(&bench, cli.command).await
+}
+
+/// Commands that go through the daemon while it runs: everything touching a device's port or
+/// mains (a mains cut ends a session cleanly).
+pub fn routed(command: &Command) -> bool {
+    matches!(command, Command::Power { .. } | Command::Source { .. })
+}
+
+/// `--interval` of `watch`.
+pub fn parse_interval(s: &str) -> Result<std::time::Duration> {
+    parse_duration("--interval", s)
+}
+
+fn parse_duration(what: &str, s: &str) -> Result<std::time::Duration> {
+    humantime::parse_duration(s.trim()).map_err(|e| {
+        DeskError::Usage(format!(
+            "{what}: `{s}` is not a duration like 100ms or 2s: {e}"
+        ))
+    })
+}
+
+/// Run a command that needs the bench (in-process, or inside the daemon).
+pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
+    match command {
+        Command::Schema
+        | Command::Skill(_)
+        | Command::Port { .. }
+        | Command::Library { .. }
+        | Command::Serve { .. } => Err(DeskError::Usage(
+            "this command doesn't need the bench; run it directly".into(),
+        )),
+        Command::Power { action } => power::run(bench, action).await,
+        Command::Source { action } => source::run(bench, action).await,
+        Command::Device { action } => device::run(bench, action),
+        Command::Provider { action } => provider::run(bench, action).await,
+        Command::Status => status::run(bench).await,
     }
 }
 

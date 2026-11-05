@@ -76,7 +76,8 @@ pub fn run(bench: Result<Bench>) -> Report {
                 "commands": [
                     "desk source set <device> <5v> <1a> [--on] [--dry-run]",
                     "desk source output on|off <device> [--clear-protection] [--dry-run]",
-                    "desk source read <device>"
+                    "desk source read <device>",
+                    "desk source watch <device> [--interval 100ms] [--count N]"
                 ],
                 "units": "values need units: v, mv, a, ma",
                 "safety": "the core refuses values above the device maximum or the device's `limits` (limit_exceeded, nothing sent); setpoints are applied before the output is switched on",
@@ -91,7 +92,8 @@ pub fn run(bench: Result<Bench>) -> Report {
         "output": {
             "json": "with --json, stdout is one document: { ok, data, error? }; error = { code, message, hint? }",
             "partial_failure": "multi-device commands report every device in data.results; ok=false and error/exit code come from the first failure",
-            "logs": "script bindings may return data.results[].log; they also print to stderr"
+            "logs": "script bindings may return data.results[].log; they also print to stderr",
+            "streams": "`desk source watch --json` prints one { ok, data } line per reading (data: device, time, elapsed, reading, dropped, failed reads) and a final { ok: false, error } line if it ends with an error; a background daemon holds the session, other commands keep working"
         },
         "errors": ERROR_CODES
             .iter()

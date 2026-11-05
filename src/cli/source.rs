@@ -59,6 +59,11 @@ pub async fn run(bench: &Bench, cmd: SourceCmd) -> Result<Report> {
             )
         }
         SourceCmd::Read { device } => (device, Request::default(), false),
+        SourceCmd::Watch { .. } => {
+            return Err(DeskError::Usage(
+                "`desk source watch` streams through the daemon; it can't run here".into(),
+            ));
+        }
     };
 
     let device = bench.config.resolve_device(&device)?;

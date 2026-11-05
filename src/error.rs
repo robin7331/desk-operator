@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
+use std::borrow::Cow;
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum DeskError {
@@ -68,6 +70,9 @@ pub enum DeskError {
     VerifyFailed { expected: String, actual: String },
 
     #[error("{0}")]
+    DaemonUnavailable(String),
+
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -90,6 +95,7 @@ impl DeskError {
             DeskError::ScriptFailed(_) => "script_failed",
             DeskError::Timeout { .. } => "timeout",
             DeskError::VerifyFailed { .. } => "verify_failed",
+            DeskError::DaemonUnavailable(_) => "daemon_unavailable",
             DeskError::Internal(_) => "internal",
         }
     }
@@ -108,7 +114,8 @@ impl DeskError {
             | DeskError::EndpointUnavailable { .. }
             | DeskError::StateUnknown(_)
             | DeskError::DeviceOff(_)
-            | DeskError::ProtectionTripped(_) => 4,
+            | DeskError::ProtectionTripped(_)
+            | DeskError::DaemonUnavailable(_) => 4,
             DeskError::ScriptFailed(_) => 5,
             DeskError::Timeout { .. } => 6,
             DeskError::VerifyFailed { .. } => 7,
@@ -128,6 +135,9 @@ impl DeskError {
             DeskError::ProtectionTripped(_) => Some(
                 "find out why (short, overload, heat) first; then switch on with `--clear-protection`",
             ),
+            DeskError::DaemonUnavailable(_) => Some(
+                "the daemon's log (named in the message) says why; `desk serve` runs it in the foreground",
+            ),
             DeskError::LimitExceeded { .. } => Some(
                 "use a lower value (a bench `limit` can be raised in the device's config; a device maximum can't)",
             ),
@@ -137,19 +147,20 @@ impl DeskError {
 
     pub fn to_json(&self) -> ErrorJson {
         ErrorJson {
-            code: self.code(),
+            code: self.code().into(),
             message: self.to_string(),
-            hint: self.hint(),
+            hint: self.hint().map(Into::into),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// An error as it appears in the `--json` envelope (also read back from the daemon).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorJson {
-    pub code: &'static str,
+    pub code: Cow<'static, str>,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<&'static str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<Cow<'static, str>>,
 }
 
 impl From<std::io::Error> for DeskError {
@@ -219,6 +230,11 @@ pub const ERROR_CODES: &[(&str, i32, &str)] = &[
         7,
         "a command was sent but the device did not reach the target state",
     ),
+    (
+        "daemon_unavailable",
+        4,
+        "the background daemon (for `desk source watch`) couldn't be started or reached, or stopped",
+    ),
 ];
 
 #[cfg(test)]
@@ -271,6 +287,7 @@ mod tests {
                 expected: String::new(),
                 actual: String::new(),
             },
+            DeskError::DaemonUnavailable(String::new()),
         ];
         assert_eq!(all.len(), ERROR_CODES.len());
         for e in &all {

@@ -458,12 +458,44 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
          and status layout (still community)
    - [x] Fake-device tests: every field, the gap (fails without it), a latched trip; sim PSU with
          CV/CC and `tripping_*`; read verified on the real IPS3608
-   - Not exposed (they write stored settings): protection thresholds, presets, metering on/off and
-     counter reset, brightness, volume. CC on the IPS3608 needs a load to confirm.
-2. **Streaming:** `desk source watch <device> --json` (one session, one JSON line per measurement),
-   maybe with a cutoff in desk (`--until … --then output-off`) so it holds even if the script dies.
-   Rate is device-bound (IPS3608 pushes every ~0.5 s). Watching while controlling needs stdin
-   commands or the daemon later.
+   - Not exposed, decided with the user (2026-11-05: not needed now; they write settings stored on
+     the device): protection thresholds, presets, metering on/off and counter reset, brightness,
+     volume. CC on the IPS3608 needs a load to confirm (whenever one is connected).
+   - **Step 1 done.**
+2. **Streaming (agreed 2026-11-05):** live readings for other programs (e.g. a LiPo charge
+   logger), while desk and other programs keep controlling the device. desk itself never acts on a
+   reading: the app decides, desk is the backend (limits still apply to every command).
+   - **Daemon** (`desk serve`, started on demand by the first subscriber, exits when idle). It owns
+     the device sessions; nothing else can open the port while it holds it. Local socket:
+     `$XDG_RUNTIME_DIR/desk-operator/desk.sock` (0600) on Unix, a per-user named pipe on Windows.
+   - **Protocol:** JSON lines. A request carries the same arguments as the CLI and gets the same
+     `{ok,data,error}` envelope back; `watch` turns the connection into a stream of readings.
+   - **CLI routing:** device commands go through the daemon when it runs, else in-process as today.
+     So `desk source set psu 4.2v` works while something watches `psu`.
+   - **`desk source watch <device> [--interval 100ms] [--count N] --json`:** one JSON line per
+     reading with a wall-clock and a monotonic timestamp. Rate = what the device delivers (core
+     loops `read()`; default 100 ms for every device, `--interval 0` = back to back; a definition
+     default wasn't needed). A slow subscriber loses old readings and gets a `dropped` count;
+     nothing is slowed down or hidden.
+   - A session stays open while anyone watches (the IPS3608 locks its front panel meanwhile);
+     commands run between readings. Last subscriber gone → session closed, panel free.
+   - Example: a small script that logs a charge to CSV (Python, standard library only).
+   - Tests: watch + set at once, two subscribers, dropped count, no daemon → in-process, daemon
+     killed mid-watch → clear error, socket permissions; against the sim PSU and the fake IPS3608.
+   - [x] Daemon: lock file per config + build, socket 0600 (short temp path if too long), idle
+         exit, SIGTERM/Ctrl-C closes sessions; `daemon_unavailable` error code
+   - [x] Sessions: one per watched device, watchers at their own interval, commands between
+         readings, mains off/toggle ends it with `device_off`, per-device port lock
+   - [x] `desk source watch`, CLI forwarding of `power`/`source`, socket protocol
+         (`docs/streaming.md`), skill + schema updated
+   - [x] Tests: `tests/daemon.rs` (sim PSU) and the fake IPS3608 (one connect for watch + set)
+   - [x] Example `examples/watch_to_csv.py` (CSV log, optional switch-off below a current in CV)
+   - [ ] Windows named-pipe code is written but not compiled yet (no Windows toolchain here; the
+         release CI in step 4 must build it)
+   - [x] Read-only smoke test on the real IPS3608: watch streams, port free afterwards; driver
+         now reads exact frame lengths (112 → 55 ms per reading, ~18/s) and rounds float32 values
+   - Later, not now: **captures** (scopes, logic analyzers): binary blocks moved by the core, never
+     per sample through Lua or JSON; probably sigrok for analyzers, desk orchestrating.
 3. **Dogfood as a user (before going public):** install the local build (`cargo install --path .`,
    `desk skill install --global`), add a device in a fresh session with only the
    installed skills. The device must fit an existing capability (else `meter` first, for the DMM).
@@ -478,7 +510,7 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
 3. **More capabilities:** `electronic_load`, `meter`, `heater`; multi-channel sources; scope much later
 4. **Command language:** `psu 5v 1a on, iron 330c then dmm dcv`, scenes, automatic "mains on → wait for port → configure"
 5. **Palette + tray** (Tauri v2), with `desk palette` for Wayland compositor binds
-6. **Daemon** when something needs long-lived state (palette live values, monitoring); the CLI talks to it over a local socket, with in-process fallback
+6. ~~Daemon~~: moved to roadmap step 2 (streaming)
 7. **MCP server** (`desk mcp`), then natural language with your own API key, always as a previewed plan
 8. **Split `devices/` into `desk-operator-devices`**, Shelly-direct provider
 
@@ -494,6 +526,9 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
 - **No daemon in the MVP:** HA is stateless HTTP. M4 confirmed it's not needed for serial devices
   either: one session per command is the better default (some devices lock their front panel while
   connected).
+- **Daemon after all, for streaming (2026-11-05):** a subscriber needs a long-lived session while
+  other commands keep working, and only one process can hold a serial port. One-shot sessions stay
+  the default when nothing watches.
 - **Capability-named binding keys (`source = …`) instead of a generic `control = …`:** capabilities
   are known without loading drivers, and a driver's port is part of its binding (scripts can't open
   other ports).

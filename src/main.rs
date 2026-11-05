@@ -1,6 +1,7 @@
 mod bench;
 mod cli;
 mod config;
+mod daemon;
 mod error;
 mod library;
 mod model;

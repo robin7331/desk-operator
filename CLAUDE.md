@@ -14,7 +14,9 @@ capability (bench power supplies) with Lua drivers and serial ports, a device li
 specified definition format, agent-ready CLI (`--json`, `schema`, `skill`). One real device is
 supported and smoke-tested (`fnirsi/ips3608`). **M6, AI skills, in progress** (see `plan.md`,
 "M6"): `desk skill list|install`, `desk port probe` and the `desk-add-device` skill are built;
-an end-to-end run on a second real device is still open.
+an end-to-end run on a second real device is still open. **Roadmap step 2, streaming, in
+progress:** a daemon (`desk serve`, started on demand) holds device sessions so
+`desk source watch` streams while other commands keep working (`docs/streaming.md`).
 Keep it lean: build only what the current milestone needs.
 
 **Working agreements:**
@@ -110,8 +112,11 @@ src/
   library.rs           device definitions: search path, `device.toml` parsing, merge, bundled files
   providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
+  daemon/              `desk serve`: local socket (ipc.rs), JSON-lines protocol, CLI forwarding,
+                       `watch` streams; session.rs = live device sessions + per-device port lock
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
+docs/streaming.md      `desk source watch`, the daemon and its socket protocol (for app authors)
 docs/definition-format.md  device definition format v1 (spec); schemas/ has its JSON Schema (tested
                        against every definition in tests/library.rs)
 skills/<name>/         SKILL.md per agent skill (desk-operator, desk-add-device), embedded via
@@ -122,6 +127,7 @@ tests/cli.rs           end-to-end tests of the binary against the mock provider
 tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
 tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
+tests/daemon.rs        watch + daemon: streaming, commands during a watch, endings, the socket
 tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
 tests/device_*.rs      device definitions against fake devices over ptys (belong to the library)
 tests/library.rs       model = "…", merging, search path, desk library list|show|check

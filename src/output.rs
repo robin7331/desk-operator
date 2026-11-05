@@ -14,6 +14,8 @@ pub struct Report {
     pub data: Value,
     pub human: String,
     pub failure: Option<(ErrorJson, i32)>,
+    /// The command already printed its output as it went (`watch`); only a failure is left.
+    pub streamed: bool,
 }
 
 impl Report {
@@ -22,6 +24,17 @@ impl Report {
             data: serde_json::to_value(data).unwrap_or(Value::Null),
             human,
             failure: None,
+            streamed: false,
+        }
+    }
+
+    /// A command that printed its own output line by line, ending with `failure` or not.
+    pub fn streamed(failure: Option<(ErrorJson, i32)>) -> Self {
+        Report {
+            data: Value::Null,
+            human: String::new(),
+            failure,
+            streamed: true,
         }
     }
 
@@ -36,8 +49,26 @@ pub fn emit(json_mode: bool, result: Result<Report, DeskError>) -> i32 {
     match result {
         Ok(report) => {
             let code = report.failure.as_ref().map_or(0, |(_, c)| *c);
+            if report.streamed {
+                // Streams are JSON lines: the error, if any, is one more line.
+                if let Some((err, _)) = &report.failure {
+                    if json_mode {
+                        println!("{}", json!({ "ok": false, "error": err }));
+                    } else {
+                        eprintln!("error: {}", err.message);
+                        if let Some(hint) = &err.hint {
+                            eprintln!("hint: {hint}");
+                        }
+                    }
+                }
+                return code;
+            }
             if json_mode {
-                let mut env = json!({ "ok": report.failure.is_none(), "data": report.data });
+                let mut env = json!({ "ok": report.failure.is_none() });
+                // Errors forwarded from the daemon have no data, like local errors.
+                if !report.data.is_null() || report.failure.is_none() {
+                    env["data"] = report.data;
+                }
                 if let Some((err, _)) = &report.failure {
                     env["error"] = json!(err);
                 }
@@ -49,7 +80,7 @@ pub fn emit(json_mode: bool, result: Result<Report, DeskError>) -> i32 {
                     if !report.human.contains(&err.message) {
                         eprintln!("error: {}", err.message);
                     }
-                    if let Some(hint) = err.hint {
+                    if let Some(hint) = &err.hint {
                         eprintln!("hint: {hint}");
                     }
                 }

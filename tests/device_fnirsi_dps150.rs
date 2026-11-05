@@ -32,6 +32,8 @@ struct Behavior {
     booting: usize,
     /// Start with this protection latched (1 OVP, 2 OCP, ...): output off until `DB=1`.
     tripped: u8,
+    /// Don't answer the full status query with this number (1 = the first).
+    skip_status: Option<usize>,
 }
 
 impl Default for Behavior {
@@ -45,6 +47,7 @@ impl Default for Behavior {
             status: false,
             booting: 0,
             tripped: 0,
+            skip_status: None,
         }
     }
 }
@@ -94,6 +97,7 @@ struct State {
     times: Vec<Instant>,
     bad_frames: usize,
     name_queries: usize,
+    status_queries: usize,
 }
 
 struct FakePsu {
@@ -197,6 +201,10 @@ impl FakePsu {
                         }
                         (0xA1, 0xFF) => {
                             s.log.push("query status".into());
+                            s.status_queries += 1;
+                            if behavior.skip_status == Some(s.status_queries) {
+                                continue; // a lost reply
+                            }
                             if behavior.status {
                                 let _ = master.write_all(&device_frame(0xFF, &status_blob(&s)));
                             }
@@ -701,4 +709,175 @@ fn ips3608_with_a_tripped_protection_stays_off_until_cleared() {
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert_eq!(out.data()["reading"]["protection"], "none");
     assert_eq!(out.data()["reading"]["output"], true);
+}
+
+/// Watching through the daemon: one connection for the whole watch, commands run inside it (the
+/// port is exclusive, so a second open would fail), the panel is released when the watch ends.
+#[test]
+fn ips3608_watch_keeps_one_session_and_commands_join_it() {
+    use std::io::{BufRead, BufReader};
+
+    let (psu, dir) = bundled_ips3608(Behavior::ips3608());
+    let desk = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_desk"));
+        c.env_remove("DESK_CONFIG")
+            .env("DESK_RUNTIME_DIR", dir.path().join("run"))
+            .env("DESK_DAEMON_IDLE", "1s")
+            .arg("--config")
+            .arg(dir.path().join("desk.toml"))
+            .args(args);
+        c
+    };
+    let mut watch = {
+        let _g = FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        desk(&["--json", "source", "watch", "psu", "--interval", "100ms"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut lines = BufReader::new(watch.stdout.take().unwrap()).lines();
+    let mut next =
+        || -> Value { serde_json::from_str(&lines.next().expect("a line").unwrap()).unwrap() };
+    let first = next();
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["data"]["reading"]["output"], false);
+    assert!(close(&first["data"]["reading"]["input_voltage"], 44.7));
+
+    let set = {
+        let _g = FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        desk(&["--json", "source", "set", "psu", "5v", "1a", "--on"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let set = set.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&set.stdout);
+    assert_eq!(set.status.code(), Some(0), "{out}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["data"]["verified"]["output"], true, "{out}");
+
+    let mut on = false;
+    for _ in 0..30 {
+        let r = next();
+        if r["data"]["reading"]["output"] == true
+            && close(&r["data"]["reading"]["voltage_set"], 5.0)
+        {
+            on = true;
+            break;
+        }
+    }
+    assert!(on, "the watch never showed the output on");
+
+    let _ = watch.kill();
+    let _ = watch.wait();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !psu.log().contains(&"disconnect".to_string()) {
+        assert!(
+            Instant::now() < deadline,
+            "never disconnected: {:?}",
+            psu.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let log = psu.log();
+    let count = |what: &str| log.iter().filter(|l| *l == what).count();
+    assert_eq!(count("connect"), 1, "{log:?}");
+    assert_eq!(count("disconnect"), 1, "{log:?}");
+    let at = |what: &str| log.iter().position(|l| l == what).unwrap();
+    assert!(
+        at("connect") < at("vset 5") && at("output 1") < at("disconnect"),
+        "{log:?}"
+    );
+}
+
+/// One lost status reply during a watch is retried, counted, and doesn't end the stream.
+#[test]
+fn ips3608_watch_survives_a_lost_reply() {
+    let (_psu, dir) = bundled_ips3608(Behavior {
+        skip_status: Some(4),
+        ..Behavior::ips3608()
+    });
+    let out = {
+        let _g = FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Command::new(env!("CARGO_BIN_EXE_desk"))
+            .env_remove("DESK_CONFIG")
+            .env("DESK_RUNTIME_DIR", dir.path().join("run"))
+            .env("DESK_DAEMON_IDLE", "1s")
+            .arg("--config")
+            .arg(dir.path().join("desk.toml"))
+            .args([
+                "--json",
+                "source",
+                "watch",
+                "psu",
+                "--interval",
+                "50ms",
+                "--count",
+                "6",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+    .wait_with_output()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    let lines: Vec<Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 6, "{stdout}");
+    assert!(lines.iter().all(|l| l["ok"] == true), "{stdout}");
+    assert_eq!(lines.last().unwrap()["data"]["failed"], 1, "{stdout}");
+}
+
+/// Reads return as soon as the replies are in (not after a read timeout), and values come out as
+/// the device means them (44.7, not 44.70000076).
+#[test]
+fn ips3608_reads_fast_and_rounds_floats() {
+    let (_psu, dir) = bundled_ips3608(Behavior {
+        telemetry: false,
+        ..Behavior::ips3608()
+    });
+    let out = {
+        let _g = FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Command::new(env!("CARGO_BIN_EXE_desk"))
+            .env_remove("DESK_CONFIG")
+            .env("DESK_RUNTIME_DIR", dir.path().join("run"))
+            .env("DESK_DAEMON_IDLE", "1s")
+            .arg("--config")
+            .arg(dir.path().join("desk.toml"))
+            .args([
+                "--json",
+                "source",
+                "watch",
+                "psu",
+                "--interval",
+                "0",
+                "--count",
+                "11",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+    .wait_with_output()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    let lines: Vec<Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let t = |i: usize| lines[i]["data"]["elapsed"].as_f64().unwrap();
+    // Two queries per reading; waiting out 50 ms read timeouts took ~1 s for these ten.
+    assert!(t(10) - t(0) < 0.5, "10 readings took {:.3} s", t(10) - t(0));
+    let r = &lines[0]["data"]["reading"];
+    assert_eq!(r["input_voltage"], 44.7, "{r}");
+    assert_eq!(r["temperature"], 31.5, "{r}");
 }

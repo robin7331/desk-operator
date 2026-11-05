@@ -50,6 +50,12 @@ local function checksum(cmd, data)
   return sum & 0xFF
 end
 
+-- A float32 as the device means it: 7 significant digits, so 3.3 isn't 3.2999999523.
+local function f32(data, pos)
+  local v = string.unpack("<f", data, pos)
+  return tonumber(string.format("%.7g", v)) + 0.0
+end
+
 local function write_frame(kind, cmd, data)
   port:write(string.char(HOST, kind, cmd, #data) .. data .. string.char(checksum(cmd, data)))
 end
@@ -90,6 +96,17 @@ local function parse()
   end
 end
 
+-- How many bytes complete the frame at the start of `rx` (at least the 4 header bytes). Reading
+-- exactly that many returns as soon as the frame is in, instead of waiting out a read timeout.
+local function missing()
+  local start = rx:find(string.char(DEVICE), 1, true)
+  if not start or #rx - start + 1 < 4 then
+    return 4 - (start and #rx - start + 1 or 0)
+  end
+  local len = rx:byte(start + 3)
+  return math.max(1, start + 4 + len - #rx)
+end
+
 -- Wait up to `ms` for a frame `cmd` that satisfies `accept` (default: any), noting output echoes
 -- on the way.
 local function wait_for(ctx, cmd, ms, accept)
@@ -109,7 +126,7 @@ local function wait_for(ctx, cmd, ms, accept)
     if left <= 0 then
       return nil
     end
-    rx = rx .. port:read(64, math.min(left, 50))
+    rx = rx .. port:read(missing(), math.min(left, 50))
   end
 end
 
@@ -214,7 +231,7 @@ local function read_status(ctx, layout)
   local d = reply.data
   local function float_at(offset)
     if offset and #d >= offset + 4 then
-      return (string.unpack("<f", d, offset + 1))
+      return f32(d, offset + 1)
     end
   end
   local function byte_at(offset)
@@ -231,7 +248,7 @@ local function read_status(ctx, layout)
     local r = query(ctx, C_INPUT, function(f)
       return #f.data == 4
     end)
-    input = r and (string.unpack("<f", r.data)) or nil
+    input = r and f32(r.data, 1) or nil
   end
   return {
     output = output,
@@ -261,7 +278,7 @@ function read(ctx)
   if not t then
     error(string.format("no measurement from the device within %d ms (is it on and connected?)", wait))
   end
-  local v, i, p = string.unpack("<fff", t.data)
+  local v, i, p = f32(t.data, 1), f32(t.data, 5), f32(t.data, 9)
   -- The protocol has no known way to read setpoints back, so they're not reported: desk will
   -- show them as "not confirmed" instead of pretending.
   return { output = output_echo, voltage = v, current = i, power = p }

@@ -55,6 +55,7 @@ desk source read <device> --json                    # output state, setpoints, m
 desk source set <device> 5v 1a [--on] --json        # units required: v, mv, a, ma
 desk source output on|off <device> --json
 desk source set <device> 5v --on --dry-run --json   # limits checked, nothing sent
+desk source watch <device> --count 10 --json        # one JSON line per reading (see below)
 ```
 
 There's one entry per device: `data.results[]` for `power on|off|toggle`, `data.devices[]` for
@@ -78,6 +79,7 @@ the first failure only.
 | `device_off` | Its mains power is off. Ask before switching it on with `desk power on` |
 | `limit_exceeded` | Refused, nothing was sent. Tell the user the limit; never work around it or edit `limits` unasked |
 | `protection_tripped` | A protection (OVP, OCP, …) switched the output off; nothing was sent. Tell the user which one. Use `--clear-protection` only after they found the cause and asked you to switch on again |
+| `daemon_unavailable` | The background daemon behind `watch` failed or stopped. Show the message (it names the daemon's log); don't start `desk serve` yourself unless asked |
 
 ## Power supplies (`desk source`)
 
@@ -94,6 +96,11 @@ the first failure only.
 - A tripped protection blocks `output on` (`protection_tripped`). `--clear-protection` overrides
   that and switches the output back on, so it's the user's call, never yours.
 - When in doubt, `--dry-run` first: it checks the limits and shows what would be sent.
+- **Watching:** `desk source watch <device> --json` prints one `{ ok, data }` line per reading
+  (`data.reading`, `data.time`, `data.elapsed` in s, `data.dropped`, `data.failed`) until stopped; always pass
+  `--count N` (or a timeout) so it ends. The last line is `ok: false` if the watch ended with an
+  error, e.g. `device_off` after a mains cut. A background daemon holds the device meanwhile, so
+  other `desk` commands keep working. Watching only reads; it never switches anything.
 
 ## Safety
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::{Binding, Config, Device};
+use crate::daemon::session::{Sessions, Watcher};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, Confidence, Power, PowerState};
 use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
@@ -16,6 +17,8 @@ use crate::source::{self, Report as SourceReport, Request, SourceInfo, VoltageSo
 pub struct Bench {
     pub config: Config,
     pub providers: Arc<Registry>,
+    /// Set inside the daemon: live device sessions that commands go through.
+    pub sessions: Option<Arc<Sessions>>,
 }
 
 /// The result of an operation on one device, plus whatever it logged (scripts), which is
@@ -34,7 +37,11 @@ impl Bench {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         let providers = Arc::new(Registry::new(config.providers.clone(), base_dir));
-        Ok(Bench { config, providers })
+        Ok(Bench {
+            config,
+            providers,
+            sessions: None,
+        })
     }
 
     fn power_switch(&self, device: &Device) -> Result<(Box<dyn PowerSwitch>, Duration)> {
@@ -81,6 +88,15 @@ impl Bench {
                 };
             }
         };
+        // A watched device is on, so off and toggle cut it: end the session first, while the
+        // device can still be told goodbye, and tell the watchers why.
+        if let Some(sessions) = &self.sessions
+            && matches!(target, Target::Off | Target::Toggle)
+        {
+            sessions
+                .stop(&device.id, DeskError::DeviceOff(device.id.clone()))
+                .await;
+        }
         let result = tokio::time::timeout(after, power::switch(&device.id, sw.as_ref(), target))
             .await
             .unwrap_or_else(|_| {
@@ -116,25 +132,34 @@ impl Bench {
         }
     }
 
-    fn voltage_source(
-        &self,
-        device: &Device,
-    ) -> Result<(Box<dyn VoltageSource>, Duration, SourceInfo)> {
-        let binding = device
+    fn source_binding<'a>(&self, device: &'a Device) -> Result<&'a Binding> {
+        device
             .source
             .as_ref()
             .ok_or_else(|| DeskError::CapabilityMissing {
                 device: device.id.clone(),
                 key: "source",
                 capability: "voltage_source",
-            })?;
-        let timeout = binding.timeout().unwrap_or(source::DEFAULT_TIMEOUT);
-        let ratings = match binding {
+            })
+    }
+
+    /// The device's ratings from its `source` binding (definition or config).
+    fn source_ratings(&self, device: &Device) -> Result<SourceInfo> {
+        match self.source_binding(device)? {
             Binding::Script { ratings, .. } if !ratings.is_empty() => {
-                source::parse_ratings(ratings).map_err(DeskError::ConfigInvalid)?
+                source::parse_ratings(ratings).map_err(DeskError::ConfigInvalid)
             }
-            _ => SourceInfo::default(),
-        };
+            _ => Ok(SourceInfo::default()),
+        }
+    }
+
+    fn voltage_source(
+        &self,
+        device: &Device,
+    ) -> Result<(Box<dyn VoltageSource>, Duration, SourceInfo)> {
+        let binding = self.source_binding(device)?;
+        let timeout = binding.timeout().unwrap_or(source::DEFAULT_TIMEOUT);
+        let ratings = self.source_ratings(device)?;
         let src: Box<dyn VoltageSource> = match binding {
             Binding::Native {
                 provider, params, ..
@@ -170,8 +195,74 @@ impl Bench {
         }
     }
 
-    /// Apply a `voltage_source` request (or just read, if it's empty) in one driver session.
+    /// Apply a `voltage_source` request (or just read, if it's empty): through the device's live
+    /// session if the daemon has one, else in a session of its own.
     pub async fn source(&self, device: &Device, req: Request, dry_run: bool) -> Run<SourceReport> {
+        let Some(sessions) = &self.sessions else {
+            return self.source_once(device, req, dry_run).await;
+        };
+        let ratings = match self.source_ratings(device) {
+            Ok(r) => r,
+            Err(e) => {
+                return Run {
+                    result: Err(e),
+                    log: Vec::new(),
+                };
+            }
+        };
+        loop {
+            let port = sessions.port(&device.id);
+            let guard = port.lock().await;
+            if !sessions.is_live(&device.id) {
+                // No session can start while we hold the port lock.
+                let run = self.source_once(device, req, dry_run).await;
+                drop(guard);
+                return run;
+            }
+            drop(guard);
+            if let Some(run) = sessions
+                .apply(&device.id, req, dry_run, device.limits.source, ratings)
+                .await
+            {
+                return run;
+            }
+            // The session ended meanwhile: run on our own.
+        }
+    }
+
+    /// Watch a device: join its live session or start one (daemon only).
+    pub async fn watch(&self, device: &Device, interval: Duration) -> Result<Watcher> {
+        let sessions = self
+            .sessions
+            .as_ref()
+            .ok_or_else(|| DeskError::Internal("watching needs the daemon's sessions".into()))?;
+        sessions
+            .watch(&device.id, interval, || self.open_source(device))
+            .await
+    }
+
+    /// Open a driver session for a long-lived session.
+    async fn open_source(&self, device: &Device) -> Result<(Box<dyn VoltageSource>, Duration)> {
+        let (src, timeout, _) = self.voltage_source(device)?;
+        self.require_mains(device).await?;
+        let opened = tokio::time::timeout(timeout, src.open())
+            .await
+            .unwrap_or_else(|_| {
+                Err(DeskError::Timeout {
+                    what: format!("connecting to `{}`", device.id),
+                    after: timeout,
+                })
+            });
+        match opened {
+            Ok(()) => Ok((src, timeout)),
+            Err(e) => {
+                let _ = tokio::time::timeout(Duration::from_secs(2), src.close()).await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn source_once(&self, device: &Device, req: Request, dry_run: bool) -> Run<SourceReport> {
         // Capability and binding errors first: they're about the config, not the device state.
         let (src, timeout, ratings) = match self.voltage_source(device) {
             Ok(v) => v,

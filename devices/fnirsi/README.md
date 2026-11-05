@@ -96,6 +96,9 @@ Read-only probes with `desk port probe`, output switched only through desk, noth
 - The output **ramps up** for several hundred ms after switching on (1.36 V of 3.3 V after 300 ms),
   so the definition waits `settle_ms = 1000` before measuring.
 - It does **not echo** the output command; the output state comes from the full status.
+- **Watching** (`desk source watch --interval 0`): about **18 readings per second** (two queries per
+  reading, full status and input voltage, ~25 ms each); 200 in a row without a failure, and the
+  measurements change from one reading to the next.
 
 ## Known gaps
 
