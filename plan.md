@@ -11,8 +11,13 @@ desk power on lamp         # runs scripts/lamp.lua on(ctx) and waits for it
 desk status --json         # an agent can see everything
 ```
 
-Done means: it works on the real bench (FNIRSI IPS3608 on a Shelly outlet via HA), `cargo test` passes
-without hardware, and an agent can drive it using `SKILL.md`.
+Done means: `cargo test` passes without hardware, it works against a real Home Assistant (a short
+smoke test), and an agent can drive it using `SKILL.md`.
+
+**Development vs. use:** milestones build the generic tool and are verified with the mock provider
+and fakes (e.g. the fake HA in tests). Real hardware is at most a short smoke test at the end of a
+milestone. Setting up an actual bench (mapping outlets, naming devices) is *using* the tool. It
+happens after the MVP and lives in the user's `~/.config/desk-operator/`, never in this repo.
 
 ### In scope
 
@@ -199,23 +204,24 @@ code come from the first failure.
 - [x] `provider list|test|endpoints [--search]`; endpoints include the binding params to paste
 - [x] Native semantics: read-back verification, polling within a per-provider settle window (HA: 3 s)
 - [x] Token from `token_env` (default `HA_TOKEN`) or `token_file`; a missing token only breaks that provider's devices
-- [x] Real `desk.toml` (HA 2026.10.2, Shelly Power Strip 4 Gen4): Switched on/off and verified on real hardware (≈0.2 s per switch including verification).
+- [x] Smoke test against a real HA 2026.10 with a Shelly Power Strip 4 Gen4: on/off with verification
+  in ≈0.2 s.
 
 Noticed during the real test (refine later, not blocking):
 - A real HA lists ~80 switchable entities (camera toggles etc.); `--search` is essential, and the
   "bind a device with" example uses the first entity in the list, which is arbitrary.
 - Long entity ids make the POWER PATH column in `status` very wide; show the HA friendly name, or
   truncate.
-- The soldering iron isn't on the strip yet.
 
-**Done when:** `desk power on psu` switches the real outlet and `status` reports `on (real)`.
+**Done when:** the HA tests pass, and a smoke test switches a real HA entity on/off with verification.
 
 ### M2 — Lua script bindings
 - [ ] mlua engine with a sandboxed stdlib, async host API (`ctx.provider`, `sleep`, `log`, `params`, `device`)
 - [ ] `ScriptPowerSwitch` with timeout and error mapping; script logs shown in output
 - [ ] Example scripts (double-press quirk, sequence with a wait); tests against mock
 
-**Done when:** one real device runs through a Lua script, and a failing script reports a useful error.
+**Done when:** scripted bindings work end to end in tests (against mock and fake HA), and a failing or
+hanging script reports a useful error.
 
 ### M3 — Agent-ready
 - [ ] `desk schema --json`
@@ -258,4 +264,3 @@ Noticed during the real test (refine later, not blocking):
 
 - Does the FNIRSI IPS3608 have a PC control interface (USB serial / Modbus)? This decides post-MVP item 3.
 - Binary name: `desk` (assumed) vs. something less generic.
-- HA entity IDs of the four Shelly outlets (fill in for M1).
