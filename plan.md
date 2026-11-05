@@ -366,15 +366,54 @@ device-wide (ambiguous once a device has two capabilities), no scaffold.
       `desk library show` lists the driver's params
 - [x] **Spec** `docs/definition-format.md` + JSON Schema for editors
 
-## M6 — AI skills
+## M6 — AI skills (next)
 
-A suite of agent skills shipped with desk (like `desk skill`), building on M5's format:
-- **Add a device:** ask the user for the model, research it (manuals, community protocol work),
-  propose a definition (reuse an existing family driver when possible), test it against a fake
-  device, then on real hardware with the user. Write the user's own bench part (`power`, `limits`)
-  into their config, and offer to **publish the definition** (a PR to the library), never the
-  user's bench details.
-- Operate the bench: the existing `desk-operator` skill.
+A suite of agent skills shipped with desk, building on the M5.1 format. The existing
+`skills/desk-operator/SKILL.md` (operate the bench, printed by `desk skill`) is the first.
+
+### Skill: add a device
+
+Ask the user for the model, research it, produce a definition, test it, smoke-test it with the
+user, write *their* bench part into *their* config, and offer to publish the definition (never the
+bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
+
+1. **Ask:** exact model, what it is (capability), how it connects (USB, LAN, …), whether the user
+   wants it controlled by desk or only switched on/off (then it's just a `power` binding, no
+   definition needed).
+2. **Check the library first:** `desk library list` / `show`; an existing family driver may fit
+   (e.g. the DPS-150 driver covered the IPS3608 with only data in the definition).
+3. **Research:** vendor docs, community reverse engineering, existing open-source tools. Weigh
+   sources (a working tool's source code beats a blog post; in M4.4 a blog turned out to be
+   templated content). Record sources in `sources`.
+4. **Scaffold:** `desk library new vendor/model --capability … --name … --max-voltage … --max-current …`
+   (or `--driver ../shared/x.lua`), then implement/fill in, `desk library check`.
+5. **Fake-device test** (like `tests/device_fnirsi_dps150.rs`) before touching hardware.
+6. **Find the device:** `desk port list` before/after plugging in or powering on (VID:PID, serial).
+   Generic VIDs (e.g. Artery `2e3c:5740`) mean the driver must identify the model first.
+7. **Probe read-only first:** a small diagnostic script (a `power` script binding with `port` and
+   `ctx.serial`) that connects and dumps every frame as hex; then read-only queries (name,
+   firmware, full status). **Diff status snapshots** around one state change to find fields: that's
+   how the IPS3608's setpoint and output offsets were found (offset 107 = output) although the
+   community docs didn't have them.
+8. **Smoke test with the user:** nothing connected to outputs, low values within conservative bench
+   limits, each switching step confirmed by the user. Also mains off/on (boot behavior, output state
+   after power-up). Record observed behavior in the vendor README; set `status = "tested"` with
+   versions.
+9. **The user's config:** `model = …`, their `power` path, `port.serial_number`, `limits`.
+10. **Publish (optional, with consent):** a PR adding only `devices/<vendor>/…`.
+
+### Open questions for M6
+
+- **How skills are shipped:** `desk skill` prints one skill today; several skills need e.g.
+  `desk skill list`, `desk skill <name>`, or `desk skill install [--dir ~/.claude/skills]`.
+- **A probe/sniff tool in desk itself?** The M4.5 diagnostic scripts (frame dump, status diff)
+  were ad-hoc Lua in a scratch folder. A generic `desk port probe` (open a port, send bytes from
+  hex, dump replies) would make step 7 reproducible for any agent. Decide whether that belongs in
+  M6.
+- **How "publish" works:** a PR to this repo's `devices/` (monorepo for now) via `gh`, with the
+  user's consent and a review of exactly what's included.
+- Which capabilities the skill can target: today only `voltage_source` and `power_switch`. Devices
+  needing other capabilities (load, meter) mean adding the capability first (a core change).
 
 ## After M6 (rough order, re-evaluate each time)
 

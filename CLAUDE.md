@@ -9,8 +9,19 @@ The goal is to type something like `psu 5v on, iron 330c` (CLI first, later a ho
 palette, later natural language) and have it happen. That includes switching the mains outlet
 first if the device is off.
 
-**Status:** pre-MVP. The MVP is CLI-only power control. See `plan.md` for scope and milestones.
+**Status:** M0–M5.1 done: mains power via Home Assistant or Lua scripts, the `voltage_source`
+capability (bench power supplies) with Lua drivers and serial ports, a device library with a
+specified definition format, agent-ready CLI (`--json`, `schema`, `skill`). One real device is
+supported and smoke-tested (`fnirsi/ips3608`). **Next: M6, AI skills** (see `plan.md`, "M6").
 Keep it lean: build only what the current milestone needs.
+
+**Working agreements:**
+- Develop and verify the generic tool with mocks and fakes. Real hardware is at most a short
+  smoke test, and only with the user's explicit go-ahead for each step that switches something.
+- Commit only when the user asks (they usually say so at the end of a milestone).
+- Never put anything bench-specific (Home Assistant entities, serial numbers, the user's limits)
+  into the repo: that lives in the user's `~/.config/desk-operator/desk.toml`.
+- Don't guess facts about devices (ratings, URLs, protocol details): leave them out or verify.
 
 ## Core concepts (use these terms consistently)
 
