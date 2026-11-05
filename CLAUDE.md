@@ -16,7 +16,8 @@ Keep it lean: build only what the current milestone needs.
 
 | Term | Meaning |
 |---|---|
-| **Device** | Something on the bench, such as `psu` or `iron`. It has an id, a name, aliases and capabilities. |
+| **Device** | Something on *one user's* bench, such as `psu` or `iron`, in their `desk.toml`. It has an id, a name, aliases, capabilities, and the user's own bindings (e.g. their power path) and `limits`. |
+| **Device definition** | What's true for *every unit* of a model ("FNIRSI IPS3608"): driver, USB ids, maximums, docs, tests. Lives in the device library `devices/<vendor>/<model>/`. Never contains anything user-specific (no Home Assistant entities, no bench limits). |
 | **Capability** | A standard, vendor-neutral interface defined by the core: `power_switch` (MVP); later `voltage_source`, `electronic_load`, `meter`, `heater`. |
 | **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which belongs to `voltage_source`. Never mix "power" and "output". |
 | **Capability binding** | One config key per capability: `power` (power_switch), `source` (voltage_source); later `load`, `meter`, … Each is a native provider binding or a Lua script. |
@@ -61,6 +62,8 @@ default.
   or `debug`).
 - **Secrets are never in the config file.** Tokens come from an env var or a separate `token_file`
   (keyring later), and are never printed or logged.
+- **The core never knows a specific model.** Nothing in `src/` references `devices/`. A driver
+  that needs something the API can't do reveals a gap in the API; fix it generically.
 - **Cross-platform.** No platform-specific code without `cfg`-gated alternatives. Note: global
   hotkeys don't work on Wayland. The UI will expose a `desk palette` command for compositor
   keybinds.
@@ -100,6 +103,8 @@ tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
 tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
 tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
+tests/device_*.rs      device definitions against fake devices over ptys (belong to the library)
+devices/               device library: <vendor>/<model>/device.toml + shared protocol drivers (see devices/README.md)
 ```
 
 ## Development

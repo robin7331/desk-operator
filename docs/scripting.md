@@ -50,6 +50,7 @@ function state(ctx) ... end -- optional
 | `ctx.params` | The binding's `params` table |
 | `ctx.power(binding)` | A handle to any power path, written exactly like a native binding: `ctx.power{ provider = "ha", entity = "switch.x" }` or `ctx.power(ctx.params.iron)` |
 | `ctx.sleep(ms)` / `ctx.sleep("1.5s")` | Wait without blocking other devices |
+| `ctx.clock()` | Monotonic milliseconds (float), for deadlines and "measured after my command?" checks |
 | `ctx.log(...)` | Log a line (arguments are joined with spaces). Shown on stderr as `device: line` and returned in `--json` output as `log` |
 
 A power handle `p` (both `p:on()` and `p.on()` work):

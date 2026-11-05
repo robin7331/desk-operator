@@ -408,7 +408,7 @@ mod tests {
         kind = "mock"
 
         [devices.psu]
-        name = "FNIRSI IPS3608"
+        name = "Lab Supply 3000"
         aliases = ["supply", "Power Supply"]
         power = { provider = "sim", endpoint = "outlet1", timeout = "2s" }
 
@@ -453,7 +453,7 @@ mod tests {
         let c = parse(BASIC).unwrap();
         assert_eq!(c.resolve_device("PSU").unwrap().id, "psu");
         assert_eq!(c.resolve_device("power supply").unwrap().id, "psu");
-        assert_eq!(c.resolve_device("fnirsi ips3608").unwrap().id, "psu");
+        assert_eq!(c.resolve_device("lab supply 3000").unwrap().id, "psu");
         assert!(matches!(
             c.resolve_device("scope"),
             Err(DeskError::DeviceNotFound { .. })

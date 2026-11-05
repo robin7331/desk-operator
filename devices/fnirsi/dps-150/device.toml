@@ -1,0 +1,14 @@
+# Device definition: true for every FNIRSI DPS-150, nothing about any particular bench.
+# Format draft: desk loads definitions from M5 on (until then, see ../../README.md for manual use).
+
+[device]
+id       = "fnirsi/dps-150"
+name     = "FNIRSI DPS-150"
+kind     = "bench power supply"
+requires = "desk-operator >= 0.1"
+status   = "community" # protocol from community sources, not yet tested on hardware by desk-operator
+
+[source]
+script = "../shared/dps150_protocol.lua"
+# port = { usb_vid = 0x0000, usb_pid = 0x0000 }   # unknown yet: `desk port list` output welcome
+params = { max_voltage = 30.0, max_current = 5.1 }

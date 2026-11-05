@@ -280,6 +280,13 @@ fn host_api(
     })?;
     ctx.set("sleep", sleep)?;
 
+    // ctx.clock(): monotonic milliseconds (the sandbox has no `os.clock`/`os.time`).
+    let start = Instant::now();
+    ctx.set(
+        "clock",
+        lua.create_function(move |_, _: MultiValue| Ok(start.elapsed().as_secs_f64() * 1000.0))?,
+    )?;
+
     // ctx.power{ provider = "ha", entity = "switch.x" } -> handle with on/off/toggle/state
     let power = lua.create_function(move |lua, spec: Value| {
         let json: serde_json::Value = lua.from_value(spec)?;

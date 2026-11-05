@@ -538,3 +538,46 @@ fn all_is_a_reserved_device_name() {
             .contains("`All` is reserved")
     );
 }
+
+#[test]
+fn core_never_references_specific_devices() {
+    // The core knows capabilities, not models. Device definitions live in `devices/` and may be
+    // moved to their own repository, so nothing in `src/` may depend on them.
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let vendors: Vec<String> =
+        std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("devices"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_lowercase())
+            .collect();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap().to_lowercase();
+        assert!(
+            !text.contains("devices/"),
+            "{} references devices/",
+            f.display()
+        );
+        for v in &vendors {
+            assert!(
+                !text.contains(v.as_str()),
+                "{} mentions vendor `{v}`",
+                f.display()
+            );
+        }
+    }
+}

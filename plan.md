@@ -269,8 +269,12 @@ desk source read psu                            # output, setpoints, measured V/
 - [x] **M4.3** Serial host API: `port = { … }` in script bindings, `ctx.serial.open{…}` with
       write/read/clear/close, `wait` for ports to appear, exclusive opens, `desk port list`
       (USB only unless `--all`). Tested over pseudo-terminal pairs (Unix), stable over 30 repeated runs
-- [ ] **M4.4** `drivers/fnirsi_dps150.lua`, tested against a fake device that speaks the protocol
-      over a pty (setpoints, output echo, pushed telemetry)
+- [x] **M4.4** First device definitions: `devices/fnirsi/` with a shared DPS-150-family protocol
+      driver and two definitions (`ips3608`, `dps-150`), tested against a fake device that speaks
+      the protocol over a pty (connect/disconnect, setpoints, output echo, pushed telemetry, resync).
+      API gap it revealed, fixed generically: `ctx.clock()` (the sandbox had no time source, needed
+      to ignore measurements taken before a command). A test now enforces that `src/` never
+      mentions `devices/` or a vendor.
 - [ ] **M4.5** Smoke test on a real IPS3608 (nothing connected to the output), only with the user's go-ahead
 
 **Background (research, Nov 2026):** the IPS3608 is a USB CDC-ACM device that speaks the DPS-150
@@ -282,16 +286,59 @@ one PC app for "DPS-150 / IPS3608". Unknown until tested: USB VID:PID, setpoint/
 Other PSU families the capability must also fit: SCPI-style text (Rigol, Siglent, Owon, Korad) and
 Modbus registers (Riden RD60xx).
 
-## After M4 (rough order, re-evaluate each time)
+## Devices vs. device definitions (terminology, decided after M4.3)
+
+| | **Device** | **Device definition** |
+|---|---|---|
+| What | `psu` on *one* bench | "FNIRSI IPS3608": what's true for every unit of a model |
+| Contains | name, aliases, the user's power path (HA, Shelly, …), bench `limits`, which unit (serial number) | driver(s), USB ids, device maximums, docs, tests, tested firmware |
+| Lives in | the user's `~/.config/desk-operator/desk.toml` (never in a repo) | the device library: `devices/<vendor>/<model>/` |
+
+A definition never contains anything about how a particular user switches mains or names things.
+
+**Monorepo for now:** the library lives in `devices/` in this repo while the driver contract still
+changes (one commit per API change, CI tests every definition against the current core). It's
+built to be split into a separate `desk-operator-devices` repo later (self-contained folders, a
+`requires` version in each definition), once the driver API is stable (~1.0) and there are outside
+contributors. The core never references anything in `devices/`.
+
+## M5 — Device library
+
+- **`model = "fnirsi/ips3608"`** in a device: the definition supplies its capability bindings
+  (`source = …`, ports, params, maximums). The user's config adds what's theirs (`power`, `limits`,
+  aliases) and may override per unit (e.g. `port.serial_number` when two identical units exist).
+- **Definition format** (`device.toml`): id, name, kind, `requires = "desk-operator >= x"`, bindings,
+  docs and a status (`community`, `tested on hardware`, firmware versions). Shared drivers for
+  protocol families (one driver, several definitions).
+- **Where definitions come from:** bundled with desk (`devices/` embedded at build time), a local
+  folder (`~/.config/desk-operator/devices/`, for your own or unpublished ones), later the remote
+  library repo.
+- **CLI:** `desk devices list|show|check` (validate a definition: format, driver functions, tests).
+- **Definition tests that travel with the definition** (a fake device described next to the
+  driver), so the library can live in its own repo later. M4.4's fake device is written in Rust in
+  `tests/`; M5 decides how definitions carry their own.
+- Contributor docs: layout, contract, what "tested" means, how to submit.
+
+## M6 — AI skills
+
+A suite of agent skills shipped with desk (like `desk skill`), building on M5's format:
+- **Add a device:** ask the user for the model, research it (manuals, community protocol work),
+  propose a definition (reuse an existing family driver when possible), test it against a fake
+  device, then on real hardware with the user. Write the user's own bench part (`power`, `limits`)
+  into their config, and offer to **publish the definition** (a PR to the library), never the
+  user's bench details.
+- Operate the bench: the existing `desk-operator` skill.
+
+## After M6 (rough order, re-evaluate each time)
 
 1. **Config editing from the CLI:** `device add`, `device power <dev>` with interactive provider/entity pickers (`toml_edit`, `inquire`)
-2. **Driver library:** `driver = "fnirsi-dps150"` resolves to drivers bundled with desk; native Rust drivers for common families (SCPI, Modbus)
+2. **Native Rust drivers** for common protocol families (SCPI, Modbus) next to Lua drivers
 3. **More capabilities:** `electronic_load`, `meter`, `heater`; multi-channel sources; scope much later
 4. **Command language:** `psu 5v 1a on, iron 330c then dmm dcv`, scenes, automatic "mains on → wait for port → configure"
 5. **Palette + tray** (Tauri v2), with `desk palette` for Wayland compositor binds
 6. **Daemon** when something needs long-lived state (palette live values, monitoring); the CLI talks to it over a local socket, with in-process fallback
 7. **MCP server** (`desk mcp`), then natural language with your own API key, always as a previewed plan
-8. **Community driver library**, Shelly-direct provider
+8. **Split `devices/` into `desk-operator-devices`**, Shelly-direct provider
 
 ## Decisions log
 
