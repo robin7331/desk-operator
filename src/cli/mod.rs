@@ -64,7 +64,7 @@ pub enum Command {
 pub enum PowerCmd {
     /// Switch mains power on
     On(Targets),
-    /// Switch mains power off
+    /// Switch mains power off. Without devices, or with `all`: every device
     Off(Targets),
     /// Toggle mains power (needs a path that can read back its state)
     Toggle(Targets),
@@ -78,7 +78,7 @@ pub enum PowerCmd {
 #[derive(Debug, Args)]
 pub struct Targets {
     /// Device ids, aliases or names
-    #[arg(required_unless_present = "all", conflicts_with = "all")]
+    #[arg(conflicts_with = "all")]
     pub devices: Vec<String>,
 
     /// Every device that has a power path

@@ -455,3 +455,86 @@ fn skill_matches_the_cli() {
         assert!(skill.contains(cmd), "skill doesn't mention `{cmd}`");
     }
 }
+
+#[test]
+fn power_off_without_devices_or_with_all_means_everything() {
+    for args in [
+        &["--json", "power", "off"][..],
+        &["--json", "power", "off", "all"][..],
+        &["--json", "power", "off", "ALL"][..],
+    ] {
+        let b = Bench::new();
+        b.run(&["power", "on", "psu", "iron"]);
+        let out = b.run(args);
+        let j = out.json();
+        let results = j["data"]["results"].as_array().unwrap();
+        // Every device with a power path is included (broken ones fail, the rest switch off).
+        let ids: Vec<&str> = results
+            .iter()
+            .map(|r| r["device"].as_str().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&"psu") && ids.contains(&"iron") && ids.contains(&"lamp"),
+            "{args:?}: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"scope"),
+            "devices without a power path are skipped"
+        );
+        let psu = results.iter().find(|r| r["device"] == "psu").unwrap();
+        assert_eq!(psu["power"]["state"], "off", "{args:?}");
+    }
+}
+
+#[test]
+fn power_off_all_dry_run() {
+    let b = Bench::new();
+    b.run(&["power", "on", "psu"]);
+    let j = b.run(&["--json", "power", "off", "--dry-run"]).json();
+    assert_eq!(j["data"]["dry_run"], true);
+    let j = b.run(&["--json", "power", "status", "psu"]).json();
+    assert_eq!(
+        j["data"]["devices"][0]["power"]["state"], "on",
+        "dry run switched nothing"
+    );
+}
+
+#[test]
+fn switching_everything_on_needs_the_explicit_flag() {
+    let b = Bench::new();
+    for args in [
+        &["--json", "power", "on"][..],
+        &["--json", "power", "on", "all"][..],
+        &["--json", "power", "toggle", "all"][..],
+    ] {
+        let out = b.run(args);
+        assert_eq!(out.code, 2, "{args:?}");
+        assert_eq!(out.json()["error"]["code"], "usage", "{args:?}");
+    }
+    let msg = b.run(&["--json", "power", "on", "all"]).json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        msg.contains("only a shortcut for `desk power off`"),
+        "{msg}"
+    );
+    let j = b.run(&["--json", "power", "status", "psu"]).json();
+    assert_eq!(
+        j["data"]["devices"][0]["power"]["state"], "off",
+        "nothing was switched on"
+    );
+}
+
+#[test]
+fn all_is_a_reserved_device_name() {
+    let b = Bench::with_config("[devices.lamp]\naliases = [\"All\"]\n");
+    let out = b.run(&["--json", "device", "list"]);
+    assert_eq!(out.code, 3);
+    assert!(
+        out.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("`All` is reserved")
+    );
+}

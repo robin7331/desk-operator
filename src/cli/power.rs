@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use super::{PowerCmd, Targets, summarize_failures};
 use crate::bench::Bench;
-use crate::config::{Device, PowerBinding};
+use crate::config::{ALL, Device, PowerBinding};
 use crate::error::{DeskError, ErrorJson, Result};
 use crate::model::PowerState;
 use crate::output::{Report, table};
@@ -79,8 +79,38 @@ fn targets<'b>(bench: &'b Bench, queries: &[String], all: bool) -> Result<Vec<&'
     Ok(devices)
 }
 
+/// `desk power off` and `desk power off all` mean every device. Switching on (or toggling)
+/// everything needs the explicit `--all` flag.
+fn wants_all(target: Target, t: &Targets) -> Result<bool> {
+    let says_all = t.devices.iter().any(|d| d.eq_ignore_ascii_case(ALL));
+    if target == Target::Off {
+        return Ok(t.all || t.devices.is_empty() || says_all);
+    }
+    let verb = target.as_str();
+    let action = match target {
+        Target::Toggle => "toggle",
+        _ => &format!("switch {verb}"),
+    };
+    if says_all {
+        return Err(DeskError::Usage(format!(
+            "`all` is only a shortcut for `desk power off`; name the devices to {action} \
+             (or pass --all explicitly)"
+        )));
+    }
+    if t.devices.is_empty() && !t.all {
+        return Err(DeskError::Usage(format!(
+            "name the devices to {action}, e.g. `desk power {verb} psu`"
+        )));
+    }
+    Ok(t.all)
+}
+
 async fn act(bench: &Bench, target: Target, t: Targets) -> Result<Report> {
-    let devices = targets(bench, &t.devices, t.all)?;
+    let devices = if wants_all(target, &t)? {
+        targets(bench, &[], true)?
+    } else {
+        targets(bench, &t.devices, false)?
+    };
     if t.dry_run {
         return dry_run(bench, target, devices).await;
     }

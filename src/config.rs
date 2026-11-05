@@ -253,6 +253,12 @@ impl Config {
                 ));
             }
             for key in std::iter::once(&d.id).chain(&d.aliases) {
+                if key.eq_ignore_ascii_case(ALL) {
+                    problems.push(format!(
+                        "device `{}`: `{key}` is reserved (`desk power off all` means every device)",
+                        d.id
+                    ));
+                }
                 if let Some(other) = names.insert(key.to_lowercase(), &d.id)
                     && other != d.id
                 {
@@ -312,6 +318,9 @@ impl Config {
         }
     }
 }
+
+/// Reserved word: `desk power off all` means every device, so no device may be called this.
+pub const ALL: &str = "all";
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty()

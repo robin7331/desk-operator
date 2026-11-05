@@ -37,6 +37,16 @@ pub enum Target {
     Toggle,
 }
 
+impl Target {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::On => "on",
+            Target::Off => "off",
+            Target::Toggle => "toggle",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
     /// State before acting; only known when the path supports readback.

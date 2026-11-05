@@ -17,8 +17,9 @@ scripts. It describes itself, so learn the bench from it instead of guessing.
    stderr only carries logs and human messages.
 3. **Change power only when the user asked for that change.** "What's on?" is read-only: use
    `desk status --json`, which lists every device, including devices without a power path
-   (`power: null`; mention those as "not controllable"). Use `--all` only when the user said
-   "everything" or "all".
+   (`power: null`; mention those as "not controllable"). Switch every device only when the user said
+   "everything" or "all". Careful: **`desk power off` without device names (or with `all`) switches
+   every device off.** Always name the devices unless everything is meant.
 4. **Preview with `--dry-run`** when a request covers several devices, or when you had to pick
    between several plausible devices (for example two devices whose names both fit). Show the plan
    and confirm before switching. A name or alias that `desk` resolves to exactly one device is not a
@@ -38,6 +39,7 @@ desk schema --json                                  # the bench, commands, error
 desk status --json                                  # every device's power + provider health
 desk power status [<device>...] --json
 desk power on|off|toggle <device>... --json         # several devices run concurrently
+desk power off [all] --json                         # every device off (switching on needs --all)
 desk power on <device>... --dry-run --json          # what would be sent; nothing is switched
 desk device list|show <device> --json
 desk provider list|test <id> --json
