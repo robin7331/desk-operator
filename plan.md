@@ -366,7 +366,7 @@ device-wide (ambiguous once a device has two capabilities), no scaffold.
       `desk library show` lists the driver's params
 - [x] **Spec** `docs/definition-format.md` + JSON Schema for editors
 
-## M6 — AI skills (next)
+## M6 — AI skills (in progress)
 
 A suite of agent skills shipped with desk, building on the M5.1 format. The existing
 `skills/desk-operator/SKILL.md` (operate the bench, printed by `desk skill`) is the first.
@@ -395,25 +395,50 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
    firmware, full status). **Diff status snapshots** around one state change to find fields: that's
    how the IPS3608's setpoint and output offsets were found (offset 107 = output) although the
    community docs didn't have them.
-8. **Smoke test with the user:** nothing connected to outputs, low values within conservative bench
-   limits, each switching step confirmed by the user. Also mains off/on (boot behavior, output state
+8. **The user's config:** `model = …`, their `power` path, `port.serial_number`, and
+   conservative *test* `limits` (the smoke test runs through the user's config, which already
+   holds the power path).
+9. **Smoke test with the user:** nothing connected to outputs, low values within the test limits,
+   each switching step confirmed by the user. Also mains off/on (boot behavior, output state
    after power-up). Record observed behavior in the vendor README; set `status = "tested"` with
-   versions.
-9. **The user's config:** `model = …`, their `power` path, `port.serial_number`, `limits`.
+   versions; replace the test limits with the user's real ones.
 10. **Publish (optional, with consent):** a PR adding only `devices/<vendor>/…`.
 
-### Open questions for M6
+### Decisions
 
-- **How skills are shipped:** `desk skill` prints one skill today; several skills need e.g.
-  `desk skill list`, `desk skill <name>`, or `desk skill install [--dir ~/.claude/skills]`.
-- **A probe/sniff tool in desk itself?** The M4.5 diagnostic scripts (frame dump, status diff)
-  were ad-hoc Lua in a scratch folder. A generic `desk port probe` (open a port, send bytes from
-  hex, dump replies) would make step 7 reproducible for any agent. Decide whether that belongs in
-  M6.
-- **How "publish" works:** a PR to this repo's `devices/` (monorepo for now) via `gh`, with the
-  user's consent and a review of exactly what's included.
-- Which capabilities the skill can target: today only `voltage_source` and `power_switch`. Devices
-  needing other capabilities (load, meter) mean adding the capability first (a core change).
+- **Shipping:** `desk skill` (still desk-operator), `desk skill list`, `desk skill <name>`,
+  `desk skill install --global | --project | --dir <path>` (`~/.claude/skills`, `./.claude/skills`;
+  on a terminal without a flag it asks: globally, this project, or not now). Writes
+  `<dir>/<name>/SKILL.md`, replaces only older versions of desk's own skills unless `--force`,
+  all-or-nothing. A global install costs every session only the skill descriptions (~130 tokens),
+  so they're kept short. The future `curl | sh` installer just runs `desk skill install` (reading
+  the answer from `/dev/tty`).
+- **Self-sufficient without skills:** `desk --help` tells agents where to start (`desk schema
+  --json`, `desk skill desk-operator`) and the core rules; a test requires help text on every
+  command and argument.
+- **Probe tool in desk:** yes, minimal: `desk port probe` (hex or `--text` sends, timestamped hex
+  replies). It's raw (no limits), so the skills restrict it to documented read-only queries and
+  forbid it for operating devices. Diffing snapshots stays the agent's job.
+- **Fake-device tests:** Rust `tests/device_*.rs` in a checkout; without a checkout the skill says
+  there's no fake test and relies on probing + smoke test (a Lua fake format waits for the
+  library's own repository).
+- **Publishing:** skill-guided, consent on the exact file list first. `gh` if available; else git
+  branch + push/compare-URL steps or `git format-patch`; without a checkout a tarball of the
+  vendor folder. The upstream URL comes from the checkout's remote (none is set yet).
+- **Capabilities:** the skill targets `voltage_source` and `power_switch`; anything else is reported
+  as needing a core capability first.
+
+**Done:**
+- [x] `desk skill list|<name>|install`; skills registry in `src/cli/skill.rs`, tested against `skills/`
+- [x] `desk skill install` scopes (`--global`, `--project`, `--dir`) with a picker on a terminal
+- [x] `desk --help` guides agents without a skill; every command and argument has help (tested)
+- [x] `desk port probe [path] [--usb VID:PID] [--serial-number] [--baud] [--line 8N1] [--send …]
+      [--text] [--listen 1s]` (pty tests in `tests/serial.rs`)
+- [x] `skills/desk-add-device/SKILL.md`: the workflow above, ground rules, driver essentials,
+      publishing with and without `gh`
+- [x] `desk schema` lists groups that take their own arguments (`desk skill [name]`); a test checks
+      every skill mentions only real commands and error codes
+- [ ] Validate the add-device skill end to end on a second real device (with the user)
 
 ## After M6 (rough order, re-evaluate each time)
 

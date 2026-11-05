@@ -109,7 +109,9 @@ fn walk(cmd: &clap::Command, path: &str, out: &mut Vec<CommandInfo>) {
         let path = format!("{path} {}", sub.get_name());
         if sub.has_subcommands() {
             walk(sub, &path, out);
-        } else {
+        }
+        // A group that also takes arguments of its own (`desk skill [name]`) is a command too.
+        if !sub.has_subcommands() || sub.get_positionals().next().is_some() {
             out.push(CommandInfo {
                 command: path,
                 about: sub.get_about().map(|a| a.to_string()).unwrap_or_default(),

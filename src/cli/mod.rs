@@ -7,6 +7,7 @@ mod port;
 mod power;
 mod provider;
 mod schema;
+mod skill;
 mod source;
 mod status;
 
@@ -18,12 +19,24 @@ use crate::bench::Bench;
 use crate::error::{DeskError, ErrorJson, Result};
 use crate::output::Report;
 
+/// What an agent without a skill needs to find its way: where to start, and the rules.
+const AFTER_HELP: &str = "\
+Every command accepts --json: stdout is then one document { ok, data, error? }.
+`desk help <command>` (or `desk <command> --help`) shows each command's arguments.
+
+For agents:
+  desk schema --json        the bench (devices, providers), every command, every error code
+  desk skill desk-operator  how to operate the bench safely: read it before switching anything
+  desk skill list           all skills (e.g. adding a device desk doesn't know yet)
+Rules in short: change things only when the user asked; `desk power` is a device's mains,
+`desk source output` a power supply's terminals; never pick voltages or currents yourself.";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "desk",
     version,
     about = "Control the equipment on your electronics bench",
-    after_help = "Every command accepts --json for machine-readable output (see `desk help <command>`)."
+    after_help = AFTER_HELP
 )]
 pub struct Cli {
     /// Print a JSON envelope `{ ok, data, error }` on stdout instead of human output
@@ -74,8 +87,43 @@ pub enum Command {
     Status,
     /// Machine-readable description of the bench, all commands and error codes (for agents)
     Schema,
-    /// Print the agent skill (SKILL.md) matching this version of desk
-    Skill,
+    /// Agent skills (SKILL.md) matching this version of desk: print, list or install them
+    Skill(SkillArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct SkillArgs {
+    /// Skill to print [default: desk-operator]
+    pub name: Option<String>,
+
+    #[command(subcommand)]
+    pub action: Option<SkillCmd>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillCmd {
+    /// List the skills shipped with desk
+    List,
+    /// Install every skill for your agent (asks where on a terminal). Replaces only older
+    /// versions of desk's skills
+    Install(InstallArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InstallArgs {
+    /// For every Claude Code session: ~/.claude/skills
+    #[arg(long, conflicts_with_all = ["project", "dir"])]
+    pub global: bool,
+    /// For the current project only: ./.claude/skills
+    #[arg(long, conflicts_with = "dir")]
+    pub project: bool,
+    /// Another skills folder (e.g. another agent's); skills go to <dir>/<name>/SKILL.md
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+    /// Also overwrite files that aren't desk's skill of that name
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -126,6 +174,7 @@ pub enum SourceCmd {
     },
     /// Switch the output terminals on or off (not mains power: see `desk power`)
     Output {
+        /// on or off
         state: OnOff,
         /// Device id, alias or name
         device: String,
@@ -194,6 +243,36 @@ pub enum PortCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Send raw bytes to a serial port and dump the replies as hex (for adding devices).
+    /// No limits are checked: send only queries you know are read-only
+    Probe(ProbeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProbeArgs {
+    /// Port path, e.g. /dev/ttyACM0 (or select it with --usb / --serial-number)
+    pub path: Option<String>,
+    /// USB ids as `desk port list` shows them, e.g. 2e3c:5740
+    #[arg(long, value_name = "VID:PID")]
+    pub usb: Option<String>,
+    /// USB serial number of the port
+    #[arg(long)]
+    pub serial_number: Option<String>,
+    /// Baud rate
+    #[arg(long, default_value_t = 9600)]
+    pub baud: u32,
+    /// Data bits, parity (N/E/O), stop bits
+    #[arg(long, default_value = "8N1")]
+    pub line: String,
+    /// Bytes to send, as hex ("F1 A1 DE 01 00 DF"); repeat for several, each followed by a listen
+    #[arg(long, value_name = "BYTES")]
+    pub send: Vec<String>,
+    /// Treat --send values as text with escapes (\n, \r, \t, \\, \xNN), e.g. "*IDN?\n"
+    #[arg(long)]
+    pub text: bool,
+    /// How long to collect replies after each send (or in total without --send), at most 60s
+    #[arg(long, default_value = "1s", value_name = "DURATION")]
+    pub listen: String,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -232,28 +311,23 @@ pub enum DeviceCmd {
     },
 }
 
-/// The agent skill, shipped inside the binary so it always matches this version.
-pub const SKILL: &str = include_str!("../../skills/desk-operator/SKILL.md");
-
 pub async fn run(cli: Cli) -> Result<Report> {
     // These work without a (valid) config.
     match cli.command {
         Command::Schema => return Ok(schema::run(Bench::load(cli.config.as_deref()))),
-        Command::Port {
-            action: PortCmd::List { all },
-        } => return port::list(all),
-        Command::Library { action } => return library::run(cli.config.as_deref(), action),
-        Command::Skill => {
-            return Ok(Report::new(
-                &serde_json::json!({ "skill": SKILL }),
-                SKILL.to_string(),
-            ));
+        Command::Port { action } => {
+            return match action {
+                PortCmd::List { all } => port::list(all),
+                PortCmd::Probe(args) => port::probe(args).await,
+            };
         }
+        Command::Library { action } => return library::run(cli.config.as_deref(), action),
+        Command::Skill(SkillArgs { name, action }) => return skill::run(name, action, cli.json),
         _ => {}
     }
     let bench = Bench::load(cli.config.as_deref())?;
     match cli.command {
-        Command::Schema | Command::Skill | Command::Port { .. } | Command::Library { .. } => {
+        Command::Schema | Command::Skill(_) | Command::Port { .. } | Command::Library { .. } => {
             unreachable!("handled above")
         }
         Command::Power { action } => power::run(&bench, action).await,
@@ -276,4 +350,36 @@ fn summarize_failures(total: usize, failures: &[&DeskError]) -> Option<(ErrorJso
         );
     }
     Some((err, first.exit_code()))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    /// Agents without a skill navigate by `desk help`: every command and argument explains itself.
+    #[test]
+    fn every_command_and_argument_has_help() {
+        fn check(cmd: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
+                let path = format!("{path} {}", sub.get_name());
+                if sub.get_about().is_none() {
+                    missing.push(path.clone());
+                }
+                for arg in sub.get_arguments() {
+                    if arg.get_help().is_none()
+                        && !matches!(arg.get_id().as_str(), "help" | "version")
+                    {
+                        missing.push(format!("{path} <{}>", arg.get_id()));
+                    }
+                }
+                check(sub, &path, missing);
+            }
+        }
+        Cli::command().debug_assert();
+        let mut missing = Vec::new();
+        check(&Cli::command(), "desk", &mut missing);
+        assert!(missing.is_empty(), "no help text: {missing:?}");
+    }
 }

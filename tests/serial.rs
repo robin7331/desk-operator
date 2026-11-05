@@ -346,3 +346,127 @@ fn device_views_and_port_list() {
     assert!(out.json()["data"]["ports"].is_array());
     assert!(out.json()["data"]["hidden"].is_number());
 }
+
+#[test]
+fn probe_sends_hex_and_dumps_replies() {
+    let dev = FakeDevice::start();
+    let dir = bench(&script(""), "");
+    let out = run(
+        dir.path(),
+        &[
+            "--json",
+            "port",
+            "probe",
+            &dev.path,
+            "--baud",
+            "115200",
+            "--send",
+            "61 62 0A",
+            "--send",
+            "0x7a,0x00",
+            "--listen",
+            "300ms",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let d = &out.json()["data"];
+    assert_eq!(d["port"], dev.path.as_str());
+    assert_eq!(d["baud"], 115200);
+    let steps = d["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["sent"], "61 62 0A");
+    assert_eq!(
+        steps[0]["received"], "41 42 0A",
+        "the fake upper-cases letters"
+    );
+    assert_eq!(steps[0]["ascii"], "AB.");
+    assert_eq!(steps[1]["received"], "5A 00");
+    let chunk = &steps[0]["chunks"][0];
+    assert_eq!(chunk["hex"], "41 42 0A");
+    assert!(chunk["at_ms"].as_u64().unwrap() < 300);
+}
+
+#[test]
+fn probe_text_and_listen_only() {
+    let dev = FakeDevice::start();
+    let dir = bench(&script(""), "");
+    let out = run(
+        dir.path(),
+        &[
+            "--json", "port", "probe", &dev.path, "--text", "--send", "*idn?\\n", "--listen",
+            "300ms",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert_eq!(out.json()["data"]["steps"][0]["ascii"], "*IDN?.");
+
+    // Without --send it only listens; the fake sends nothing unprompted.
+    let start = Instant::now();
+    let out = run(
+        dir.path(),
+        &["--json", "port", "probe", &dev.path, "--listen", "300ms"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert!(start.elapsed() >= Duration::from_millis(300));
+    let step = &out.json()["data"]["steps"][0];
+    assert!(step["sent"].is_null());
+    assert_eq!(step["received"], "");
+    assert_eq!(step["chunks"].as_array().unwrap().len(), 0);
+
+    // Human output shows what went where.
+    let out = run(
+        dir.path(),
+        &[
+            "port", "probe", &dev.path, "--send", "61", "--listen", "200ms",
+        ],
+    );
+    assert!(out.stdout.contains("> 61"), "{}", out.stdout);
+    assert!(out.stdout.contains("ms  41"), "{}", out.stdout);
+}
+
+#[test]
+fn probe_refuses_bad_arguments_and_missing_ports() {
+    let dir = bench(&script(""), "");
+    for (args, msg) in [
+        (&["/dev/null", "--send", "F1 A"][..], "odd number"),
+        (&["/dev/null", "--send", "zz"][..], "not hex"),
+        (&["/dev/null", "--text", "--send", "\\q"][..], "bad escape"),
+        (&["/dev/null", "--line", "8X1"][..], "--line"),
+        (&["/dev/null", "--listen", "2m"][..], "at most"),
+        (&["--usb", "2e3c"][..], "VID:PID"),
+        (&["--baud", "9600"][..], "name the port"),
+    ] {
+        let mut full = vec!["--json", "port", "probe"];
+        full.extend_from_slice(args);
+        let out = run(dir.path(), &full);
+        assert_eq!(out.code, 2, "{args:?}: {}", out.stdout);
+        assert_eq!(out.json()["error"]["code"], "usage");
+        assert!(out.message().contains(msg), "{args:?}: {}", out.message());
+    }
+
+    let out = run(
+        dir.path(),
+        &[
+            "--json",
+            "port",
+            "probe",
+            "/dev/desk-no-such-port",
+            "--send",
+            "00",
+        ],
+    );
+    assert_eq!(out.json()["error"]["code"], "endpoint_unavailable");
+    let out = run(
+        dir.path(),
+        &[
+            "--json",
+            "port",
+            "probe",
+            "--usb",
+            "fffe:fffe",
+            "--serial-number",
+            "nope",
+        ],
+    );
+    assert_eq!(out.json()["error"]["code"], "endpoint_unavailable");
+}

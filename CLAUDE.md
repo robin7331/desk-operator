@@ -12,7 +12,9 @@ first if the device is off.
 **Status:** M0–M5.1 done: mains power via Home Assistant or Lua scripts, the `voltage_source`
 capability (bench power supplies) with Lua drivers and serial ports, a device library with a
 specified definition format, agent-ready CLI (`--json`, `schema`, `skill`). One real device is
-supported and smoke-tested (`fnirsi/ips3608`). **Next: M6, AI skills** (see `plan.md`, "M6").
+supported and smoke-tested (`fnirsi/ips3608`). **M6, AI skills, in progress** (see `plan.md`,
+"M6"): `desk skill list|install`, `desk port probe` and the `desk-add-device` skill are built;
+an end-to-end run on a second real device is still open.
 Keep it lean: build only what the current milestone needs.
 
 **Working agreements:**
@@ -103,7 +105,8 @@ src/
   power.rs             PowerSwitch trait + switch semantics (idempotent, read-back verification)
   source.rs            VoltageSource trait + semantics (limits, setpoints before output, verify, sessions)
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
-  serial.rs            PortSpec matching, `desk port list`, async Port handle (exclusive opens)
+  serial.rs            PortSpec matching, `desk port list`, async Port handle (exclusive opens);
+                       `desk port probe` (raw hex in/out) lives in cli/port.rs
   library.rs           device definitions: search path, `device.toml` parsing, merge, bundled files
   providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
@@ -111,8 +114,10 @@ examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.l
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
 docs/definition-format.md  device definition format v1 (spec); schemas/ has its JSON Schema (tested
                        against every definition in tests/library.rs)
-skills/desk-operator/  SKILL.md for agents, embedded via include_str! (`desk skill`); update it when
-                       commands, error codes or semantics change (tests/cli.rs checks codes)
+skills/<name>/         SKILL.md per agent skill (desk-operator, desk-add-device), embedded via
+                       include_str! in src/cli/skill.rs (`desk skill list|<name>|install`); update
+                       them when commands, error codes or semantics change (tests/cli.rs checks
+                       commands and codes, and that every skills/ folder is registered)
 tests/cli.rs           end-to-end tests of the binary against the mock provider
 tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)

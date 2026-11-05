@@ -414,20 +414,85 @@ fn schema_works_without_config() {
     assert!(!d["commands"].as_array().unwrap().is_empty());
 }
 
-#[test]
-fn skill_matches_the_cli() {
-    let dir = TempDir::new().unwrap();
-    let out = run_with(
-        Some(&dir.path().join("missing.toml")),
-        dir.path(),
-        &["skill"],
-    );
-    assert_eq!(out.code, 0, "skill works without config");
-    let skill = out.stdout;
-    assert!(skill.starts_with("---\nname: desk-operator\ndescription: "));
+/// The skills in the repo's `skills/` folder: (name, SKILL.md).
+fn repo_skills() -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+    let mut skills: Vec<(String, String)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            (
+                name,
+                std::fs::read_to_string(e.path().join("SKILL.md")).unwrap(),
+            )
+        })
+        .collect();
+    skills.sort();
+    skills
+}
 
-    // Every error code and command in the schema is documented, and the skill doesn't mention
-    // error codes that don't exist.
+/// `desk …` invocations in a skill's code: inline code spans and fenced blocks.
+fn desk_commands(skill: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut fenced = false;
+    for line in skill.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        let spans: Vec<&str> = if fenced {
+            vec![line]
+        } else {
+            line.split('`').skip(1).step_by(2).collect()
+        };
+        for span in spans {
+            let span = span.trim();
+            if let Some(rest) = span.strip_prefix("desk ") {
+                found.push(rest.to_string());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn skills_match_the_cli() {
+    let dir = TempDir::new().unwrap();
+    let no_config = dir.path().join("missing.toml");
+    let skills = repo_skills();
+
+    // Every skill in skills/ is shipped, exactly as in the repo, and works without config.
+    let list = run_with(Some(&no_config), dir.path(), &["--json", "skill", "list"]).json();
+    let listed: Vec<&str> = list["data"]["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    let mut sorted = listed.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        skills.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        "src/cli/skill.rs SKILLS must list every folder in skills/"
+    );
+    for (name, text) in &skills {
+        let out = run_with(Some(&no_config), dir.path(), &["skill", name]);
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert_eq!(&out.stdout, text, "{name}");
+        assert!(text.starts_with(&format!("---\nname: {name}\ndescription: ")));
+    }
+    let bare = run_with(Some(&no_config), dir.path(), &["skill"]);
+    assert_eq!(
+        bare.stdout,
+        skills.iter().find(|(n, _)| n == "desk-operator").unwrap().1
+    );
+    let unknown = run_with(Some(&no_config), dir.path(), &["--json", "skill", "nope"]);
+    assert_eq!(unknown.code, 2);
+    assert_eq!(unknown.json()["error"]["code"], "usage");
+
+    // Skills mention only real error codes and commands.
     let schema = Bench::new().run(&["--json", "schema"]).json();
     let codes: Vec<String> = schema["data"]["errors"]
         .as_array()
@@ -435,25 +500,195 @@ fn skill_matches_the_cli() {
         .iter()
         .map(|e| e["code"].as_str().unwrap().to_string())
         .collect();
-    for line in skill.lines().filter(|l| l.starts_with("| `")) {
-        for code in line.split('`').skip(1).step_by(2) {
-            if code.chars().all(|c| c.is_ascii_lowercase() || c == '_') && code.contains('_') {
+    let commands: Vec<String> = schema["data"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["command"].as_str().unwrap().to_string())
+        .collect();
+    for (name, text) in &skills {
+        // The first column of a failure table holds error codes.
+        for line in text.lines().filter(|l| l.starts_with("| `")) {
+            let first = line.split('|').nth(1).unwrap_or_default();
+            for code in first.split('`').skip(1).step_by(2) {
+                if code == "error.code" {
+                    continue; // the header
+                }
                 assert!(
                     codes.contains(&code.to_string()),
-                    "skill mentions unknown code `{code}`"
+                    "{name} mentions unknown code `{code}`"
                 );
             }
         }
+        for invocation in desk_commands(text) {
+            let words: Vec<&str> = invocation
+                .split_whitespace()
+                .filter(|w| !w.starts_with('-'))
+                .take(2)
+                .collect();
+            let Some(group) = words.first() else { continue };
+            // `desk power on|off|toggle`: every alternative must exist.
+            let subs: Vec<&str> = words.get(1).map_or(vec![], |w| w.split('|').collect());
+            let known = |c: &str| commands.iter().any(|k| k == c);
+            let ok = if known(&format!("desk {group}")) {
+                true // a command of its own (`desk status`, `desk skill <name>`)
+            } else if subs.is_empty() {
+                // a group (`desk power`)
+                commands
+                    .iter()
+                    .any(|k| k.starts_with(&format!("desk {group} ")))
+            } else {
+                subs.iter().all(|s| known(&format!("desk {group} {s}")))
+            };
+            assert!(
+                ok,
+                "{name} mentions `desk {invocation}`, which isn't a command"
+            );
+        }
     }
+
+    // The operating skill covers every command group an agent needs.
+    let operator = &skills.iter().find(|(n, _)| n == "desk-operator").unwrap().1;
     for cmd in [
         "desk power",
         "desk status",
         "desk schema",
         "desk device",
         "desk provider",
+        "desk source",
+        "desk library",
+        "desk port list",
     ] {
-        assert!(skill.contains(cmd), "skill doesn't mention `{cmd}`");
+        assert!(
+            operator.contains(cmd),
+            "desk-operator doesn't mention `{cmd}`"
+        );
     }
+}
+
+#[test]
+fn skill_install_writes_and_updates_only_desk_skills() {
+    let dir = TempDir::new().unwrap();
+    let skills_dir = dir.path().join("skills");
+    let target = skills_dir.to_str().unwrap();
+    let install = |extra: &[&str]| {
+        let mut args = vec!["--json", "skill", "install", "--dir", target];
+        args.extend_from_slice(extra);
+        run_with(None, dir.path(), &args)
+    };
+    let actions = |out: &Out| -> Vec<String> {
+        out.json()["data"]["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                format!(
+                    "{}={}",
+                    s["name"].as_str().unwrap(),
+                    s["action"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    let skills = repo_skills();
+    let operator = skills_dir.join("desk-operator/SKILL.md");
+    let add = skills_dir.join("desk-add-device/SKILL.md");
+
+    let out = install(&[]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert!(actions(&out).iter().all(|a| a.ends_with("=installed")));
+    for (name, text) in &skills {
+        assert_eq!(
+            &std::fs::read_to_string(skills_dir.join(name).join("SKILL.md")).unwrap(),
+            text
+        );
+    }
+    assert!(
+        actions(&install(&[]))
+            .iter()
+            .all(|a| a.ends_with("=unchanged"))
+    );
+
+    // An older version of a desk skill is updated.
+    std::fs::write(
+        &operator,
+        "---\nname: desk-operator\ndescription: old\n---\nold\n",
+    )
+    .unwrap();
+    let out = install(&[]);
+    assert!(actions(&out).contains(&"desk-operator=updated".to_string()));
+    assert!(
+        std::fs::read_to_string(&operator)
+            .unwrap()
+            .contains("desk power")
+    );
+
+    // Something else is refused, and nothing is written at all.
+    std::fs::write(&operator, "my own notes\n").unwrap();
+    std::fs::remove_file(&add).unwrap();
+    let out = install(&[]);
+    assert_eq!(out.code, 2);
+    assert_eq!(out.json()["error"]["code"], "usage");
+    assert!(
+        out.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--force")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&operator).unwrap(),
+        "my own notes\n"
+    );
+    assert!(!add.exists(), "a refused install writes nothing");
+
+    let out = install(&["--force"]);
+    assert_eq!(out.code, 0);
+    assert!(actions(&out).contains(&"desk-operator=replaced".to_string()));
+    assert!(add.exists());
+}
+
+#[test]
+fn skill_install_scopes() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let install = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_desk"))
+            .env("HOME", &home)
+            .current_dir(&project)
+            .args(["--json", "skill", "install"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // Without a terminal there's no picker: the scope must be given, and the message names it.
+    let out = install(&[]);
+    assert_eq!(out.status.code(), Some(2));
+    let j: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(j["error"]["code"], "usage");
+    let msg = j["error"]["message"].as_str().unwrap();
+    for flag in ["--global", "--project", "--dir"] {
+        assert!(msg.contains(flag), "{msg}");
+    }
+    assert!(
+        !home.exists() && !project.join(".claude").exists(),
+        "nothing written"
+    );
+
+    assert!(install(&["--global"]).status.success());
+    assert!(
+        home.join(".claude/skills/desk-add-device/SKILL.md")
+            .exists()
+    );
+    assert!(install(&["--project"]).status.success());
+    assert!(
+        project
+            .join(".claude/skills/desk-operator/SKILL.md")
+            .exists()
+    );
+    assert_eq!(install(&["--global", "--project"]).status.code(), Some(2));
 }
 
 #[test]

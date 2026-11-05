@@ -75,8 +75,13 @@ library when it becomes its own repository.
 
 1. `desk library new vendor/model --capability … --dir ./devices` (in a checkout of the library).
 2. Find out how the device talks: manuals, community protocol work, a capture of the vendor's
-   software. Note sources in the vendor `README.md`.
+   software. Note sources in the vendor `README.md`. `desk port probe` sends documented
+   read-only queries and dumps the replies as hex (it checks no limits: never send unknown
+   commands).
 3. Reuse a family driver if one fits (`--driver ../shared/x.lua`); otherwise implement the skeleton.
 4. Fill in ratings, params and sources, run `desk library check`, add a fake-device test.
+
+An agent can walk you through all of this: `desk skill desk-add-device` prints the skill (or
+`desk skill install` installs it for Claude Code, globally or for one project).
 5. Smoke-test on real hardware with nothing connected to the outputs, at low values. Record what
    you observed (boot time, ramps, quirks) in the vendor `README.md`, and set `status`/`tested`.

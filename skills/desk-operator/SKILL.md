@@ -1,6 +1,6 @@
 ---
 name: desk-operator
-description: Operate electronics bench equipment (power supplies, DC loads, multimeters, soldering irons, switched mains outlets) with the `desk` CLI. Use when the user asks to switch bench devices on or off, set or read a power supply's voltage/current/output, asks what is on, or wants to inspect or configure desk-operator devices and providers.
+description: Operate electronics bench equipment (power supplies, soldering irons, mains outlets, ...) with the `desk` CLI. Use to switch devices on or off, set or read a power supply, check what's on, or configure desk devices.
 ---
 
 # Operating the bench with `desk`
@@ -115,3 +115,7 @@ Values in the device merge into the definition's bindings. Never copy bench-spec
 
 After editing it, check with `desk device list --json`. Lua power scripts are documented in the
 project's `docs/scripting.md`.
+
+**A model `desk library list` doesn't know** needs a new definition: follow the `desk-add-device`
+skill (`desk skill desk-add-device`). Its `desk port probe` sends raw bytes without any limit
+checks; never use it to operate devices.
