@@ -496,18 +496,290 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
          now reads exact frame lengths (112 → 55 ms per reading, ~18/s) and rounds float32 values
    - Later, not now: **captures** (scopes, logic analyzers): binary blocks moved by the core, never
      per sample through Lua or JSON; probably sigrok for analyzers, desk orchestrating.
-3. **Dogfood as a user (before going public):** install the local build (`cargo install --path .`,
-   `desk skill install --global`), add a device in a fresh session with only the
-   installed skills. The device must fit an existing capability (else `meter` first, for the DMM).
-4. **Public:** license, two GitHub repos (desk-operator, desk-operator-devices; decide how the
-   binary gets definitions and where definition tests live), release CI for Linux/macOS/Windows,
-   `curl | sh` installer that offers `desk skill install`.
+3. **Open capabilities** (decided 2026-11-05, design in "M7" below): any device declares its own
+   values, settings and actions; the core enforces generic safety. Replaces "fixed capabilities
+   first". Includes the first new connection type (whatever the multimeter needs) and channels.
+4. **Dogfood as a user (before going public):** install the local build (`cargo install --path .`,
+   `desk skill install --global`), add the multimeter in a fresh session with only the installed
+   skills (it's read-only, so the safest first device for an agent).
+5. **Public:** license, two GitHub repos (desk-operator, desk-operator-devices; decide how the
+   binary gets definitions and where definition tests live), release CI for Linux/macOS/Windows
+   (also builds the Windows named-pipe code for the first time), `curl | sh` installer that
+   offers `desk skill install`.
+
+## M7 — Open capabilities (design, 2026-11-05; to be reviewed before building)
+
+**Why:** desk should work with basically any device, not only the kinds its core knows. So far a
+new kind of device (multimeter, DC load, soldering iron) meant new Rust code in desk itself, which
+a user's agent can't add. From now on a **device definition declares what the model can do**, and
+the core enforces generic rules based on those declarations. Mains power (`desk power`) stays
+shared by every device.
+
+### Model
+
+- A **capability** is a named group of things a device can do, with one driver binding. Two kinds:
+  - **well-known** (`power` = power_switch, `source` = voltage_source): the core defines the
+    names and adds stricter rules on top of the generic ones (below). More can become well-known
+    later when many devices share one (e.g. `meter`), but nothing has to. Only `power` keeps a
+    command group of its own (`desk power`), because mains is shared by every device; everything
+    else, power supplies included, uses the generic commands. **`desk source` is dropped**
+    (decided 2026-11-05; nothing is public yet, so nobody depends on it).
+  - **custom**: any other name. The definition declares everything.
+- Inside a capability:
+  - **value**: something the device reports (`temperature`, `voltage`, `weight`);
+  - **setting**: something it reports and you can change (`setpoint`, `range`, `brightness`);
+  - **action**: something it does on request, optionally with arguments (`standby`, `zero`,
+    `reset_counters`).
+- Types: `number` (with a unit), `boolean`, `choice` (a fixed list of strings), `string`.
+- **A value whose unit changes** (a multimeter's reading is volts, ohms or amps depending on its
+  function) declares the possible units, `units = ["V", "A", "Ω"]`, instead of one `unit`. The
+  driver returns `{ value = 4.98, unit = "V" }` for it; the core checks the unit is one of the
+  declared ones and reports both (also in `watch`). Only values can do this; a setting always has
+  one fixed unit, so a typed value can be checked before anything is sent.
+
+**A multimeter in this model** (illustrative names, not a real model):
+
+```toml
+[meter]
+script = "acme_dmm.lua"
+hid    = { usb_vid = 0x1234, usb_pid = 0x5678 }
+
+[meter.values]
+reading  = { type = "number", units = ["V", "A", "Ω", "Hz", "F", "°C"], doc = "the display" }
+overload = { type = "boolean", doc = "OL on the display" }
+function = { type = "choice", choices = ["dcv", "acv", "dca", "aca", "ohm", "hz", "cap", "temp"] }
+
+[meter.actions]
+hold = { switches = false, doc = "freeze the display" }
+```
+
+`function` is a value here because on most handheld meters only the rotary knob changes it; a
+bench meter that can switch remotely declares it as a setting instead. `meter` may become
+well-known later (fixed names for every meter) once several meters exist.
+- A well-known capability may declare extra values, settings and actions too. That's how the
+  IPS3608 can expose its protection thresholds or a counter reset later without core changes.
+
+**`voltage_source` in the new model** (names fixed by the core, so every PSU looks the same):
+
+| Kind | Names |
+|---|---|
+| settings | `voltage`, `current` (the setpoints), `output` (on/off) |
+| values | `measured_voltage`, `measured_current`, `measured_power`; if the device reports them: `mode` (cv/cc), `protection`, `temperature`, `input_voltage`, `charge`, `energy` |
+
+A setting's name is what you set; the measurements are `measured_…` (all three alike, so scripts
+find them under one pattern). Mains keeps its own commands (`desk power on|off`, decided: no
+rename to enable/disable or `mains`); where it appears in generic output (`desk get iron`), it is
+listed as `mains`, never as `power`.
+Its extra rules stay in the core, whichever command is used:
+- the setpoints are applied before the output in one `set`, whatever order you typed them in;
+- `output on` checks the setpoints already on the device against the limits;
+- `output on` is refused while a protection is tripped, unless `--clear-protection` (a `set` flag,
+  a usage error anywhere else).
+
+### Definition format (v2, additive: every v1 definition stays valid)
+
+Every top-level table other than `[device]` is a capability; its name is the key, as `[power]` and
+`[source]` already are. A custom capability needs a `script` and at least one declaration, so a
+typo like `[sorce]` is an error, not a new capability.
+
+```toml
+[heater]
+script  = "iron.lua"
+port    = { usb_vid = 0x1234, usb_pid = 0x5678 }
+timeout = "5s"
+params  = { address = 1 }
+
+[heater.values]
+temperature = { type = "number", unit = "°C", doc = "tip temperature" }
+heating     = { type = "boolean" }
+
+[heater.settings]
+setpoint = { type = "number", unit = "°C", min = 50, max = 450, tolerance = 2, doc = "target" }
+mode     = { type = "choice", choices = ["normal", "boost", "sleep"] }
+
+[heater.actions]
+standby = { switches = true, doc = "heater to standby temperature" }
+boost   = { switches = true, args = { seconds = { type = "number", unit = "s", min = 1, max = 60 } } }
+```
+
+- `min` / `max`: the device's range (like ratings today), enforced by the core.
+- `switches = true`: an action or setting with a physical effect (heats, outputs, moves). The
+  schema shows it, agents ask first, `--dry-run` covers it. Settings default to `switches = true`,
+  values can't switch, actions must say which (no default).
+- `tolerance`: how far a read-back may differ and still count as confirmed (default: 0.5 % or
+  the last digit the device reports, like `voltage_source`).
+- Names are unique within a device; `heater.setpoint` is accepted where two capabilities clash.
+
+On the user's side, nothing new to learn: the device merges into the capability by name, and
+limits go per capability and setting.
+
+```toml
+[devices.iron]
+model  = "acme/iron-t12"
+power  = { provider = "ha", entity = "switch.desk_outlet_4" }
+heater = { port = { serial_number = "…" } }
+limits = { heater = { setpoint = 380 } }        # a number = maximum; or { min = …, max = … }
+```
+
+### Driver contract (Lua) for custom capabilities
+
+```lua
+function read(ctx)                 -- required if anything is readable: every value and setting at once
+  return { temperature = 312.5, heating = true, setpoint = 330, mode = "normal" }
+end
+function set(ctx, name, value)     -- required if there are settings; value already checked + converted
+function action(ctx, name, args)   -- required if there are actions; args checked + converted
+function open(ctx) / close(ctx)    -- optional, as today (a session per command or per watch)
+```
+
+`read` returns everything in one round trip, because one call per value is slow over serial, and
+`watch` needs a single call. Numbers come in the declared unit, so the core does the conversion.
+Lua functions get `ctx.channel` when the capability has channels (below).
+
+### Semantics in the core (the same for every custom capability)
+
+1. Parse the arguments with the **unit table** (below): a number with a unit needs the unit
+   (`330c`, `330°C`, `1.5ka`, `250ms`); a bare number only for unitless ones. Booleans take
+   `on/off/true/false`, and choices must be one of the list.
+2. Check the device range (`min`/`max`) and the user's `limits` **before anything is sent**
+   (`limit_exceeded`, as today). Unknown names are a `usage` error that lists the valid ones.
+3. Check mains first (`device_off`), then open a session (with timeouts, and close it on every
+   path), as for `voltage_source`.
+4. Settings: `set`, then `read`, then compare within `tolerance`, which gives `verified`
+   per setting: true, absent (the device doesn't report it), or `verify_failed`.
+5. Actions: `action`, then `read` if there is one, to report the state after.
+6. `--dry-run` for every setting and action: check everything, send nothing.
+7. Streaming: `watch` works for any capability with a `read`, through the daemon as now, and
+   commands still run between readings.
+
+What the core **can't** know is what a value means physically (that an iron shouldn't heat
+unattended). The definition's `switches`, ranges and docs carry that; anything more specific stays
+a well-known capability or later a driver `check` hook (below).
+
+### Units
+
+The core has one fixed table of known units. Definitions must use its symbols (`desk library check`
+rejects `"C"` for `"°C"`); what you type may use the spellings in the table.
+
+| Unit | Typed as | SI prefixes |
+|---|---|---|
+| V, A, W | `v`, `a`, `w` | yes |
+| Ω | `ohm`, `r`, `Ω` | yes |
+| Hz, F, H, g, Pa | `hz`, `f`, `h`, `g`, `pa` | yes |
+| s | `s` | yes (`ms`, `us`, `µs`); plus `min` and `h` for minutes and hours |
+| °C | `c`, `°c`, `degc` | no |
+| K | `k` (kelvin) | yes, but `mk` etc. only (a bare `k` is kelvin, not kilo) |
+| % | `%` | no |
+
+- **Prefixes are case-sensitive** (`m` milli, `M` mega, `k` kilo, `u`/`µ` micro, `n`, `p`, `G`);
+  **unit symbols are not** (`5V` = `5v`). So `1MΩ` and `1mΩ` differ, while `250mA` = `250ma`.
+  (This changes `500MV`, which used to mean 500 mV; now it's 500 megavolts and refused by the
+  range check, so it can't do harm.)
+- Where a prefix and a unit look alike, the unit wins: `h` is hours or henry depending on the
+  declared unit, which the core knows.
+- **A unit the table doesn't know** (`ppm`, `%RH`, `dBm`) is allowed: it must be typed exactly as
+  declared (case-insensitive) and takes no prefixes. Adding it to the table is a core change.
+- Values come out in the declared unit, without prefixes (`0.25` A, never `250 mA`), so scripts
+  never parse units.
+
+### Commands
+
+```sh
+desk get   <device> [<name>...]                      # values + settings (all, or the named ones)
+desk set   <device> <name> <value> [<name> <value>...] [--dry-run]
+desk do    <device> <action> [<arg>=<value>...] [--dry-run]
+desk watch <device> [<name>...] [--interval] [--count] [--changes]   # any capability
+desk power on|off|toggle|status <device>            # unchanged: mains, every device
+```
+
+Decided: the command comes first, then the device, then the name (`desk set iron setpoint 330c`),
+like `desk power on iron`. Not device first (`desk iron set …`).
+
+Power supplies, before and after:
+
+| Before (M4–M6) | After (M7) |
+|---|---|
+| `desk source set psu 5v 1a --on` | `desk set psu voltage 5v current 1a output on` |
+| `desk source output off psu` | `desk set psu output off` |
+| `desk source read psu` | `desk get psu` |
+| `desk source watch psu` | `desk watch psu` |
+
+Several settings in one `set` are applied in the definition's declaration order (well-known
+capabilities: the core's order, e.g. setpoints before output), so the definition decides the safe
+order, not the typing.
+
+`watch` without names reports every value and setting of every capability, one line per reading.
+With names it reports only those. `--changes` prints a line only when one of the watched values
+changed (for things that rarely change: mode, protection, heating; a number counts as changed
+when it moved by more than its `tolerance`, so measurement noise doesn't), otherwise one line per
+interval (even spacing, for plots). The device is read in full either way; names only filter.
+
+`<device>:<channel>` addresses a channel (`desk set psu:2 voltage 5v`). `desk schema` lists per
+device every capability with its values, settings, actions, types, units, ranges, effective limits
+and `switches`, so agents need no new skill per kind of device.
+
+### Channels
+
+`channels = 2` (or `channels = ["ch1", "ch2"]`) on a capability: every value, setting and action
+exists per channel; the driver gets `ctx.channel`. Without a channel, `get` and `watch` report every
+channel, while `set` and `do` require one. Limits can be per capability (all channels) or per
+channel (`limits = { source = { voltage = 12, ch2 = { voltage = 5 } } }`). `voltage_source` gets
+channels the same way (multi-channel PSUs).
+
+### Connections (host API)
+
+Drivers stay sandboxed: they can only open what their binding names, and the core opens it. Today
+that's `port = { … }` (serial). New connection types become binding keys of their own:
+
+| Key | For | Example devices |
+|---|---|---|
+| `port` (exists) | serial / USB CDC | FNIRSI PSUs, many meters via USB-serial |
+| `hid = { usb_vid, usb_pid, serial_number }` | USB HID | cheap multimeters (UNI-T, …) |
+| `tcp = { host, port }` | raw TCP, SCPI over LAN | Rigol, Siglent, Keysight |
+| `usbtmc = { usb_vid, usb_pid, serial_number }` | USB test & measurement class | the same brands over USB |
+| `http = { base_url }` | HTTP APIs | WLAN devices, Shelly-style gadgets |
+| `ble = { address \| name }` | Bluetooth LE | some meters and irons |
+
+Build only the one the first new device needs (the multimeter), each with a fake-device test
+like `tests/serial.rs`. Host and address come from the user's config (definitions give ports and
+USB ids only).
+
+### Planned extensions (the format leaves room; not built in M7)
+
+- **Rules across values:** an optional driver hook `check(ctx, request)` that can refuse a request
+  before anything is sent (e.g. "volts × amps ≤ 100 W", "only heat while the fan runs"), and
+  declarative ones where they're common (`max_power` exists for sources).
+- **Events:** things that happen on the device (button pressed, alarm), as extra `watch` lines.
+- **Captures:** large binary data (scope waveforms, logic analyzer captures, screenshots), moved by
+  the core, not through Lua or JSON per sample.
+- **Scenes / sequences** across devices (the command language in "After M6").
+
+### Build order
+
+1. Format: parse and validate custom capabilities and declarations (JSON schema,
+   `desk library check`, `desk library new --capability <name>` writes a skeleton), merge, limits.
+2. Core: argument parsing with units, range and limit checks, verify, sessions; a simulated custom
+   device in the mock provider for tests.
+3. Lua contract (`read`, `set`, `action`) + `docs/scripting.md`, `docs/definition-format.md` (v2).
+4. CLI `get`, `set`, `do`, `watch`; schema; daemon routing for them. `voltage_source` moves onto
+   the generic commands with its rules intact (its tests carried over); **`desk source` is
+   removed** everywhere: CLI, schema, skills, `docs/streaming.md`, `examples/watch_to_csv.py`,
+   tests.
+5. Skills: desk-operator uses the generic commands; desk-add-device writes declarations, and only
+   stops when a connection type is missing.
+6. Channels.
+7. The multimeter's connection type (needs its model and interface).
+8. Update CLAUDE.md (core concepts: capability, value, setting, action).
+
+### Open questions (for the user)
+
+- Multimeter and DC load: exact models and how they connect.
 
 ## After M6 (rough order, re-evaluate each time)
 
 1. **Config editing from the CLI:** `device add`, `device power <dev>` with interactive provider/entity pickers (`toml_edit`, `inquire`)
 2. **Native Rust drivers** for common protocol families (SCPI, Modbus) next to Lua drivers
-3. **More capabilities:** `electronic_load`, `meter`, `heater`; multi-channel sources; scope much later
+3. ~~More capabilities~~: replaced by open capabilities (M7); scope captures much later
 4. **Command language:** `psu 5v 1a on, iron 330c then dmm dcv`, scenes, automatic "mains on → wait for port → configure"
 5. **Palette + tray** (Tauri v2), with `desk palette` for Wayland compositor binds
 6. ~~Daemon~~: moved to roadmap step 2 (streaming)
@@ -529,6 +801,12 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
 - **Daemon after all, for streaming (2026-11-05):** a subscriber needs a long-lived session while
   other commands keep working, and only one process can hold a serial port. One-shot sessions stay
   the default when nothing watches.
+- **Open capabilities instead of a fixed list (2026-11-05):** desk should cover basically any
+  device. Definitions declare values, settings and actions; the core enforces generic rules
+  (units, ranges, limits, verify, dry-run, timeouts). Well-known capabilities keep stricter rules.
+- **One command set for every device (2026-11-05):** `desk get|set|do|watch <device> <name> …`,
+  command before device. `desk source` is dropped; PSU rules apply through the generic commands.
+  `desk power` stays its own group (mains is shared by every device).
 - **Capability-named binding keys (`source = …`) instead of a generic `control = …`:** capabilities
   are known without loading drivers, and a driver's port is part of its binding (scripts can't open
   other ports).
