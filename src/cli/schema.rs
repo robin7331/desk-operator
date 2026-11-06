@@ -72,19 +72,26 @@ pub fn run(bench: Result<Bench>) -> Report {
                 }
             },
             "voltage_source": {
-                "description": "A bench power supply: setpoints, output terminals, measurements.",
-                "commands": [
-                    "desk source set <device> <5v> <1a> [--on] [--dry-run]",
-                    "desk source output on|off <device> [--clear-protection] [--dry-run]",
-                    "desk source read <device>",
-                    "desk source watch <device> [--interval 100ms] [--count N]"
+                "description": "A bench power supply (capability key `source`). Its names are fixed: settings voltage, current, output; values measured_voltage, measured_current, measured_power, and if reported mode (cv|cc), protection (none|ovp|ocp|opp|otp|uvp|other), temperature, input_voltage, charge, energy.",
+                "examples": [
+                    "desk set psu voltage 5v current 1a output on",
+                    "desk set psu output off",
+                    "desk get psu",
+                    "desk watch psu measured_current --interval 1s"
                 ],
-                "units": "values need units: v, mv, a, ma",
-                "safety": "the core refuses values above the device maximum or the device's `limits` (limit_exceeded, nothing sent); setpoints are applied before the output is switched on",
-                "verified": "per requested value: true = read back and confirmed; absent = the device can't report it (unconfirmed)",
-                "requires": "the device's mains must be on (device_off otherwise)",
-                "reading": "output, voltage_set, current_set, voltage, current, power; and if the device reports them: mode (cv|cc), protection (none|ovp|ocp|opp|otp|uvp|other), temperature (°C), input_voltage (V), charge (Ah), energy (Wh). null = not reported",
-                "protection": "while a protection is tripped, output on is refused (protection_tripped) unless --clear-protection is given; switching off is always allowed"
+                "rules": "setpoints are applied before the output, whatever order they're typed in; output on checks the setpoints already on the device against the limits; output on is refused while a protection is tripped (protection_tripped) unless --clear-protection",
+                "requires": "the device's mains must be on (device_off otherwise)"
+            },
+            "declared": {
+                "description": "Any other capability: the device definition declares its settings, values and actions (see devices[].settings/values/actions, with types, units, ranges, limits and `switches`).",
+                "commands": [
+                    "desk get <device>[:<channel>] [<name>...]",
+                    "desk set <device>[:<channel>] <setting> <value> [<setting> <value>...] [--dry-run]",
+                    "desk do <device>[:<channel>] <action> [<arg>=<value>...] [--dry-run]",
+                    "desk watch <device>[:<channel>] [<name>...] [--interval 100ms] [--count N] [--changes]"
+                ],
+                "rules": "numbers need their unit (330c, 250ma, 1.5kohm; prefixes are case-sensitive: m milli, M mega); the device range (min/max) and the bench limit are checked before anything is sent (limit_exceeded); several settings apply in declaration order; settings are read back (verified: true, absent = the device can't report it); `switches: true` means a physical effect: ask the user first",
+                "values": "numbers come in the declared unit without prefixes; a value declared with `units` comes as { value, unit }; absent = not reported"
             }
         },
         "commands": commands,
@@ -93,7 +100,7 @@ pub fn run(bench: Result<Bench>) -> Report {
             "json": "with --json, stdout is one document: { ok, data, error? }; error = { code, message, hint? }",
             "partial_failure": "multi-device commands report every device in data.results; ok=false and error/exit code come from the first failure",
             "logs": "script bindings may return data.results[].log; they also print to stderr",
-            "streams": "`desk source watch --json` prints one { ok, data } line per reading (data: device, time, elapsed, reading, dropped, failed reads) and a final { ok: false, error } line if it ends with an error; a background daemon holds the session, other commands keep working"
+            "streams": "`desk watch --json` prints one { ok, data } line per reading (data: device, time, elapsed, values, channels?, dropped, failed) and a final { ok: false, error } line if it ends with an error; a background daemon holds the session, other commands keep working"
         },
         "errors": ERROR_CODES
             .iter()

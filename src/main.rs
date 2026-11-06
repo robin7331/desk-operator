@@ -2,15 +2,18 @@ mod bench;
 mod cli;
 mod config;
 mod daemon;
+mod declared;
 mod error;
 mod library;
 mod model;
+mod ops;
 mod output;
 mod power;
 mod providers;
 mod script;
 mod serial;
 mod source;
+mod units;
 
 use clap::Parser;
 use clap::error::ErrorKind;

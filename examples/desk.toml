@@ -2,6 +2,9 @@
 #
 #   cargo run -- --config examples/desk.toml status
 #   cargo run -- --config examples/desk.toml power on psu iron
+#   cargo run -- --config examples/desk.toml set psu voltage 5v current 1a output on
+#   cargo run -- --config examples/desk.toml set iron setpoint 330c
+#   cargo run -- --config examples/desk.toml watch psu --count 5
 #
 # The `mock` provider simulates outlets and keeps their state in a JSON file
 # ($DESK_MOCK_STATE, or mock-state.json in your platform state dir).
@@ -41,6 +44,18 @@ power   = { provider = "sim", endpoint = "outlet3" }
 name    = "Soldering iron"
 aliases = ["soldering iron"]
 power   = { provider = "sim", endpoint = "outlet4", timeout = "5s" }
+limits  = { heater = { setpoint = 380 } }
+
+# A declared capability: anything that isn't mains or a power supply says what it can do. Usually
+# that comes from a device definition (`model = "vendor/model"`); here it's simulated inline (the
+# simulated tip temperature simply follows the setpoint).
+[devices.iron.heater]
+provider = "sim"
+endpoint = "iron"
+follow   = { temperature = "setpoint" }
+values   = { temperature = { type = "number", unit = "°C", doc = "tip temperature" } }
+settings = { setpoint = { type = "number", unit = "°C", min = 50, max = 450, doc = "target temperature" } }
+actions  = { standby = { switches = true, doc = "heater to standby temperature" } }
 
 # A device without a power path is fine: it simply has no power_switch capability (yet).
 [devices.scope]

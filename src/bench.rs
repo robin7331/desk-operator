@@ -8,11 +8,12 @@ use crate::config::{Binding, Config, Device};
 use crate::daemon::session::{Sessions, Watcher};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, Confidence, Power, PowerState};
+use crate::ops::{self, CapDriver, Catalog, Drivers, Entry, Kind, Op};
 use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
 use crate::providers::{Endpoint, ProviderInfo, Registry};
-use crate::script::{DeviceInfo, ScriptSource, ScriptSpec, ScriptSwitch};
+use crate::script::{DeviceInfo, ScriptDriver, ScriptSource, ScriptSpec, ScriptSwitch};
 use crate::serial::PortSpec;
-use crate::source::{self, Report as SourceReport, Request, SourceInfo, VoltageSource};
+use crate::source;
 
 pub struct Bench {
     pub config: Config,
@@ -132,120 +133,190 @@ impl Bench {
         }
     }
 
-    fn source_binding<'a>(&self, device: &'a Device) -> Result<&'a Binding> {
-        device
-            .source
-            .as_ref()
-            .ok_or_else(|| DeskError::CapabilityMissing {
-                device: device.id.clone(),
-                key: "source",
-                capability: "voltage_source",
-            })
-    }
-
-    /// The device's ratings from its `source` binding (definition or config).
-    fn source_ratings(&self, device: &Device) -> Result<SourceInfo> {
-        match self.source_binding(device)? {
-            Binding::Script { ratings, .. } if !ratings.is_empty() => {
-                source::parse_ratings(ratings).map_err(DeskError::ConfigInvalid)
-            }
-            _ => Ok(SourceInfo::default()),
-        }
-    }
-
-    fn voltage_source(
-        &self,
-        device: &Device,
-    ) -> Result<(Box<dyn VoltageSource>, Duration, SourceInfo)> {
-        let binding = self.source_binding(device)?;
-        let timeout = binding.timeout().unwrap_or(source::DEFAULT_TIMEOUT);
-        let ratings = self.source_ratings(device)?;
-        let src: Box<dyn VoltageSource> = match binding {
-            Binding::Native {
-                provider, params, ..
-            } => self.providers.get(provider)?.voltage_source(params)?,
-            Binding::Script {
-                script,
-                params,
-                port,
-                ..
-            } => Box::new(ScriptSource::load(self.script_spec(
+    /// Build the driver of one catalog entry (nothing is opened yet).
+    fn driver(&self, device: &Device, entry: &Entry) -> Result<CapDriver> {
+        let cap = device.caps.get(&entry.key).ok_or_else(|| {
+            DeskError::Internal(format!("`{}` has no `{}`", device.id, entry.key))
+        })?;
+        Ok(match (&entry.kind, &cap.binding) {
+            (
+                Kind::Source(_),
+                Binding::Native {
+                    provider, params, ..
+                },
+            ) => CapDriver::Source(self.providers.get(provider)?.voltage_source(params)?),
+            (
+                Kind::Source(_),
+                Binding::Script {
+                    script,
+                    params,
+                    port,
+                    ..
+                },
+            ) => CapDriver::Source(Box::new(ScriptSource::load(self.script_spec(
                 device,
                 script,
                 params,
                 port.as_ref(),
-                timeout,
-            ))?),
-        };
-        Ok((src, timeout, ratings))
+                entry.timeout,
+            ))?)),
+            (
+                Kind::Declared,
+                Binding::Native {
+                    provider, params, ..
+                },
+            ) => CapDriver::Declared(
+                self.providers
+                    .get(provider)?
+                    .declared(params, &entry.decls)?,
+            ),
+            (
+                Kind::Declared,
+                Binding::Script {
+                    script,
+                    params,
+                    port,
+                    ..
+                },
+            ) => CapDriver::Declared(Box::new(ScriptDriver::load(
+                self.script_spec(device, script, params, port.as_ref(), entry.timeout),
+                &entry.decls,
+            )?)),
+        })
     }
 
     /// Mains first: a device whose power path reads `off` can't be reached, so say that instead
-    /// of failing later with "port not found". Unknown or unreadable power doesn't block.
-    async fn require_mains(&self, device: &Device) -> Result<()> {
+    /// of failing later with "port not found". Unknown or unreadable power doesn't block. Returns
+    /// the mains state when it could be read.
+    async fn require_mains(&self, device: &Device) -> Result<Option<Power>> {
         if device.power.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         match self.power_state(device).await.result {
             Ok(PowerState {
                 state: Power::Off,
                 confidence: Confidence::Real,
             }) => Err(DeskError::DeviceOff(device.id.clone())),
-            _ => Ok(()),
+            Ok(PowerState {
+                state,
+                confidence: Confidence::Real,
+            }) => Ok(Some(state)),
+            _ => Ok(None),
         }
     }
 
-    /// Apply a `voltage_source` request (or just read, if it's empty): through the device's live
-    /// session if the daemon has one, else in a session of its own.
-    pub async fn source(&self, device: &Device, req: Request, dry_run: bool) -> Run<SourceReport> {
-        let Some(sessions) = &self.sessions else {
-            return self.source_once(device, req, dry_run).await;
+    /// Run a `get`, `set` or `do` on a device: through its live session if the daemon has one,
+    /// else in a session of its own.
+    pub async fn run(&self, device: &Device, cat: &Catalog, op: Op) -> Run<ops::Report> {
+        let fail = |e| Run {
+            result: Err(e),
+            log: Vec::new(),
         };
-        let ratings = match self.source_ratings(device) {
-            Ok(r) => r,
-            Err(e) => {
-                return Run {
-                    result: Err(e),
-                    log: Vec::new(),
-                };
-            }
+        if cat.entries.is_empty() && device.power.is_none() {
+            return fail(DeskError::CapabilityMissing {
+                device: device.id.clone(),
+                missing: "has no capabilities (no power path, no `source`, nothing declared)"
+                    .into(),
+            });
+        }
+        let mains = match self.require_mains(device).await {
+            Ok(m) => m,
+            Err(e) => return fail(e),
         };
-        loop {
-            let port = sessions.port(&device.id);
-            let guard = port.lock().await;
-            if !sessions.is_live(&device.id) {
-                // No session can start while we hold the port lock.
-                let run = self.source_once(device, req, dry_run).await;
+        let run = match &self.sessions {
+            None => self.run_once(device, cat, &op).await,
+            Some(sessions) => loop {
+                let port = sessions.port(&device.id);
+                let guard = port.lock().await;
+                if !sessions.is_live(&device.id) {
+                    // No session can start while we hold the port lock.
+                    let run = self.run_once(device, cat, &op).await;
+                    drop(guard);
+                    break run;
+                }
                 drop(guard);
-                return run;
+                if let Some(run) = sessions.run(&device.id, cat.keys(), op.clone()).await {
+                    break run;
+                }
+                // The session ended meanwhile: run on our own.
+            },
+        };
+        Run {
+            result: run.result.map(|o| ops::Report::new(cat, &op, mains, o)),
+            log: run.log,
+        }
+    }
+
+    /// Open the drivers an op needs, run it, close them (also after errors and timeouts).
+    async fn run_once(&self, device: &Device, cat: &Catalog, op: &Op) -> Run<ops::Outcome> {
+        let needed = op.entries(cat);
+        let mut drivers: Drivers = (0..cat.entries.len()).map(|_| None).collect();
+        for i in &needed {
+            match self.driver(device, &cat.entries[*i]) {
+                Ok(d) => drivers[*i] = Some(d),
+                Err(e) => {
+                    return Run {
+                        result: Err(e),
+                        log: Vec::new(),
+                    };
+                }
             }
-            drop(guard);
-            if let Some(run) = sessions
-                .apply(&device.id, req, dry_run, device.limits.source, ratings)
-                .await
-            {
-                return run;
-            }
-            // The session ended meanwhile: run on our own.
+        }
+        let timeout = needed
+            .iter()
+            .map(|i| cat.entries[*i].timeout)
+            .max()
+            .unwrap_or(source::DEFAULT_TIMEOUT);
+        let what = format!("controlling `{}`", device.id);
+        let result = session(&drivers, timeout, &what, ops::run(cat, &drivers, op)).await;
+        Run {
+            result,
+            log: take_logs(&drivers),
         }
     }
 
     /// Watch a device: join its live session or start one (daemon only).
-    pub async fn watch(&self, device: &Device, interval: Duration) -> Result<Watcher> {
+    pub async fn watch(&self, device: &Device, interval: Duration) -> Result<(Watcher, Catalog)> {
         let sessions = self
             .sessions
             .as_ref()
             .ok_or_else(|| DeskError::Internal("watching needs the daemon's sessions".into()))?;
-        sessions
-            .watch(&device.id, interval, || self.open_source(device))
-            .await
+        let cat = Catalog::of(device)?;
+        let readable: Vec<usize> = (0..cat.entries.len())
+            .filter(|i| cat.entries[*i].decls.readable())
+            .collect();
+        if readable.is_empty() {
+            return Err(DeskError::CapabilityMissing {
+                device: device.id.clone(),
+                missing: "has nothing to watch (no capability with values or settings)".into(),
+            });
+        }
+        let watcher = sessions
+            .watch(&device.id, interval, || {
+                self.open_all(device, &cat, &readable)
+            })
+            .await?;
+        Ok((watcher, cat))
     }
 
-    /// Open a driver session for a long-lived session.
-    async fn open_source(&self, device: &Device) -> Result<(Box<dyn VoltageSource>, Duration)> {
-        let (src, timeout, _) = self.voltage_source(device)?;
+    /// Open drivers for a long-lived session.
+    async fn open_all(
+        &self,
+        device: &Device,
+        cat: &Catalog,
+        which: &[usize],
+    ) -> Result<(Catalog, Drivers, Duration)> {
         self.require_mains(device).await?;
-        let opened = tokio::time::timeout(timeout, src.open())
+        let mut drivers: Drivers = (0..cat.entries.len()).map(|_| None).collect();
+        for i in which {
+            drivers[*i] = Some(self.driver(device, &cat.entries[*i])?);
+        }
+        let timeout = which
+            .iter()
+            .map(|i| cat.entries[*i].timeout)
+            .max()
+            .unwrap_or(source::DEFAULT_TIMEOUT);
+        let opened = tokio::time::timeout(timeout, open_drivers(&drivers))
             .await
             .unwrap_or_else(|_| {
                 Err(DeskError::Timeout {
@@ -254,42 +325,11 @@ impl Bench {
                 })
             });
         match opened {
-            Ok(()) => Ok((src, timeout)),
+            Ok(()) => Ok((cat.clone(), drivers, timeout)),
             Err(e) => {
-                let _ = tokio::time::timeout(Duration::from_secs(2), src.close()).await;
+                close_drivers(&drivers).await;
                 Err(e)
             }
-        }
-    }
-
-    async fn source_once(&self, device: &Device, req: Request, dry_run: bool) -> Run<SourceReport> {
-        // Capability and binding errors first: they're about the config, not the device state.
-        let (src, timeout, ratings) = match self.voltage_source(device) {
-            Ok(v) => v,
-            Err(e) => {
-                return Run {
-                    result: Err(e),
-                    log: Vec::new(),
-                };
-            }
-        };
-        if let Err(e) = self.require_mains(device).await {
-            return Run {
-                result: Err(e),
-                log: Vec::new(),
-            };
-        }
-        let what = format!("controlling `{}`", device.id);
-        let result = source::session(
-            src.as_ref(),
-            timeout,
-            &what,
-            source::apply(src.as_ref(), req, device.limits.source, ratings, dry_run),
-        )
-        .await;
-        Run {
-            result,
-            log: src.take_log(),
         }
     }
 
@@ -382,5 +422,66 @@ impl Bench {
             .iter()
             .filter(|d| d.power.is_some())
             .collect()
+    }
+}
+
+async fn open_drivers(drivers: &Drivers) -> Result<()> {
+    for d in drivers.iter().flatten() {
+        d.open().await?;
+    }
+    Ok(())
+}
+
+/// Close every driver (each within 2 s), whatever happened before.
+pub async fn close_drivers(drivers: &Drivers) -> Option<DeskError> {
+    let mut first = None;
+    for d in drivers.iter().flatten() {
+        let r = tokio::time::timeout(Duration::from_secs(2), d.close()).await;
+        let e = match r {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(_) => Some(DeskError::Timeout {
+                what: "closing the session".into(),
+                after: Duration::from_secs(2),
+            }),
+        };
+        if first.is_none() {
+            first = e;
+        }
+    }
+    first
+}
+
+pub fn take_logs(drivers: &Drivers) -> Vec<String> {
+    drivers
+        .iter()
+        .flatten()
+        .flat_map(|d| d.take_log())
+        .collect()
+}
+
+/// Open, run `op` with a timeout, always close (devices that lock their panel get released).
+async fn session<T>(
+    drivers: &Drivers,
+    timeout: Duration,
+    what: &str,
+    op: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let result = tokio::time::timeout(timeout, async {
+        open_drivers(drivers).await?;
+        op.await
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(DeskError::Timeout {
+            what: what.to_string(),
+            after: timeout,
+        })
+    });
+    let closed = close_drivers(drivers).await;
+    match (result, closed) {
+        (Err(e), _) => Err(e),
+        (Ok(_), Some(e)) => Err(e),
+        (Ok(v), None) => Ok(v),
     }
 }

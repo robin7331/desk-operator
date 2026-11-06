@@ -5,13 +5,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-/// Standard capabilities defined by the core. Drivers and providers implement these; frontends
-/// (CLI, later palette/MCP) only ever talk in terms of capabilities.
+/// What a provider's endpoints are listed for (`desk provider endpoints`). Only mains so far;
+/// declared capabilities are defined by device definitions, not by providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     PowerSwitch,
-    VoltageSource,
 }
 
 /// Mains power state of a device.

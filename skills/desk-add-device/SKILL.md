@@ -8,12 +8,13 @@ description: Add a bench device that the `desk` CLI doesn't support yet, or impr
 Two different things come out of this, and they never mix:
 
 - A **device definition** (`devices/<vendor>/<model>/device.toml` + a Lua driver) holds what's true
-  for **every unit** of the model: driver, USB ids, ratings, sources. It may be published.
+  for **every unit** of the model: driver, USB ids, ratings, what it can do, sources. It may be
+  published.
 - The **device** in the user's `desk.toml` holds **their bench**: name, aliases, how it gets mains
   power, which unit it is (serial number), and their `limits`. It is never published.
 
-For operating the bench (`desk power`, `desk source`), follow the `desk-operator` skill
-(`desk skill desk-operator`). Pass `--json` to every `desk` command.
+For operating the bench (`desk power`, `desk get`, `desk set`, `desk do`, `desk watch`), follow the
+`desk-operator` skill (`desk skill desk-operator`). Pass `--json` to every `desk` command.
 
 ## Ground rules
 
@@ -29,9 +30,9 @@ For operating the bench (`desk power`, `desk source`), follow the `desk-operator
    status), or standard identification queries (SCPI `*IDN?`). Never scan or fuzz unknown command
    bytes: an undocumented command can switch an output or overwrite calibration. `desk port probe`
    sends raw bytes and checks no limits, so it is for this skill only, never for operating devices.
-5. **Safety stays in desk:** the definition's `ratings` are the model's maximums, the user's
-   `limits` are their bench limits. Drivers never enforce or work around either. Never raise a
-   user's `limits` unless they ask.
+5. **Safety stays in desk:** the definition's ranges (`ratings`, `min`/`max`) are the model's,
+   the user's `limits` are their bench limits. Drivers never enforce or work around either. Never
+   raise a user's `limits` unless they ask.
 6. **Honest status:** `status = "community"` until the smoke test passed on real hardware. Drivers
    return only what the device really reports (`read()` fields it can't read stay `nil`, so desk
    says "not confirmed").
@@ -54,14 +55,17 @@ so, and rely on the read-only probing and the smoke test.
 ### 1. Ask
 
 - The **exact model** (and hardware/firmware version if the user knows it).
-- **What it is:** desk has two capabilities, `voltage_source` (bench power supplies) and
-  `power_switch` (mains power). A load, meter, iron or scope needs a new capability in desk's core
-  first; tell the user that's not supported yet, and offer the next point meanwhile.
+- **What it can do.** Any device fits: a **power supply** uses the well-known `source` capability
+  (`voltage_source`: fixed names and stricter rules in desk). **Anything else** (meter, load, iron,
+  sensor, relay board, …) gets a **declared capability**: the definition declares its `settings`,
+  `values` and `actions`, and desk applies its generic rules to them (see *Declaring what it can
+  do*). Large data (scope waveforms, logic analyzer captures) isn't supported yet: say so.
 - **Only switched on/off?** If the user just wants mains on/off (e.g. via a Home Assistant outlet),
   no definition is needed: add a `power` binding to their device and you're done
   (`desk provider endpoints <id> --search …` finds the entity).
-- **How it connects:** USB (CDC-ACM serial, USB-serial adapter, USBTMC), RS-232, LAN. desk drivers
-  talk serial today (`ctx.serial`). Other transports are a gap in the host API, a core change.
+- **How it connects:** USB (CDC-ACM serial, USB-serial adapter, HID, USBTMC), RS-232, LAN,
+  Bluetooth. desk drivers talk serial today (`ctx.serial`, `port = { … }`). Any other connection
+  is a gap in the host API, a change to desk's core: stop and tell the user.
 
 ### 2. Check the library first
 
@@ -87,12 +91,14 @@ you used (URLs) for the definition's `sources` and the vendor README. Note what'
 ```sh
 desk library new <vendor>/<model> --capability voltage_source --name "<Vendor Model>" \
     --max-voltage <V> --max-current <A> [--driver ../shared/<family>.lua] [--dir <checkout>/devices]
+desk library new <vendor>/<model> --capability <name> --name "<Vendor Model>"   # e.g. meter, heater
 desk library check <vendor>/<model> --json
 ```
 
 `new` writes `device.toml`, a driver skeleton with every required function (unless `--driver`) and
-a vendor `README.md`. Fill in `sources`, `port = { usb_vid, usb_pid }` (when known),
-`params`, and implement the driver (see *Driver essentials*). Rerun `check` until it passes.
+a vendor `README.md`. Fill in `sources`, `port = { usb_vid, usb_pid }` (when known), `params`, the
+declarations (declared capabilities), and implement the driver (see *Driver essentials*). Rerun
+`check` until it passes.
 
 ### 5. Fake-device test (in a checkout)
 
@@ -147,6 +153,11 @@ model  = "<vendor>/<model>"
 power  = { provider = "ha", entity = "switch.desk_outlet_3" }   # from `desk provider endpoints`
 source = { port = { serial_number = "…" } }                     # from `desk port list`
 limits = { source = { voltage = 5, current = 0.5 } }            # test limits, agreed with the user
+
+[devices.iron]
+model  = "<vendor>/<model>"
+heater = { port = { serial_number = "…" } }                     # the capability's name
+limits = { heater = { setpoint = 200 } }                        # a number = maximum, or { min, max }
 ```
 
 Check with `desk device show <id> --json`.
@@ -156,12 +167,15 @@ Check with `desk device show <id> --json`.
 Values come from the user: propose low ones (e.g. 3.3 V, 100 mA) and use them only after they
 agree. One step at a time, each confirmed:
 
-1. `desk source read <device> --json`: read-only. Do output state and setpoints match the front panel?
-2. `desk source set <device> 3.3v 100ma --json` with the output off: `data.verified` true? The display?
-3. `desk source output on <device> --json`, then `read`: measured voltage ≈ setpoint (no load)?
-4. `desk source output off <device> --json`.
-5. Mains off, then on (`desk power off|on <device>`): output state after power-up? Setpoints kept?
-   How long until the port answers?
+1. `desk get <device> --json`: read-only. Does everything match the front panel/display?
+2. Power supplies: `desk set <device> voltage 3.3v current 100ma --json` with the output off:
+   `data.verified` true? The display? Then `desk set <device> output on --json` and `desk get`:
+   `measured_voltage` ≈ setpoint (no load)? Then `desk set <device> output off --json`.
+   Declared capabilities: each setting once (`desk set <device> <setting> <value> --json`, a
+   harmless value), each action once (`desk do <device> <action> --json`), the user's OK for each.
+3. `desk watch <device> --count 10 --json`: do values change as the display does?
+4. Mains off, then on (`desk power off|on <device>`): state after power-up? Settings kept? How
+   long until the port answers?
 
 Fix the driver (and its fake-device test) for anything that differs, then repeat the affected step.
 
@@ -204,15 +218,47 @@ research, probe, update the driver and its fake-device test, smoke-test, update 
   `status` and `tested`.
 - **New firmware or hardware revision** behaves differently: record it in the README, fix the
   driver, add the version to `tested`.
-- **More of what the device reports:** check what the capability defines first (`desk schema
-  --json`, `capabilities`; for drivers the `read()` fields in `docs/scripting.md`), then probe which
-  fields the device really has. Re-check old findings while you're at it: research on the IPS3608
-  showed that a field once read as "rail voltage" is the temperature, and "maximums" are the
-  user's protection thresholds.
+- **More of what the device reports or can do:** for a declared capability, declare it (a new
+  value, setting or action) and implement it in the driver. For `source`, check the fixed names
+  first (`desk schema --json`, `capabilities.voltage_source`); extra declarations on `source` aren't
+  supported yet: stop and tell the user. Probe which fields the device really has. Re-check old
+  findings while you're at it: research on the IPS3608 showed that a field once read as "rail
+  voltage" is the temperature, and "maximums" are the user's protection thresholds.
 - **Another model of a known family:** a new definition with only data (`params`).
-- **A feature the capability doesn't have** (e.g. writing protection thresholds): that's a change
-  to desk's core, for every device of that kind. Stop and tell the user; never squeeze it into
-  `params` or a driver-only side channel.
+- **Never squeeze a feature into `params`** or a driver-only side channel: declare it.
+
+## Declaring what it can do
+
+For a declared capability (any name but `power`/`source`, e.g. `meter`, `heater`, `load`):
+
+```toml
+[heater]
+script = "driver.lua"
+port   = { usb_vid = 0x1234, usb_pid = 0x5678 }
+
+[heater.values]                    # what it reports
+temperature = { type = "number", unit = "°C", doc = "tip temperature" }
+
+[heater.settings]                  # what it reports and you can change (switches = true by default)
+setpoint = { type = "number", unit = "°C", min = 50, max = 450, doc = "target" }
+mode     = { type = "choice", choices = ["normal", "sleep"] }
+
+[heater.actions]                   # what it does on request; `switches` is required
+standby  = { switches = true, doc = "heater to standby temperature" }
+```
+
+- Types: `number` (with `unit`), `boolean`, `choice` (`choices`), `string`. Names: lowercase, `_`.
+- **Units from desk's unit table** (`V`, `A`, `W`, `Ω`, `Hz`, `F`, `H`, `s`, `°C`, `K`, `%`, `g`,
+  `Pa`, `Ah`, `Wh`); others (`ppm`, `%RH`) are allowed but typed exactly. A value whose unit
+  changes (a multimeter's reading) declares `units = ["V", "A", "Ω"]`; the driver returns
+  `{ value = 4.98, unit = "V" }`.
+- **`min`/`max` only from sources** (the device's range): desk refuses anything outside before it
+  is sent. `tolerance`: how far a read-back may differ (default 0.5 %).
+- **`switches`:** true for anything with a physical effect (heats, outputs, moves, energizes). Agents
+  ask the user before those. Be honest: when in doubt, true.
+- Settings apply in declaration order: declare the safe order (e.g. a setpoint before `enabled`).
+- Something only the rotary knob changes is a **value**, not a setting.
+- `channels = 2` (or a list of names) for multi-channel devices: the driver gets `ctx.channel`.
 
 ## Driver essentials
 
@@ -228,15 +274,16 @@ PARAMS = {   -- everything the definition's params may contain; desk validates a
 function open(ctx)   -- optional: once per command (connect, identify the model)
   port = ctx.serial.open{ baud = 115200, wait = "2s" }   -- only the binding's port; exclusive
 end
-function set_voltage(ctx, volts) ... end      -- voltage_source: required
-function set_current(ctx, amps) ... end
-function set_output(ctx, on) ... end
-function read(ctx)   -- return only fields the device reported
-  return { output = true, voltage_set = 5, current_set = 1, voltage = 5.01, current = 0.2,
-           mode = "cv", protection = "none", temperature = 31.5 }   -- see docs/scripting.md
-end
 function close(ctx) ... end                   -- optional: runs even after errors (unlock the panel)
--- power_switch drivers: on(ctx), off(ctx), optional state(ctx)
+
+-- declared capability: read every declared value and setting at once, in the declared unit
+function read(ctx) return { temperature = 312.5, setpoint = 330, mode = "normal" } end
+function set(ctx, name, value) ... end        -- if there are settings (value already checked)
+function action(ctx, name, args) ... end      -- if there are actions (args already checked)
+
+-- voltage_source: set_voltage(ctx, v), set_current(ctx, a), set_output(ctx, on), and
+--   read(ctx) -> { output, voltage_set, current_set, voltage, current, power, mode, … }
+-- power_switch: on(ctx), off(ctx), optional state(ctx)
 ```
 
 - `port:write(bytes)`, `port:read(max, timeout_ms)` (may return fewer bytes or `""`),
@@ -248,8 +295,8 @@ function close(ctx) ... end                   -- optional: runs even after error
   after writes (the FNIRSI driver's `gap_ms`).
 - **Prefer data over code:** if models differ only in numbers (offsets, timings, names), share one
   driver in `devices/<vendor>/shared/` and put the numbers in each definition's `params`.
-- desk does the rest for every driver: one session per command, limits before anything is sent,
-  voltage → current → output order, read-back verification, timeouts.
+- desk does the rest for every driver: one session per command, units, ranges and limits before
+  anything is sent, the order of settings, read-back verification, timeouts, `watch`.
 
 ## When something fails
 

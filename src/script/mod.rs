@@ -11,6 +11,7 @@
 //! `dofile`/`loadfile` are removed, so there is no file, OS or network access except through `ctx`.
 //! `print` goes to the log. A global instruction hook enforces the timeout even in busy loops.
 
+pub mod declared;
 pub mod power;
 pub mod source;
 
@@ -29,6 +30,7 @@ use crate::power::{self as power_core, PowerSwitch, Target};
 use crate::providers::Registry;
 use crate::serial::{Port, PortSpec, Settings};
 
+pub use declared::ScriptDriver;
 pub use power::ScriptSwitch;
 pub use source::ScriptSource;
 
@@ -279,12 +281,28 @@ impl Engine {
 
     /// Call `name(ctx, args...)`, enforcing the timeout inside Lua too.
     pub async fn call(&self, name: &str, args: impl IntoLua) -> Result<Value> {
+        let arg = args.into_lua(&self.lua).map_err(|e| self.error(e))?;
+        let args = if arg.is_nil() { Vec::new() } else { vec![arg] };
+        self.call_args(name, args).await
+    }
+
+    /// A JSON value as a Lua value (for arguments).
+    pub fn to_lua(&self, v: &serde_json::Value) -> Result<Value> {
+        self.lua.to_value(v).map_err(|e| self.error(e))
+    }
+
+    /// `ctx.channel` for the next calls (`nil` without channels).
+    pub fn set_channel(&self, channel: Option<&str>) -> Result<()> {
+        self.ctx.set("channel", channel).map_err(|e| self.error(e))
+    }
+
+    /// Call `name(ctx, args...)` with several arguments.
+    pub async fn call_args(&self, name: &str, args: Vec<Value>) -> Result<Value> {
         let f: Function = self.lua.globals().get(name).map_err(|e| self.error(e))?;
         let mut argv = MultiValue::new();
         argv.push_back(Value::Table(self.ctx.clone()));
-        let arg = args.into_lua(&self.lua).map_err(|e| self.error(e))?;
-        if !arg.is_nil() {
-            argv.push_back(arg);
+        for a in args {
+            argv.push_back(a);
         }
         *self.deadline.lock().map_err(poisoned)? = Some(Instant::now() + self.timeout);
         let result = f.call_async::<Value>(argv).await;

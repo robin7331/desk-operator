@@ -3,17 +3,17 @@
 
 mod device;
 mod library;
+mod ops;
 mod port;
 mod power;
 mod provider;
 mod schema;
 mod skill;
-mod source;
 mod status;
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 
 use crate::bench::Bench;
 use crate::error::{DeskError, ErrorJson, Result};
@@ -28,8 +28,10 @@ For agents:
   desk schema --json        the bench (devices, providers), every command, every error code
   desk skill desk-operator  how to operate the bench safely: read it before switching anything
   desk skill list           all skills (e.g. adding a device desk doesn't know yet)
+Every device works the same way: `desk get <device>` shows its values and settings, `desk set`
+changes settings, `desk do` runs actions, `desk watch` streams; `desk schema --json` lists them.
 Rules in short: change things only when the user asked; `desk power` is a device's mains,
-`desk source output` a power supply's terminals; never pick voltages or currents yourself.";
+`desk set psu output on` a power supply's terminals; never pick values yourself.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -58,10 +60,59 @@ pub enum Command {
         #[command(subcommand)]
         action: PowerCmd,
     },
-    /// Control bench power supplies: setpoints, output, measurements (voltage_source)
-    Source {
-        #[command(subcommand)]
-        action: SourceCmd,
+    /// Read a device's values and settings: all, or the named ones (`desk get psu
+    /// measured_voltage`)
+    Get {
+        /// Device id, alias or name; `device:channel` for one channel
+        device: String,
+        /// Values or settings to show [default: all]
+        names: Vec<String>,
+    },
+    /// Change settings, e.g. `desk set psu voltage 5v current 1a output on` or `desk set iron
+    /// setpoint 330c`. Units are required; several settings apply in the device's safe order
+    Set {
+        /// Device id, alias or name; `device:channel` for one channel
+        device: String,
+        /// Setting and value pairs: `<name> <value> [<name> <value>...]` (a negative value goes
+        /// after `--`: `desk set dev -- offset -1v`)
+        #[arg(required = true, num_args = 2.., value_names = ["NAME", "VALUE"])]
+        pairs: Vec<String>,
+        /// Power supplies: switch the output on although a protection (OVP, OCP, ...) tripped,
+        /// which clears it
+        #[arg(long)]
+        clear_protection: bool,
+        /// Check ranges and limits and show what would be sent, without sending anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Run an action of a device, e.g. `desk do iron standby` or `desk do iron boost seconds=10s`
+    Do {
+        /// Device id, alias or name; `device:channel` for one channel
+        device: String,
+        /// The action
+        action: String,
+        /// Arguments as name=value (every declared argument is required)
+        args: Vec<String>,
+        /// Check the arguments and show what would be done, without doing it
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Stream readings until stopped (Ctrl-C); with --json one JSON line each. Other commands
+    /// keep working meanwhile (a background daemon holds the session)
+    Watch {
+        /// Device id, alias or name; `device:channel` for one channel
+        device: String,
+        /// Values or settings to stream [default: all]
+        names: Vec<String>,
+        /// Time between readings ("0": as fast as the device answers)
+        #[arg(long, default_value = "100ms", value_name = "DURATION")]
+        interval: String,
+        /// Stop after this many readings
+        #[arg(long, value_name = "N")]
+        count: Option<u64>,
+        /// Only print a reading when a watched value changed (more than its tolerance)
+        #[arg(long)]
+        changes: bool,
     },
     /// Inspect configured devices
     Device {
@@ -89,8 +140,8 @@ pub enum Command {
     Schema,
     /// Agent skills (SKILL.md) matching this version of desk: print, list or install them
     Skill(SkillArgs),
-    /// Run the background daemon that keeps device sessions open for `desk source watch`.
-    /// Started automatically; while it runs, `desk power` and `desk source` go through it
+    /// Run the background daemon that keeps device sessions open for `desk watch`.
+    /// Started automatically; while it runs, `desk power|get|set|do` go through it
     Serve {
         /// Exit after this long without connections or sessions ("never": run until stopped)
         #[arg(
@@ -169,58 +220,6 @@ pub struct Targets {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum SourceCmd {
-    /// Set voltage and/or current, e.g. `desk source set psu 5v 1a --on`
-    Set {
-        /// Device id, alias or name
-        device: String,
-        /// Values with units: 5v, 500mv, 1a, 250ma
-        #[arg(required = true)]
-        values: Vec<String>,
-        /// Then switch the output on (after the setpoints)
-        #[arg(long)]
-        on: bool,
-        /// With --on: switch on although a protection (OVP, OCP, ...) tripped, which clears it
-        #[arg(long, requires = "on")]
-        clear_protection: bool,
-        /// Check limits and show what would be sent, without sending anything
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Switch the output terminals on or off (not mains power: see `desk power`)
-    Output {
-        /// on or off
-        state: OnOff,
-        /// Device id, alias or name
-        device: String,
-        /// With `on`: switch on although a protection (OVP, OCP, ...) tripped, which clears it
-        #[arg(long)]
-        clear_protection: bool,
-        /// Check limits and show what would be sent, without sending anything
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Read output state, setpoints, measurements, and whatever else the device reports (mode,
-    /// protection, temperature, ...)
-    Read {
-        /// Device id, alias or name
-        device: String,
-    },
-    /// Stream readings until stopped (Ctrl-C), one per interval; with --json one JSON line each.
-    /// Other commands keep working meanwhile (the background daemon holds the session)
-    Watch {
-        /// Device id, alias or name
-        device: String,
-        /// Time between readings ("0": as fast as the device answers)
-        #[arg(long, default_value = "100ms", value_name = "DURATION")]
-        interval: String,
-        /// Stop after this many readings
-        #[arg(long, value_name = "N")]
-        count: Option<u64>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum LibraryCmd {
     /// List available device definitions and where they come from
     List,
@@ -238,9 +237,10 @@ pub enum LibraryCmd {
     New {
         /// Definition id: vendor/model (lowercase, digits, `-`, `_`)
         id: String,
-        /// The capability the definition implements
-        #[arg(long, value_enum)]
-        capability: CapabilityArg,
+        /// The capability: `voltage_source` (a power supply), `power_switch` (mains), or any
+        /// other name for a declared capability (e.g. `heater`, `meter`)
+        #[arg(long)]
+        capability: String,
         /// Human-readable model name, e.g. "ACME PSU 9000"
         #[arg(long)]
         name: Option<String>,
@@ -257,13 +257,6 @@ pub enum LibraryCmd {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-#[value(rename_all = "snake_case")]
-pub enum CapabilityArg {
-    VoltageSource,
-    PowerSwitch,
 }
 
 #[derive(Debug, Subcommand)]
@@ -306,12 +299,6 @@ pub struct ProbeArgs {
     pub listen: String,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum OnOff {
-    On,
-    Off,
-}
-
 #[derive(Debug, Subcommand)]
 pub enum ProviderCmd {
     /// List configured providers and the devices using them
@@ -352,18 +339,31 @@ pub async fn run(cli: Cli) -> Result<Report> {
             };
             return crate::daemon::serve(cli.config.as_deref(), idle).await;
         }
-        Command::Source {
-            action: SourceCmd::Watch {
-                interval, count, ..
-            },
+        Command::Watch {
+            ref device,
+            interval,
+            count,
+            ..
         } => {
             let watched = async {
                 parse_interval(&interval)?;
                 if count == Some(0) {
                     return Err(DeskError::Usage("--count must be at least 1".into()));
                 }
+                // Units for the human table (the daemon checks everything else).
+                let cat = if cli.json {
+                    None
+                } else {
+                    Bench::load(cli.config.as_deref()).ok().and_then(|b| {
+                        let d = b
+                            .config
+                            .resolve_device(crate::ops::split_channel(device).0)
+                            .ok()?;
+                        crate::ops::Catalog::of(d).ok()
+                    })
+                };
                 let args = crate::daemon::own_args();
-                crate::daemon::watch(cli.config.as_deref(), &args, cli.json, count).await
+                crate::daemon::watch(cli.config.as_deref(), &args, cli.json, count, cat).await
             };
             // A stream's error is one more JSON line, like the ones before it.
             return Ok(watched
@@ -395,7 +395,10 @@ pub async fn run(cli: Cli) -> Result<Report> {
 /// Commands that go through the daemon while it runs: everything touching a device's port or
 /// mains (a mains cut ends a session cleanly).
 pub fn routed(command: &Command) -> bool {
-    matches!(command, Command::Power { .. } | Command::Source { .. })
+    matches!(
+        command,
+        Command::Power { .. } | Command::Get { .. } | Command::Set { .. } | Command::Do { .. }
+    )
 }
 
 /// `--interval` of `watch`.
@@ -422,7 +425,22 @@ pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
             "this command doesn't need the bench; run it directly".into(),
         )),
         Command::Power { action } => power::run(bench, action).await,
-        Command::Source { action } => source::run(bench, action).await,
+        Command::Get { device, names } => ops::get(bench, &device, &names).await,
+        Command::Set {
+            device,
+            pairs,
+            clear_protection,
+            dry_run,
+        } => ops::set(bench, &device, &pairs, clear_protection, dry_run).await,
+        Command::Do {
+            device,
+            action,
+            args,
+            dry_run,
+        } => ops::act(bench, &device, &action, &args, dry_run).await,
+        Command::Watch { .. } => Err(DeskError::Usage(
+            "`desk watch` streams through the daemon; it can't run here".into(),
+        )),
         Command::Device { action } => device::run(bench, action),
         Command::Provider { action } => provider::run(bench, action).await,
         Command::Status => status::run(bench).await,

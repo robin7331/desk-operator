@@ -15,11 +15,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
-use crate::bench::Run;
+use crate::bench::{Run, close_drivers, take_logs};
 use crate::error::{DeskError, Result};
-use crate::source::{
-    self, Limits, Reading, Report as SourceReport, Request, SourceInfo, VoltageSource,
-};
+use crate::ops::{self, Catalog, DeviceReadings, Drivers, Op, Outcome};
 
 /// Readings buffered per watcher. A watcher that falls further behind loses the oldest ones and
 /// is told how many (`dropped`).
@@ -28,14 +26,11 @@ const BACKLOG: usize = 256;
 /// Failed reads in a row that end a session (one serial hiccup shouldn't end an hours-long log).
 const MAX_FAILED_READS: u32 = 3;
 
-/// How long closing a session may take.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// What a session tells its watchers.
 #[derive(Debug, Clone)]
 pub enum Event {
     Reading {
-        reading: Reading,
+        reading: DeviceReadings,
         /// When it was read (monotonic, for intervals) and the wall-clock time.
         at: Instant,
         time: SystemTime,
@@ -49,12 +44,11 @@ pub enum Event {
 }
 
 enum Msg {
-    Apply {
-        req: Request,
-        dry_run: bool,
-        limits: Limits,
-        ratings: SourceInfo,
-        reply: oneshot::Sender<Run<SourceReport>>,
+    Run {
+        op: Op,
+        /// The capability keys the op was resolved against (a changed config can't mix them up).
+        keys: Vec<String>,
+        reply: oneshot::Sender<Run<Outcome>>,
     },
     Stop {
         why: DeskError,
@@ -128,7 +122,7 @@ impl Sessions {
     ) -> Result<Watcher>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(Box<dyn VoltageSource>, Duration)>>,
+        Fut: Future<Output = Result<(Catalog, Drivers, Duration)>>,
     {
         if let Some(w) = self.join(device, interval) {
             return Ok(w);
@@ -138,7 +132,7 @@ impl Sessions {
         if let Some(w) = self.join(device, interval) {
             return Ok(w);
         }
-        let (src, timeout) = open().await?;
+        let (cat, drivers, timeout) = open().await?;
         let (msgs, rx) = mpsc::channel(16);
         let live = Arc::new(Live {
             msgs,
@@ -149,7 +143,10 @@ impl Sessions {
         lock(&self.live).insert(device.to_string(), live.clone());
         // Subscribed before the session's first reading.
         let watcher = self.subscribe(&live, interval);
-        tokio::spawn(self.clone().run(device.to_string(), live, src, timeout, rx));
+        tokio::spawn(
+            self.clone()
+                .serve(device.to_string(), live, cat, drivers, timeout, rx),
+        );
         Ok(watcher)
     }
 
@@ -171,27 +168,11 @@ impl Sessions {
         }
     }
 
-    /// Run a request through the device's session. `None`: there is no session (anymore).
-    pub async fn apply(
-        &self,
-        device: &str,
-        req: Request,
-        dry_run: bool,
-        limits: Limits,
-        ratings: SourceInfo,
-    ) -> Option<Run<SourceReport>> {
+    /// Run an op through the device's session. `None`: there is no session (anymore).
+    pub async fn run(&self, device: &str, keys: Vec<String>, op: Op) -> Option<Run<Outcome>> {
         let live = lock(&self.live).get(device).cloned()?;
         let (reply, answer) = oneshot::channel();
-        live.msgs
-            .send(Msg::Apply {
-                req,
-                dry_run,
-                limits,
-                ratings,
-                reply,
-            })
-            .await
-            .ok()?;
+        live.msgs.send(Msg::Run { op, keys, reply }).await.ok()?;
         answer.await.ok()
     }
 
@@ -214,14 +195,16 @@ impl Sessions {
         }
     }
 
-    async fn run(
+    async fn serve(
         self: Arc<Self>,
         device: String,
         live: Arc<Live>,
-        src: Box<dyn VoltageSource>,
+        cat: Catalog,
+        drivers: Drivers,
         timeout: Duration,
         mut msgs: mpsc::Receiver<Msg>,
     ) {
+        let read_all = Op::Get { channel: None };
         let port = self.port(&device);
         let mut last: Option<Instant> = None;
         let mut failed_reads = 0;
@@ -239,7 +222,7 @@ impl Sessions {
                     nobody
                 };
                 if retired {
-                    close(src.as_ref()).await;
+                    close_drivers(&drivers).await;
                     drop(guard);
                     return;
                 }
@@ -248,22 +231,22 @@ impl Sessions {
             let next = last.map_or_else(Instant::now, |l| l + interval);
             tokio::select! {
                 msg = msgs.recv() => match msg {
-                    Some(Msg::Apply { req, dry_run, limits, ratings, reply }) => {
-                        let result = tokio::time::timeout(
-                            timeout,
-                            source::apply(src.as_ref(), req, limits, ratings, dry_run),
-                        )
-                        .await
-                        .unwrap_or_else(|_| Err(timed_out(&device, timeout)));
-                        if let Ok(r) = &result {
-                            let _ = live.events.send(Event::Reading {
-                                reading: r.reading,
-                                at: Instant::now(),
-                                time: SystemTime::now(),
-                                log: Vec::new(),
-                            });
+                    Some(Msg::Run { op, keys, reply }) => {
+                        let result = if keys != cat.keys() {
+                            Err(DeskError::Usage(format!(
+                                "the config of `{device}` changed while it's watched; stop the \
+                                 watch first"
+                            )))
+                        } else {
+                            tokio::time::timeout(timeout, ops::run(&cat, &drivers, &op))
+                                .await
+                                .unwrap_or_else(|_| Err(timed_out(&device, timeout)))
+                        };
+                        // Watchers see a change at the next reading, right away.
+                        if result.is_ok() && op.changes() {
+                            last = None;
                         }
-                        let _ = reply.send(Run { result, log: src.take_log() });
+                        let _ = reply.send(Run { result, log: take_logs(&drivers) });
                     }
                     Some(Msg::Stop { why, done }) => {
                         stopped = Some(done);
@@ -273,14 +256,15 @@ impl Sessions {
                 },
                 _ = tokio::time::sleep_until(next.into()) => {
                     last = Some(Instant::now());
-                    let error = match tokio::time::timeout(timeout, src.read()).await {
-                        Ok(Ok(reading)) => {
+                    let read = ops::run(&cat, &drivers, &read_all);
+                    let error = match tokio::time::timeout(timeout, read).await {
+                        Ok(Ok(outcome)) => {
                             failed_reads = 0;
                             let _ = live.events.send(Event::Reading {
-                                reading,
+                                reading: outcome.readings,
                                 at: Instant::now(),
                                 time: SystemTime::now(),
-                                log: src.take_log(),
+                                log: take_logs(&drivers),
                             });
                             continue;
                         }
@@ -305,7 +289,7 @@ impl Sessions {
             let _ = live.events.send(Event::Ended(why));
         }
         drop(msgs);
-        close(src.as_ref()).await;
+        close_drivers(&drivers).await;
         drop(guard);
         if let Some(done) = stopped {
             let _ = done.send(());
@@ -318,8 +302,4 @@ fn timed_out(device: &str, after: Duration) -> DeskError {
         what: format!("watching `{device}`"),
         after,
     }
-}
-
-async fn close(src: &dyn VoltageSource) {
-    let _ = tokio::time::timeout(CLOSE_TIMEOUT, src.close()).await;
 }

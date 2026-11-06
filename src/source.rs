@@ -146,12 +146,6 @@ pub struct Limits {
     pub current: Option<f64>,
 }
 
-impl Limits {
-    pub fn is_empty(&self) -> bool {
-        self.voltage.is_none() && self.current.is_none()
-    }
-}
-
 #[async_trait]
 pub trait VoltageSource: Send + Sync {
     /// Start a session (connect, handshake). Called once per command, before anything else.
@@ -169,6 +163,16 @@ pub trait VoltageSource: Send + Sync {
     async fn set_current(&self, amps: f64) -> Result<()>;
     async fn set_output(&self, on: bool) -> Result<()>;
     async fn read(&self) -> Result<Reading>;
+    /// Address a channel for the next calls (multi-channel supplies). Drivers without channels
+    /// only accept `None`.
+    fn select_channel(&self, channel: Option<&str>) -> Result<()> {
+        match channel {
+            None => Ok(()),
+            Some(ch) => Err(DeskError::ConfigInvalid(format!(
+                "this driver has no channels (asked for channel `{ch}`)"
+            ))),
+        }
+    }
     /// Log lines since the last call (Lua drivers); most have none.
     fn take_log(&self) -> Vec<String> {
         Vec::new()
@@ -399,6 +403,7 @@ fn check_limits(req: &Request, info: &SourceInfo, limits: &Limits) -> Result<()>
                 requested: fmt(value),
                 limit: fmt(limit),
                 kind: kind.to_string(),
+                below: false,
             });
         }
     }
@@ -417,43 +422,8 @@ pub fn fmt_a(a: f64) -> String {
     format!("{a:.3} A")
 }
 
-pub fn fmt_w(w: f64) -> String {
-    format!("{w:.2} W")
-}
-
 fn on_off(b: bool) -> String {
     if b { "on" } else { "off" }.to_string()
-}
-
-/// Run `op` inside a session: `open`, then `op` with a timeout, then always `close`.
-pub async fn session<T>(
-    src: &dyn VoltageSource,
-    timeout: Duration,
-    what: &str,
-    op: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
-    let result = tokio::time::timeout(timeout, async {
-        src.open().await?;
-        op.await
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err(DeskError::Timeout {
-            what: what.to_string(),
-            after: timeout,
-        })
-    });
-    // Close even after a timeout, so devices that lock their front panel get released.
-    let closed = tokio::time::timeout(Duration::from_secs(2), src.close()).await;
-    match (result, closed) {
-        (Err(e), _) => Err(e),
-        (Ok(_), Ok(Err(e))) => Err(e),
-        (Ok(_), Err(_)) => Err(DeskError::Timeout {
-            what: format!("{what}: closing the session"),
-            after: Duration::from_secs(2),
-        }),
-        (Ok(v), Ok(Ok(()))) => Ok(v),
-    }
 }
 
 #[cfg(test)]
@@ -693,16 +663,5 @@ mod tests {
         .unwrap();
         assert!(!r.applied);
         assert!(f.calls().is_empty());
-    }
-
-    #[test]
-    fn sessions_close_even_on_timeout() {
-        let f = Fake::default();
-        let r = run(session(&f, Duration::from_millis(20), "test", async {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            Ok(())
-        }));
-        assert_eq!(r.unwrap_err().code(), "timeout");
-        assert_eq!(f.calls(), ["open", "close"]);
     }
 }

@@ -7,6 +7,7 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::declared::{self, Declarations, Limit};
 use crate::error::{DeskError, Result};
 use crate::library::{self, Library};
 use crate::providers;
@@ -37,11 +38,34 @@ pub struct Device {
     pub aliases: Vec<String>,
     /// The device definition it's based on, if any (e.g. `acme/psu-3000`).
     pub model: Option<String>,
+    /// Mains (`power_switch`).
     pub power: Option<Binding>,
-    /// `voltage_source` capability (bench power supply).
-    pub source: Option<Binding>,
+    /// Every other capability, in config order: `source` (voltage_source, well-known) or one the
+    /// definition declares.
+    pub caps: IndexMap<String, Cap>,
     /// Bench safety limits per capability, enforced by the core for every driver.
     pub limits: DeviceLimits,
+}
+
+/// One capability of a device: its binding and what it declares. For `source`, only `channels`
+/// (its values and settings are fixed by the core).
+#[derive(Debug, Clone)]
+pub struct Cap {
+    pub binding: Binding,
+    pub decls: Declarations,
+}
+
+/// The well-known capability keys: `power` (mains) and `source` (bench power supply).
+pub const POWER: &str = "power";
+pub const SOURCE: &str = "source";
+
+/// Keys of a device table that aren't capabilities.
+const DEVICE_KEYS: &[&str] = &["name", "model", "aliases", "limits"];
+
+impl Device {
+    pub fn source(&self) -> Option<&Binding> {
+        self.caps.get(SOURCE).map(|c| &c.binding)
+    }
 }
 
 /// How a capability of a device is implemented: by a provider, or by a Lua script.
@@ -206,73 +230,231 @@ struct RawConfig {
     #[serde(default)]
     providers: IndexMap<String, ProviderConfig>,
     #[serde(default)]
-    devices: IndexMap<String, RawDevice>,
+    devices: IndexMap<String, toml::Table>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A device table: the known keys, and every other table as a capability (raw: it may be a
+/// partial override of a definition's capability).
 struct RawDevice {
     name: Option<String>,
     /// A device definition from the library, e.g. `acme/psu-3000`.
     model: Option<String>,
-    #[serde(default)]
     aliases: Vec<String>,
-    // Raw tables: they may be partial overrides of a definition's bindings.
-    power: Option<toml::Table>,
-    source: Option<toml::Table>,
     limits: Option<toml::Table>,
+    caps: IndexMap<String, toml::Table>,
 }
 
-/// `limits = { source = { voltage = 12, current = 2 } }`: one table per capability that has limits.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+impl RawDevice {
+    fn parse(id: &str, t: toml::Table) -> Result<RawDevice> {
+        let bad = |m: String| DeskError::ConfigInvalid(format!("device `{id}`: {m}"));
+        let mut d = RawDevice {
+            name: None,
+            model: None,
+            aliases: Vec::new(),
+            limits: None,
+            caps: IndexMap::new(),
+        };
+        for (k, v) in t {
+            match (k.as_str(), v) {
+                ("name", toml::Value::String(s)) => d.name = Some(s),
+                ("model", toml::Value::String(s)) => d.model = Some(s),
+                ("aliases", toml::Value::Array(a)) => {
+                    d.aliases = a
+                        .into_iter()
+                        .map(|x| match x {
+                            toml::Value::String(s) => Ok(s),
+                            _ => Err(bad("`aliases` must be a list of strings".into())),
+                        })
+                        .collect::<Result<_>>()?;
+                }
+                ("limits", toml::Value::Table(l)) => d.limits = Some(l),
+                (k, _) if DEVICE_KEYS.contains(&k) => {
+                    return Err(bad(format!("`{k}` has the wrong type")));
+                }
+                (_, toml::Value::Table(c)) => {
+                    d.caps.insert(k, c);
+                }
+                (k, _) => {
+                    return Err(bad(format!(
+                        "unknown key `{k}` (a device has {} and one table per capability)",
+                        DEVICE_KEYS.join(", ")
+                    )));
+                }
+            }
+        }
+        Ok(d)
+    }
+}
+
+/// `limits = { source = { voltage = 12 }, heater = { setpoint = 380, ch2 = { setpoint = 300 } } }`:
+/// one table per capability, a number (the maximum) or `{ min, max }` per setting, and optionally
+/// one table per channel that overrides those.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct DeviceLimits {
-    #[serde(skip_serializing_if = "Limits::is_empty")]
-    pub source: Limits,
+    #[serde(flatten)]
+    pub caps: IndexMap<String, CapLimits>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct CapLimits {
+    #[serde(flatten)]
+    pub all: IndexMap<String, Limit>,
+    #[serde(flatten)]
+    pub channels: IndexMap<String, IndexMap<String, Limit>>,
 }
 
 impl DeviceLimits {
     pub fn is_empty(&self) -> bool {
-        self.source.is_empty()
+        self.caps.is_empty()
+    }
+
+    /// The bench limit of one setting, for a channel (a channel's own limit wins).
+    pub fn get(&self, cap: &str, setting: &str, channel: Option<&str>) -> Option<Limit> {
+        let c = self.caps.get(cap)?;
+        channel
+            .and_then(|ch| c.channels.get(ch))
+            .and_then(|l| l.get(setting))
+            .or_else(|| c.all.get(setting))
+            .copied()
+    }
+
+    /// The `voltage_source` limits in its own form.
+    pub fn source(&self, channel: Option<&str>) -> Limits {
+        let max = |s: &str| self.get(SOURCE, s, channel).and_then(|l| l.max);
+        Limits {
+            voltage: max("voltage"),
+            current: max("current"),
+        }
     }
 }
 
-fn parse_limits(device: &str, raw: Option<&toml::Table>) -> Result<DeviceLimits> {
+/// Settings of `voltage_source` that can have bench limits.
+const SOURCE_LIMITS: &[&str] = &["voltage", "current"];
+
+fn parse_limits(
+    device: &str,
+    raw: Option<&toml::Table>,
+    caps: &IndexMap<String, Cap>,
+) -> Result<DeviceLimits> {
     let Some(raw) = raw else {
         return Ok(DeviceLimits::default());
     };
     let bad = |m: String| DeskError::ConfigInvalid(format!("device `{device}`: limits: {m}"));
     let mut limits = DeviceLimits::default();
     for (key, value) in raw {
-        match key.as_str() {
-            "source" => {
-                limits.source = value
-                    .clone()
-                    .try_into()
-                    .map_err(|e: toml::de::Error| bad(format!("source: {}", e.message())))?;
-            }
-            "voltage" | "current" => {
+        let Some(cap) = caps.get(key) else {
+            if SOURCE_LIMITS.contains(&key.as_str()) {
                 return Err(bad(format!(
                     "limits are per capability: write `limits = {{ source = {{ {key} = … }} }}`"
                 )));
             }
-            other => {
-                return Err(bad(format!(
-                    "unknown capability `{other}` (limits exist for: source)"
-                )));
+            let known: Vec<&str> = caps.keys().map(String::as_str).collect();
+            return Err(bad(format!(
+                "unknown capability `{key}` (this device has: {})",
+                if known.is_empty() {
+                    "none".into()
+                } else {
+                    known.join(", ")
+                }
+            )));
+        };
+        let toml::Value::Table(t) = value else {
+            return Err(bad(format!("`{key}` must be a table of settings")));
+        };
+        // Which settings can be limited, and how.
+        let limitable = |name: &str| -> std::result::Result<(), String> {
+            if key == SOURCE {
+                return if SOURCE_LIMITS.contains(&name) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "`{key}.{name}`: source limits exist for: voltage, current"
+                    ))
+                };
+            }
+            match cap.decls.settings.get(name) {
+                Some(d) if d.kind == declared::Type::Number => Ok(()),
+                Some(_) => Err(format!("`{key}.{name}` isn't a number setting")),
+                None => Err(format!(
+                    "`{key}.{name}` is not a setting of `{key}` (settings: {})",
+                    cap.decls
+                        .settings
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            }
+        };
+        let one = |name: &str, v: &toml::Value| -> std::result::Result<Limit, String> {
+            limitable(name)?;
+            let l = Limit::parse(v).map_err(|e| format!("`{key}.{name}`: {e}"))?;
+            if key == SOURCE && l.min.is_some() {
+                return Err(format!(
+                    "`{key}.{name}`: source limits are maximums (a number)"
+                ));
+            }
+            for b in [l.min, l.max].into_iter().flatten() {
+                if key == SOURCE && b < 0.0 {
+                    return Err(format!("`{key}.{name}` must be >= 0"));
+                }
+            }
+            Ok(l)
+        };
+        let mut c = CapLimits::default();
+        let channels = cap.decls.channels.clone().unwrap_or_default();
+        for (name, v) in t {
+            if channels.contains(name) {
+                let toml::Value::Table(ct) = v else {
+                    return Err(bad(format!("`{key}.{name}` (a channel) must be a table")));
+                };
+                let mut m = IndexMap::new();
+                for (n, v) in ct {
+                    m.insert(n.clone(), one(n, v).map_err(bad)?);
+                }
+                c.channels.insert(name.clone(), m);
+            } else {
+                c.all.insert(name.clone(), one(name, v).map_err(bad)?);
             }
         }
+        limits.caps.insert(key.clone(), c);
     }
     Ok(limits)
 }
 
-impl RawDevice {
-    fn binding_table(&self, key: &str) -> Option<&toml::Table> {
-        match key {
-            "power" => self.power.as_ref(),
-            "source" => self.source.as_ref(),
-            _ => None,
-        }
+/// A capability's binding and declarations from its (merged) table.
+fn build_cap(
+    device: &str,
+    key: &str,
+    mut table: toml::Table,
+) -> Result<(toml::Table, Declarations)> {
+    let bad = |e: String| DeskError::ConfigInvalid(format!("device `{device}`: `{key}`: {e}"));
+    let decls = Declarations::take(&mut table).map_err(bad)?;
+    if key == POWER && decls != Declarations::default() {
+        return Err(bad("mains (`power`) declares nothing".into()));
     }
+    if key == SOURCE && !decls.is_empty() {
+        return Err(bad(
+            "extra values, settings or actions on `source` aren't supported yet (only `channels`)"
+                .into(),
+        ));
+    }
+    if key != POWER && key != SOURCE && decls.is_empty() {
+        return Err(bad(format!(
+            "a capability other than power or source must declare `values`, `settings` or `actions` (is `{key}` a typo?)"
+        )));
+    }
+    Ok((table, decls))
+}
+
+/// Capability names: lowercase letters, digits, `_`; not a device key, not `mains`/`device`.
+pub fn valid_cap_name(k: &str) -> bool {
+    !k.is_empty()
+        && k.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !DEVICE_KEYS.contains(&k)
+        && k != "mains"
+        && k != "device"
 }
 
 /// Build one capability binding from the device's own table and its definition's (if any).
@@ -282,24 +464,26 @@ fn build_binding(
     own: Option<&toml::Table>,
     definition: Option<&toml::Table>,
     config_path: &Path,
-) -> Result<Option<Binding>> {
+) -> Result<Option<Cap>> {
     let bad = |e: String| DeskError::ConfigInvalid(format!("device `{device}`: `{key}`: {e}"));
-    let binding = match (own, definition) {
-        (None, None) => None,
-        (None, Some(def)) => Some(Binding::try_from(def.clone()).map_err(bad)?),
+    let (table, own_binding) = match (own, definition) {
+        (None, None) => return Ok(None),
+        (None, Some(def)) => (def.clone(), false),
         (Some(own), Some(def)) if !own.contains_key("script") && !own.contains_key("provider") => {
-            Some(Binding::try_from(library::merge(def, own)).map_err(bad)?)
+            (library::merge(def, own), false)
         }
         // The device's own binding (paths relative to the config file).
-        (Some(own), _) => Some(resolve_script_path(
-            Binding::try_from(own.clone()).map_err(bad)?,
-            config_path,
-        )),
+        (Some(own), _) => (own.clone(), true),
     };
-    if let Some(Binding::Script { ratings, .. }) = &binding {
+    let (table, decls) = build_cap(device, key, table)?;
+    let mut binding = Binding::try_from(table).map_err(bad)?;
+    if own_binding {
+        binding = resolve_script_path(binding, config_path);
+    }
+    if let Binding::Script { ratings, .. } = &binding {
         check_ratings(key, ratings).map_err(bad)?;
     }
-    Ok(binding)
+    Ok(Some(Cap { binding, decls }))
 }
 
 /// Ratings have a standard form per capability.
@@ -350,6 +534,7 @@ impl Config {
         let library = Library::for_config(&path);
         let mut devices = Vec::new();
         for (id, d) in raw.devices {
+            let d = RawDevice::parse(&id, d)?;
             let definition =
                 match &d.model {
                     Some(model) => Some(library.find(model).map_err(|e| {
@@ -357,17 +542,42 @@ impl Config {
                     })?),
                     None => None,
                 };
-            let binding = |key: &str| {
-                build_binding(
+            // Capabilities: the definition's, then the device's own new ones, in order.
+            let mut keys: Vec<String> = definition
+                .as_ref()
+                .map(|def| def.bindings.keys().cloned().collect())
+                .unwrap_or_default();
+            for k in d.caps.keys() {
+                if !keys.contains(k) {
+                    keys.push(k.clone());
+                }
+            }
+            let mut power = None;
+            let mut caps = IndexMap::new();
+            for key in keys {
+                if !valid_cap_name(&key) {
+                    return Err(DeskError::ConfigInvalid(format!(
+                        "device `{id}`: `{key}` can't be a capability name (lowercase letters, \
+                         digits, `_`; not `mains` or `device`)"
+                    )));
+                }
+                let Some(cap) = build_binding(
                     &id,
-                    key,
-                    d.binding_table(key),
-                    definition.as_ref().and_then(|def| def.bindings.get(key)),
+                    &key,
+                    d.caps.get(&key),
+                    definition.as_ref().and_then(|def| def.bindings.get(&key)),
                     &path,
-                )
-            };
-            let power = binding("power")?;
-            let source = binding("source")?;
+                )?
+                else {
+                    continue;
+                };
+                if key == POWER {
+                    power = Some(cap.binding);
+                } else {
+                    caps.insert(key, cap);
+                }
+            }
+            let limits = parse_limits(&id, d.limits.as_ref(), &caps)?;
             devices.push(Device {
                 name: d
                     .name
@@ -377,8 +587,8 @@ impl Config {
                 model: d.model.clone(),
                 aliases: d.aliases.clone(),
                 power,
-                source,
-                limits: parse_limits(&id, d.limits.as_ref())?,
+                caps,
+                limits,
                 id,
             });
         }
@@ -435,23 +645,14 @@ impl Config {
                     ));
                 }
             }
-            for (key, binding) in [("power", &d.power), ("source", &d.source)] {
+            let bindings = std::iter::once((POWER, d.power.as_ref()))
+                .chain(d.caps.iter().map(|(k, c)| (k.as_str(), Some(&c.binding))));
+            for (key, binding) in bindings {
                 if let Some(Binding::Native { provider, .. }) = binding
                     && !self.providers.contains_key(provider)
                 {
                     problems.push(format!(
                         "device `{}`: {key} provider `{provider}` is not defined under [providers]",
-                        d.id
-                    ));
-                }
-            }
-            let l = d.limits.source;
-            for (what, v) in [("voltage", l.voltage), ("current", l.current)] {
-                if let Some(v) = v
-                    && !(v.is_finite() && v >= 0.0)
-                {
-                    problems.push(format!(
-                        "device `{}`: limits.source.{what} must be >= 0",
                         d.id
                     ));
                 }

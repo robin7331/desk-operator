@@ -555,7 +555,10 @@ fn skills_match_the_cli() {
         "desk schema",
         "desk device",
         "desk provider",
-        "desk source",
+        "desk get",
+        "desk set",
+        "desk do",
+        "desk watch",
         "desk library",
         "desk port list",
     ] {

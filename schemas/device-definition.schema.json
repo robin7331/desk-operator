@@ -1,14 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "desk-operator device definition (device.toml), format v1",
+  "title": "desk-operator device definition (device.toml), format v2",
   "description": "What's true for every unit of a model. Nothing bench-specific (no providers, entities, bench limits, serial numbers). Spec: docs/definition-format.md. desk itself validates more than this schema can express (`desk library check`).",
   "type": "object",
-  "required": ["device"],
+  "required": [
+    "device"
+  ],
   "additionalProperties": false,
   "properties": {
     "device": {
       "type": "object",
-      "required": ["id", "name", "requires", "status"],
+      "required": [
+        "id",
+        "name",
+        "requires",
+        "status"
+      ],
       "additionalProperties": false,
       "properties": {
         "id": {
@@ -16,24 +23,35 @@
           "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+$",
           "description": "vendor/model; must match the folder <vendor>/<model>/device.toml"
         },
-        "name": { "type": "string", "minLength": 1, "description": "Human-readable model name" },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable model name"
+        },
         "requires": {
           "type": "string",
           "pattern": "^desk-operator\\s*>=\\s*[0-9]+(\\.[0-9]+){0,2}$",
           "description": "Oldest desk-operator the driver works with, e.g. \"desk-operator >= 0.1\""
         },
         "status": {
-          "enum": ["community", "tested"],
+          "enum": [
+            "community",
+            "tested"
+          ],
           "description": "community: from documentation, not yet run on real hardware. tested: smoke-tested on real hardware (list versions in `tested`)."
         },
         "tested": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Hardware/firmware versions it was smoke-tested with. Required when status = \"tested\"."
         },
         "sources": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Manuals, protocol documentation, community work the definition is based on"
         }
       }
@@ -45,18 +63,37 @@
     "source": {
       "description": "voltage_source capability: a Lua driver with set_voltage, set_current, set_output, read",
       "allOf": [
-        { "$ref": "#/$defs/binding" },
         {
-          "required": ["ratings"],
+          "$ref": "#/$defs/binding"
+        },
+        {
+          "required": [
+            "ratings"
+          ],
           "properties": {
             "ratings": {
               "type": "object",
-              "required": ["max_voltage", "max_current"],
+              "required": [
+                "max_voltage",
+                "max_current"
+              ],
               "additionalProperties": false,
               "properties": {
-                "max_voltage": { "type": "number", "exclusiveMinimum": 0, "description": "Volts" },
-                "max_current": { "type": "number", "exclusiveMinimum": 0, "description": "Amps" },
-                "max_power": { "type": "number", "exclusiveMinimum": 0, "description": "Watts (informational)" }
+                "max_voltage": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Volts"
+                },
+                "max_current": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Amps"
+                },
+                "max_power": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Watts (informational)"
+                }
               }
             }
           }
@@ -67,27 +104,256 @@
   "$defs": {
     "binding": {
       "type": "object",
-      "required": ["script"],
-      "not": { "required": ["provider"] },
+      "required": [
+        "script"
+      ],
+      "not": {
+        "required": [
+          "provider"
+        ]
+      },
       "properties": {
-        "script": { "type": "string", "description": "Lua driver, relative to this file" },
+        "script": {
+          "type": "string",
+          "description": "Lua driver, relative to this file"
+        },
         "port": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "usb_vid": { "type": "integer", "minimum": 0, "maximum": 65535 },
-            "usb_pid": { "type": "integer", "minimum": 0, "maximum": 65535 }
+            "usb_vid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "usb_pid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
           },
           "description": "USB ids of the model. Serial numbers and paths are per unit: users add them in their own config."
         },
-        "timeout": { "type": "string", "description": "e.g. \"10s\"" },
-        "ratings": { "type": "object" },
+        "timeout": {
+          "type": "string",
+          "description": "e.g. \"10s\""
+        },
+        "ratings": {
+          "type": "object"
+        },
         "params": {
           "type": "object",
           "description": "Data for the driver, validated against the driver's PARAMS declaration (see `desk library show`)"
+        },
+        "values": {
+          "type": "object",
+          "description": "What the device reports",
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          }
+        },
+        "settings": {
+          "type": "object",
+          "description": "What it reports and you can change (applied in this order)",
+          "additionalProperties": {
+            "$ref": "#/$defs/setting"
+          }
+        },
+        "actions": {
+          "type": "object",
+          "description": "What it does on request",
+          "additionalProperties": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "channels": {
+          "description": "A count (1..64) or a list of channel names",
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]+$"
+              }
+            }
+          ]
         }
       },
       "additionalProperties": false
+    },
+    "value": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "number",
+            "boolean",
+            "choice",
+            "string"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "description": "A unit-table symbol (V, A, W, Ω, Hz, F, H, s, °C, K, %, g, Pa, Ah, Wh) or another unit, typed exactly"
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "How far a read-back may differ and still count as confirmed"
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "doc": {
+          "type": "string"
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "description": "A value whose unit changes: the possible units"
+        }
+      }
+    },
+    "setting": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "number",
+            "boolean",
+            "choice",
+            "string"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "description": "A unit-table symbol (V, A, W, Ω, Hz, F, H, s, °C, K, %, g, Pa, Ah, Wh) or another unit, typed exactly"
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "How far a read-back may differ and still count as confirmed"
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "doc": {
+          "type": "string"
+        },
+        "switches": {
+          "type": "boolean",
+          "description": "A physical effect (default true for settings)"
+        }
+      }
+    },
+    "arg": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "number",
+            "boolean",
+            "choice",
+            "string"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "description": "A unit-table symbol (V, A, W, Ω, Hz, F, H, s, °C, K, %, g, Pa, Ah, Wh) or another unit, typed exactly"
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "How far a read-back may differ and still count as confirmed"
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "doc": {
+          "type": "string"
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": [
+        "switches"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "switches": {
+          "type": "boolean",
+          "description": "Whether it has a physical effect (required)"
+        },
+        "doc": {
+          "type": "string"
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/arg"
+          },
+          "description": "Every argument is required"
+        }
+      }
+    }
+  },
+  "patternProperties": {
+    "^(?!(device|power|source|mains)$)[a-z][a-z0-9_]*$": {
+      "description": "A declared capability (any name but device/power/source/mains): a Lua driver with read(ctx), set(ctx, name, value), action(ctx, name, args) as needed by its declarations. desk requires at least one of values, settings, actions.",
+      "$ref": "#/$defs/binding"
     }
   }
 }

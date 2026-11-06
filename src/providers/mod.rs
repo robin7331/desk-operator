@@ -14,6 +14,7 @@ use indexmap::IndexMap;
 use serde::Serialize;
 
 use crate::config::ProviderConfig;
+use crate::declared::{Declarations, Driver};
 use crate::error::{DeskError, Result};
 use crate::model::Capability;
 use crate::power::PowerSwitch;
@@ -35,6 +36,12 @@ pub trait Provider: Send + Sync {
         Err(DeskError::ConfigInvalid(
             "this provider can't drive a voltage source (use a driver script or another provider)"
                 .into(),
+        ))
+    }
+    /// Bind an endpoint as a declared capability. Most providers can't.
+    fn declared(&self, _params: &toml::Table, _decls: &Declarations) -> Result<Box<dyn Driver>> {
+        Err(DeskError::ConfigInvalid(
+            "this provider can't drive a declared capability (use a driver script)".into(),
         ))
     }
 }

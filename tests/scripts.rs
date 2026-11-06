@@ -434,12 +434,14 @@ end
 #[test]
 fn lua_source_driver_runs_in_one_session_in_order() {
     let b = source_bench(SIM_DRIVER, "", "");
-    let out = b.run(&["--json", "source", "set", "psu", "5v", "1a", "--on"]);
+    let out = b.run(&[
+        "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+    ]);
     assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
     let d = &out.json()["data"];
     assert_eq!(d["verified"]["voltage"], true);
     assert_eq!(d["verified"]["output"], true);
-    assert_eq!(d["reading"]["voltage"], 5.0);
+    assert_eq!(d["values"]["measured_voltage"], 5.0);
     let log: Vec<&str> = d["log"]
         .as_array()
         .unwrap()
@@ -466,14 +468,14 @@ fn lua_driver_limits_come_from_info_and_bench() {
         r#", params = { max = 12 }"#,
         "limits = { source = { current = 2 } }",
     );
-    let out = b.run(&["--json", "source", "set", "psu", "13v"]);
+    let out = b.run(&["--json", "set", "psu", "voltage", "13v"]);
     assert_eq!(out.code, 8);
     assert!(
         out.error_message().contains("device maximum"),
         "{}",
         out.error_message()
     );
-    let out = b.run(&["--json", "source", "set", "psu", "3a"]);
+    let out = b.run(&["--json", "set", "psu", "current", "3a"]);
     assert_eq!(out.code, 8);
     assert!(out.error_message().contains("bench limit"));
     // Nothing was sent: the driver only saw the session.
@@ -488,7 +490,7 @@ fn lua_driver_session_closes_after_errors() {
         "function set_output(ctx, on) error('relay stuck') end\nfunction unused(ctx, on)",
     );
     let b = source_bench(&driver, "", "");
-    let out = b.run(&["--json", "source", "set", "psu", "5v", "--on"]);
+    let out = b.run(&["--json", "set", "psu", "voltage", "5v", "output", "on"]);
     assert_eq!(out.code, 5, "{}", out.stdout);
     assert!(out.error_message().contains("relay stuck"));
     assert!(
@@ -505,7 +507,7 @@ fn lua_driver_session_closes_after_timeout() {
         "function read(ctx) ctx.sleep(5000) end\nfunction unused(ctx)",
     );
     let b = source_bench(&driver, r#", timeout = "300ms""#, "");
-    let out = b.run(&["--json", "source", "read", "psu"]);
+    let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 6, "{}", out.stdout);
     assert!(
         out.stderr.contains("psu: close"),
@@ -526,21 +528,21 @@ fn minimal_driver_without_readback_is_unverified() {
         "",
         "",
     );
-    let out = b.run(&["--json", "source", "set", "psu", "5v", "--on"]);
+    let out = b.run(&["--json", "set", "psu", "voltage", "5v", "output", "on"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     let d = &out.json()["data"];
     assert!(
-        d["verified"].as_object().unwrap().is_empty(),
+        d["verified"].as_object().is_none_or(|v| v.is_empty()),
         "{}",
         d["verified"]
     );
-    assert_eq!(d["reading"]["voltage"], 4.98);
+    assert_eq!(d["values"]["measured_voltage"], 4.98);
 }
 
 #[test]
 fn bad_drivers_are_reported() {
     let missing = source_bench("function read(ctx) return {} end", "", "");
-    let out = missing.run(&["--json", "source", "read", "psu"]);
+    let out = missing.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 3);
     let msg = out.error_message();
     assert!(
@@ -556,7 +558,7 @@ fn bad_drivers_are_reported() {
         "",
         "",
     );
-    let out = bad_read.run(&["--json", "source", "read", "psu"]);
+    let out = bad_read.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 5);
     assert!(
         out.error_message().contains("read() must return a table"),
@@ -569,7 +571,7 @@ fn bad_drivers_are_reported() {
         "",
         "",
     );
-    let out = bad_type.run(&["--json", "source", "read", "psu"]);
+    let out = bad_type.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 5);
     assert!(
         out.error_message().contains("read() must return"),
@@ -586,7 +588,7 @@ fn drivers_can_use_other_power_paths() {
         "function set_output(ctx, on)\n  ctx.power{ provider = \"sim\", endpoint = \"relay\" }:set(on)\n  s.out = on\nend",
     );
     let b = source_bench(&driver, "", "");
-    let out = b.run(&["--json", "source", "output", "on", "psu"]);
+    let out = b.run(&["--json", "set", "psu", "output", "on"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     let state: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(b.dir.path().join("mock-state.json")).unwrap(),

@@ -30,11 +30,11 @@ pub enum DeskError {
     #[error("device `{0}` has no power path configured")]
     NoPowerPath(String),
 
-    #[error("device `{device}` has no `{key}` binding, so it can't do {capability}")]
+    #[error("device `{device}` {missing}")]
     CapabilityMissing {
         device: String,
-        key: &'static str,
-        capability: &'static str,
+        /// What it lacks, e.g. "has no `source` binding, so it can't do voltage_source".
+        missing: String,
     },
 
     #[error("device `{0}` is powered off (mains)")]
@@ -43,12 +43,14 @@ pub enum DeskError {
     #[error("{0} protection is tripped: the device switched its output off")]
     ProtectionTripped(String),
 
-    #[error("{what} {requested} exceeds the {kind} of {limit}")]
+    #[error("{what} {requested} {} the {kind} of {limit}", if *below { "is below" } else { "exceeds" })]
     LimitExceeded {
         what: String,
         requested: String,
         limit: String,
         kind: String,
+        /// Below a minimum instead of above a maximum.
+        below: bool,
     },
 
     #[error("provider `{provider}` unreachable: {message}")]
@@ -233,7 +235,7 @@ pub const ERROR_CODES: &[(&str, i32, &str)] = &[
     (
         "daemon_unavailable",
         4,
-        "the background daemon (for `desk source watch`) couldn't be started or reached, or stopped",
+        "the background daemon (for `desk watch`) couldn't be started or reached, or stopped",
     ),
 ];
 
@@ -258,8 +260,7 @@ mod tests {
             DeskError::NoPowerPath(String::new()),
             DeskError::CapabilityMissing {
                 device: String::new(),
-                key: "",
-                capability: "",
+                missing: String::new(),
             },
             DeskError::DeviceOff(String::new()),
             DeskError::ProtectionTripped(String::new()),
@@ -268,6 +269,7 @@ mod tests {
                 requested: String::new(),
                 limit: String::new(),
                 kind: String::new(),
+                below: false,
             },
             DeskError::ProviderUnreachable {
                 provider: String::new(),

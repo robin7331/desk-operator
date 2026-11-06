@@ -102,6 +102,10 @@ impl VoltageSource for ScriptSource {
         }
     }
 
+    fn select_channel(&self, channel: Option<&str>) -> Result<()> {
+        self.engine.set_channel(channel)
+    }
+
     fn take_log(&self) -> Vec<String> {
         self.engine.take_log()
     }

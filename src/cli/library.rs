@@ -7,13 +7,13 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::Serialize;
 
-use super::{CapabilityArg, LibraryCmd};
+use super::LibraryCmd;
 use crate::config::{self, Binding};
 use crate::error::{DeskError, ErrorJson, Result};
 use crate::library::{self, Definition, Library};
 use crate::output::{Report, table};
 use crate::providers::Registry;
-use crate::script::{DeviceInfo, ParamSpec, ScriptSource, ScriptSpec, ScriptSwitch};
+use crate::script::{DeviceInfo, ParamSpec, ScriptDriver, ScriptSource, ScriptSpec, ScriptSwitch};
 
 pub fn run(config_path: Option<&Path>, cmd: LibraryCmd) -> Result<Report> {
     let config_path = config_path
@@ -43,7 +43,7 @@ pub fn run(config_path: Option<&Path>, cmd: LibraryCmd) -> Result<Report> {
             scaffold(
                 &root,
                 &id,
-                capability,
+                &capability,
                 name,
                 driver,
                 max_voltage,
@@ -217,9 +217,16 @@ fn driver_params(def: &Definition) -> Vec<(String, Result<Vec<ParamSpec>>)> {
     def.bindings
         .iter()
         .map(|(key, table)| {
-            let result = Binding::try_from(table.clone())
+            let mut table = table.clone();
+            let decls = crate::declared::Declarations::take(&mut table);
+            let result = decls
                 .map_err(DeskError::ConfigInvalid)
-                .and_then(|binding| {
+                .and_then(|decls| {
+                    Binding::try_from(table)
+                        .map(|b| (b, decls))
+                        .map_err(DeskError::ConfigInvalid)
+                })
+                .and_then(|(binding, decls)| {
                     let Binding::Script {
                         script,
                         params,
@@ -233,7 +240,9 @@ fn driver_params(def: &Definition) -> Vec<(String, Result<Vec<ParamSpec>>)> {
                     let declared = match key.as_str() {
                         "power" => ScriptSwitch::load(spec)?.params().map(<[_]>::to_vec),
                         "source" => ScriptSource::load(spec)?.params().map(<[_]>::to_vec),
-                        _ => None,
+                        _ => ScriptDriver::load(spec, &decls)?
+                            .params()
+                            .map(<[_]>::to_vec),
                     };
                     declared.ok_or_else(|| {
                         DeskError::ConfigInvalid(format!(
@@ -408,6 +417,29 @@ end
 -- function state(ctx) end
 "#;
 
+const DECLARED_DRIVER_SOURCE: &str = r#"-- Driver for {name} ({key}, a declared capability). Contract: docs/scripting.md.
+-- desk parses units, checks ranges and limits, applies settings in declaration order and verifies
+-- them by reading back; the driver only talks to the device. Return from read() only what the
+-- device really reports.
+
+PARAMS = {
+  -- example = { type = "number", default = 300, doc = "what it means" },
+}
+
+-- Optional: start/end of a session (connect, handshake).
+-- function open(ctx) end
+-- function close(ctx) end
+
+-- Every declared value and setting the device reports, in the declared unit.
+function read(ctx)
+  error("not implemented: read")
+end
+
+-- Needed once there are settings / actions:
+-- function set(ctx, name, value) end
+-- function action(ctx, name, args) end
+"#;
+
 const VENDOR_README: &str = r#"# {vendor}
 
 | Definition | Model | Status |
@@ -428,7 +460,7 @@ What a smoke test on real hardware showed (boot time, ramps, quirks), with firmw
 fn scaffold(
     root: &Path,
     id: &str,
-    capability: CapabilityArg,
+    capability: &str,
     name: Option<String>,
     driver: Option<String>,
     max_voltage: Option<f64>,
@@ -452,20 +484,34 @@ fn scaffold(
     let mut created = Vec::new();
 
     let (key, template) = match capability {
-        CapabilityArg::VoltageSource => ("source", DRIVER_SOURCE),
-        CapabilityArg::PowerSwitch => ("power", POWER_DRIVER_SOURCE),
+        "voltage_source" | "source" => ("source", DRIVER_SOURCE),
+        "power_switch" | "power" => ("power", POWER_DRIVER_SOURCE),
+        other if crate::config::valid_cap_name(other) => (other, DECLARED_DRIVER_SOURCE),
+        other => {
+            return Err(DeskError::Usage(format!(
+                "`{other}` can't be a capability name: voltage_source, power_switch, or a name \
+                 of lowercase letters, digits and `_` (e.g. heater)"
+            )));
+        }
     };
+    if (max_voltage.is_some() || max_current.is_some()) && key != "source" {
+        return Err(DeskError::Usage(
+            "--max-voltage/--max-current are for voltage_source; declared capabilities give \
+             ranges per setting (min/max)"
+                .into(),
+        ));
+    }
     let script = match driver {
         Some(d) => d,
         None => {
             let path = dir.join("driver.lua");
-            std::fs::write(&path, template.replace("{name}", id))?;
+            std::fs::write(&path, template.replace("{name}", id).replace("{key}", key))?;
             created.push(path);
             "driver.lua".to_string()
         }
     };
-    let ratings = match capability {
-        CapabilityArg::VoltageSource => {
+    let ratings = match key {
+        "source" => {
             let v = |x: Option<f64>| x.map_or("0.0".to_string(), |x| format!("{x:?}"));
             let todo = if max_voltage.is_none() || max_current.is_none() {
                 "   # TODO: the device's maximums"
@@ -478,7 +524,20 @@ fn scaffold(
                 v(max_current)
             )
         }
-        CapabilityArg::PowerSwitch => String::new(),
+        "power" => String::new(),
+        _ => format!(
+            r#"
+# What the device can do (docs/definition-format.md). At least one declaration; replace this one.
+[{key}.values]
+reading = {{ type = "number", unit = "V", doc = "TODO" }}
+
+# [{key}.settings]
+# setpoint = {{ type = "number", unit = "°C", min = 50, max = 450, doc = "…" }}   # switches = true by default
+
+# [{key}.actions]
+# standby = {{ switches = true, doc = "…" }}
+"#
+        ),
     };
     let version = env!("CARGO_PKG_VERSION");
     let requires = version.rsplit_once('.').map_or(version, |(mm, _)| mm);

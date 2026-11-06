@@ -14,9 +14,12 @@ capability (bench power supplies) with Lua drivers and serial ports, a device li
 specified definition format, agent-ready CLI (`--json`, `schema`, `skill`). One real device is
 supported and smoke-tested (`fnirsi/ips3608`). **M6, AI skills, in progress** (see `plan.md`,
 "M6"): `desk skill list|install`, `desk port probe` and the `desk-add-device` skill are built;
-an end-to-end run on a second real device is still open. **Roadmap step 2, streaming, in
-progress:** a daemon (`desk serve`, started on demand) holds device sessions so
-`desk source watch` streams while other commands keep working (`docs/streaming.md`).
+an end-to-end run on a second real device is still open. Streaming is done: a daemon
+(`desk serve`, started on demand) holds device sessions so `desk watch` streams while other
+commands keep working (`docs/streaming.md`). **M7, open capabilities, in progress** (`plan.md`,
+"M7"): definitions declare values, settings and actions; one command set for every device
+(`desk get|set|do|watch`; `desk source` is gone); channels. Still open: the multimeter's
+connection type, then the real test (roadmap step 4).
 Keep it lean: build only what the current milestone needs.
 
 **Working agreements:**
@@ -33,9 +36,10 @@ Keep it lean: build only what the current milestone needs.
 |---|---|
 | **Device** | Something on *one user's* bench, such as `psu` or `iron`, in their `desk.toml`. It has an id, a name, aliases, capabilities, and the user's own bindings (e.g. their power path) and `limits`. |
 | **Device definition** | What's true for *every unit* of a model ("FNIRSI IPS3608"): driver, USB ids, maximums, docs, tests. Lives in the device library `devices/<vendor>/<model>/`. Never contains anything user-specific (no Home Assistant entities, no bench limits). |
-| **Capability** | A standard, vendor-neutral interface defined by the core: `power_switch` (MVP); later `voltage_source`, `electronic_load`, `meter`, `heater`. |
-| **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which belongs to `voltage_source`. Never mix "power" and "output". |
-| **Capability binding** | One config key per capability: `power` (power_switch), `source` (voltage_source); later `load`, `meter`, … Each is a native provider binding or a Lua script. |
+| **Capability** | A named group of what a device can do, with one driver binding. **Well-known** ones have names and stricter rules fixed by the core: `power` (power_switch, mains) and `source` (voltage_source, bench power supplies). Any other name (`heater`, `meter`, …) is **declared**: the definition lists its values, settings and actions, and the core applies its generic rules. |
+| **Value / setting / action** | What a capability declares: a **value** is reported (`temperature`), a **setting** is reported and changeable (`setpoint`), an **action** is done on request (`standby`). Typed (`number` with a unit, `boolean`, `choice`, `string`), with ranges; `switches` marks a physical effect. |
+| **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which is the `output` setting of `source`. Never mix "power" and "output". |
+| **Capability binding** | One config key per capability: `power`, `source`, or the declared capability's name. Each is a native provider binding or a Lua script. |
 | **Control path** | How a device is commanded (serial, USBTMC, LAN, …). Post-MVP. |
 | **Provider** | A configured connection to something that can switch or control many things, such as Home Assistant, a Shelly, a USB relay board, or an RF dongle. You configure it once. |
 | **Endpoint** | One thing a provider can list and control, such as an HA entity `switch.desk_outlet_1`. Providers can list their endpoints, which is what makes pickers possible. |
@@ -61,6 +65,9 @@ default.
 
 ## Architecture principles
 
+- **One command set for every device.** `desk get|set|do|watch <device>[:<channel>] …` work on
+  any capability; only mains has its own group (`desk power`). Never add commands per kind of
+  device.
 - **CLI first, agent-operable.** Everything the UI will do is a CLI command. Every command supports
   `--json`, with a stable `{ "ok": true, "data": … }` / `{ "ok": false, "error": { "code", "message" } }`
   envelope. Commands return serializable structs, and the human output is just a rendering of them.
@@ -105,7 +112,10 @@ src/
   config.rs            load/validate desk.toml, Device, PowerBinding, device resolution
   model.rs             Capability, Power, PowerState, PowerFeatures
   power.rs             PowerSwitch trait + switch semantics (idempotent, read-back verification)
-  source.rs            VoltageSource trait + semantics (limits, setpoints before output, verify, sessions)
+  source.rs            VoltageSource trait + PSU semantics (limits, setpoints before output, protections)
+  declared.rs          declarations (values/settings/actions), typed values, generic rules, Driver trait
+  units.rs             the unit table: parsing `330c`, `250mA`, `1.5kΩ`; formatting
+  ops.rs               a device's catalog of names, get/set/do ops (resolved + checked), running them
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
   serial.rs            PortSpec matching, `desk port list`, async Port handle (exclusive opens);
                        `desk port probe` (raw hex in/out) lives in cli/port.rs
@@ -114,9 +124,10 @@ src/
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
   daemon/              `desk serve`: local socket (ipc.rs), JSON-lines protocol, CLI forwarding,
                        `watch` streams; session.rs = live device sessions + per-device port lock
+  cli/ops.rs           `desk get`, `desk set`, `desk do` (rendering included)
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
-docs/streaming.md      `desk source watch`, the daemon and its socket protocol (for app authors)
+docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
 docs/definition-format.md  device definition format v1 (spec); schemas/ has its JSON Schema (tested
                        against every definition in tests/library.rs)
 skills/<name>/         SKILL.md per agent skill (desk-operator, desk-add-device), embedded via
@@ -128,6 +139,7 @@ tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
 tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
 tests/daemon.rs        watch + daemon: streaming, commands during a watch, endings, the socket
+tests/declared.rs      declared capabilities: units, ranges, limits, verify, channels, Lua drivers
 tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
 tests/device_*.rs      device definitions against fake devices over ptys (belong to the library)
 tests/library.rs       model = "…", merging, search path, desk library list|show|check

@@ -19,6 +19,12 @@
 //! measurements, no setpoints or output state, like many cheap supplies. `tripping_*` endpoints
 //! trip their over-current protection instead of going into CC: the output switches off and stays
 //! off until it's switched on again (which clears the trip, like many real supplies).
+//!
+//! And any declared capability (`heater = { provider = "sim", endpoint = "iron", settings = …, … }`):
+//! settings are stored (start: `min`, `false`, the first choice, `""`); `fixed = { … }` gives fixed
+//! values; `follow = { temperature = "setpoint" }` makes a value report a setting; a declared value
+//! `last_action` reports the last action and its args, e.g. `"boost seconds=10"`. With channels,
+//! each channel has its own settings. `stuck_*` ignores `set`, `blind_*` reports values only.
 
 use std::collections::BTreeMap;
 
@@ -30,6 +36,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{Endpoint, Params, Provider, ProviderInfo};
+use crate::declared::{Declarations, Driver, Type, Val};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, Power, PowerFeatures, PowerState};
 use crate::power::PowerSwitch;
@@ -47,6 +54,9 @@ struct StateFile {
     power: BTreeMap<String, BTreeMap<String, bool>>,
     #[serde(default)]
     sources: BTreeMap<String, BTreeMap<String, SimPsu>>,
+    /// Declared capabilities: provider → endpoint (`endpoint/channel`) → name → value.
+    #[serde(default)]
+    declared: BTreeMap<String, BTreeMap<String, BTreeMap<String, serde_json::Value>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -244,6 +254,45 @@ impl Provider for MockProvider {
         }))
     }
 
+    fn declared(&self, params: &toml::Table, decls: &Declarations) -> Result<Box<dyn Driver>> {
+        let ctx = format!("binding for provider `{}`", self.inner.id);
+        let p = Params::new(params, ctx.clone());
+        p.only(&["endpoint", "fixed", "follow"])?;
+        let table = |k: &str| -> Result<toml::Table> {
+            match params.get(k) {
+                None => Ok(toml::Table::new()),
+                Some(toml::Value::Table(t)) => Ok(t.clone()),
+                Some(_) => Err(DeskError::ConfigInvalid(format!(
+                    "{ctx}: `{k}` must be a table"
+                ))),
+            }
+        };
+        let fixed = table("fixed")?
+            .into_iter()
+            .map(|(k, v)| {
+                serde_json::to_value(v)
+                    .map(|v| (k, v))
+                    .map_err(|e| DeskError::ConfigInvalid(format!("{ctx}: fixed: {e}")))
+            })
+            .collect::<Result<_>>()?;
+        let follow = table("follow")?
+            .into_iter()
+            .map(|(k, v)| match v {
+                toml::Value::String(s) if decls.settings.contains_key(&s) => Ok((k, s)),
+                _ => Err(DeskError::ConfigInvalid(format!(
+                    "{ctx}: follow.{k} must name a setting"
+                ))),
+            })
+            .collect::<Result<_>>()?;
+        Ok(Box::new(SimDeclared {
+            inner: self.inner.clone(),
+            endpoint: p.required_str("endpoint")?.to_string(),
+            decls: decls.clone(),
+            fixed,
+            follow,
+        }))
+    }
+
     fn power_switch(&self, params: &toml::Table) -> Result<Box<dyn PowerSwitch>> {
         let params = Params::new(
             params,
@@ -369,5 +418,104 @@ impl VoltageSource for SimSource {
             }),
             ..Reading::default()
         })
+    }
+}
+
+struct SimDeclared {
+    inner: Arc<Inner>,
+    endpoint: String,
+    decls: Declarations,
+    fixed: BTreeMap<String, serde_json::Value>,
+    follow: BTreeMap<String, String>,
+}
+
+impl SimDeclared {
+    fn key(&self, channel: Option<&str>) -> String {
+        match channel {
+            Some(ch) => format!("{}/{ch}", self.endpoint),
+            None => self.endpoint.clone(),
+        }
+    }
+
+    fn stored(&self, channel: Option<&str>) -> Result<BTreeMap<String, serde_json::Value>> {
+        let key = self.key(channel);
+        self.inner.view(|s| {
+            s.declared
+                .get(&self.inner.id)
+                .and_then(|m| m.get(&key))
+                .cloned()
+                .unwrap_or_default()
+        })
+    }
+
+    fn store(&self, channel: Option<&str>, name: &str, v: serde_json::Value) -> Result<()> {
+        let key = self.key(channel);
+        self.inner.update(|s| {
+            s.declared
+                .entry(self.inner.id.clone())
+                .or_default()
+                .entry(key)
+                .or_default()
+                .insert(name.to_string(), v);
+        })
+    }
+}
+
+#[async_trait]
+impl Driver for SimDeclared {
+    async fn read(&self, channel: Option<&str>) -> Result<serde_json::Value> {
+        self.inner.simulate(&self.endpoint).await?;
+        let stored = self.stored(channel)?;
+        let mut out = serde_json::Map::new();
+        let blind = self.endpoint.starts_with("blind_");
+        let mut settings = serde_json::Map::new();
+        for (name, d) in &self.decls.settings {
+            let v = stored.get(name).cloned().unwrap_or_else(|| match d.kind {
+                Type::Number => serde_json::json!(d.min.unwrap_or(0.0)),
+                Type::Boolean => serde_json::json!(false),
+                Type::Choice => serde_json::json!(d.choices.first().cloned().unwrap_or_default()),
+                Type::String => serde_json::json!(""),
+            });
+            settings.insert(name.clone(), v);
+        }
+        for name in self.decls.values.keys() {
+            if let Some(v) = self.fixed.get(name) {
+                out.insert(name.clone(), v.clone());
+            } else if let Some(s) = self.follow.get(name) {
+                out.insert(name.clone(), settings[s].clone());
+            } else if let Some(v) = stored.get(name) {
+                out.insert(name.clone(), v.clone());
+            }
+        }
+        if !blind {
+            out.extend(settings);
+        }
+        Ok(serde_json::Value::Object(out))
+    }
+
+    async fn set(&self, channel: Option<&str>, name: &str, value: &Val) -> Result<()> {
+        self.inner.simulate(&self.endpoint).await?;
+        if self.endpoint.starts_with("stuck_") {
+            return Ok(());
+        }
+        self.store(channel, name, crate::declared::to_json(value))
+    }
+
+    async fn action(
+        &self,
+        channel: Option<&str>,
+        name: &str,
+        args: &indexmap::IndexMap<String, Val>,
+    ) -> Result<()> {
+        self.inner.simulate(&self.endpoint).await?;
+        let mut text = name.to_string();
+        for (k, v) in args {
+            text.push_str(&format!(" {k}={}", v.display(None)));
+        }
+        self.store(channel, "last_action", serde_json::Value::String(text))
+    }
+
+    fn label(&self) -> String {
+        format!("sim (endpoint={})", self.endpoint)
     }
 }

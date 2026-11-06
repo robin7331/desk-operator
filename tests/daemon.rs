@@ -1,4 +1,4 @@
-//! End-to-end tests of the daemon (`desk serve`) and `desk source watch` against the simulated
+//! End-to-end tests of the daemon (`desk serve`) and `desk watch` against the simulated
 //! PSU: streaming, commands during a watch, several watchers, endings, the socket protocol.
 
 use std::io::{BufRead, BufReader};
@@ -163,8 +163,14 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 #[test]
 fn watch_streams_readings_while_other_commands_run() {
     let b = Bench::new();
-    assert_eq!(b.run(&["source", "set", "psu", "5v", "1a", "--on"]).code, 0);
-    let w = b.spawn(&["--json", "source", "watch", "psu", "--interval", "50ms"]);
+    assert_eq!(
+        b.run(&[
+            "set", "psu", "voltage", "5v", "current", "1a", "output", "on"
+        ])
+        .code,
+        0
+    );
+    let w = b.spawn(&["--json", "watch", "psu", "--interval", "50ms"]);
     let first = w.line();
     assert_eq!(first["ok"], true, "{first}");
     let data = &first["data"];
@@ -172,21 +178,21 @@ fn watch_streams_readings_while_other_commands_run() {
     assert_eq!(data["dropped"], 0);
     assert!(data["time"].as_str().unwrap().ends_with('Z'), "{data}");
     assert!(data["elapsed"].as_f64().unwrap() < 1.0);
-    assert_eq!(data["reading"]["voltage_set"], 5.0);
-    assert_eq!(data["reading"]["mode"], "cv");
+    assert_eq!(data["values"]["voltage"], 5.0);
+    assert_eq!(data["values"]["mode"], "cv");
 
     // The daemon holds the session; commands go through it.
-    let set = b.run(&["--json", "source", "set", "psu", "3v"]);
+    let set = b.run(&["--json", "set", "psu", "voltage", "3v"]);
     assert_eq!(set.code, 0, "{}", set.stdout);
     assert_eq!(set.json()["data"]["verified"]["voltage"], true);
     // Limits still apply to commands that go through the daemon.
-    let refused = b.run(&["--json", "source", "set", "psu", "20v"]);
+    let refused = b.run(&["--json", "set", "psu", "voltage", "20v"]);
     assert_eq!(refused.code, 8);
     assert_eq!(refused.json()["error"]["code"], "limit_exceeded");
 
     let mut saw = false;
     for _ in 0..40 {
-        if w.line()["data"]["reading"]["voltage_set"] == 3.0 {
+        if w.line()["data"]["values"]["voltage"] == 3.0 {
             saw = true;
             break;
         }
@@ -203,7 +209,6 @@ fn count_ends_the_watch_and_human_output_is_a_table() {
     let b = Bench::new();
     let out = b.run(&[
         "--json",
-        "source",
         "watch",
         "psu",
         "--interval",
@@ -216,15 +221,7 @@ fn count_ends_the_watch_and_human_output_is_a_table() {
     assert_eq!(lines.len(), 5);
     assert!(lines.iter().all(|l| l["ok"] == true));
 
-    let out = b.run(&[
-        "source",
-        "watch",
-        "psu",
-        "--interval",
-        "20ms",
-        "--count",
-        "2",
-    ]);
+    let out = b.run(&["watch", "psu", "--interval", "20ms", "--count", "2"]);
     assert_eq!(out.code, 0);
     let rows: Vec<&str> = out.stdout.lines().collect();
     assert_eq!(rows.len(), 3, "{}", out.stdout);
@@ -241,7 +238,6 @@ fn watchers_share_one_session_each_at_its_own_interval() {
     let b = Bench::new();
     let fast = b.spawn(&[
         "--json",
-        "source",
         "watch",
         "psu",
         "--interval",
@@ -252,7 +248,6 @@ fn watchers_share_one_session_each_at_its_own_interval() {
     fast.line();
     let slow = b.run(&[
         "--json",
-        "source",
         "watch",
         "psu",
         "--interval",
@@ -274,7 +269,7 @@ fn watchers_share_one_session_each_at_its_own_interval() {
 #[test]
 fn mains_off_ends_the_watch_with_device_off() {
     let b = Bench::new();
-    let w = b.spawn(&["--json", "source", "watch", "psu", "--interval", "50ms"]);
+    let w = b.spawn(&["--json", "watch", "psu", "--interval", "50ms"]);
     w.line();
     assert_eq!(b.run(&["power", "off", "psu"]).code, 0);
     let (code, lines) = w.finish();
@@ -288,14 +283,10 @@ fn mains_off_ends_the_watch_with_device_off() {
 fn watch_refuses_bad_requests_with_one_json_line() {
     let b = Bench::new();
     for (args, code, err) in [
-        (vec!["source", "watch", "nope"], 2, "device_not_found"),
-        (vec!["source", "watch", "lamp"], 3, "capability_missing"),
-        (
-            vec!["source", "watch", "psu", "--interval", "fast"],
-            2,
-            "usage",
-        ),
-        (vec!["source", "watch", "psu", "--count", "0"], 2, "usage"),
+        (vec!["watch", "nope"], 2, "device_not_found"),
+        (vec!["watch", "lamp"], 3, "capability_missing"),
+        (vec!["watch", "psu", "--interval", "fast"], 2, "usage"),
+        (vec!["watch", "psu", "--count", "0"], 2, "usage"),
     ] {
         let mut a = vec!["--json"];
         a.extend(&args);
@@ -307,7 +298,7 @@ fn watch_refuses_bad_requests_with_one_json_line() {
     }
     // Device off before watching.
     assert_eq!(b.run(&["power", "off", "psu"]).code, 0);
-    let out = b.run(&["--json", "source", "watch", "psu", "--count", "1"]);
+    let out = b.run(&["--json", "watch", "psu", "--count", "1"]);
     assert_eq!(out.code, 4);
     assert_eq!(out.lines()[0]["error"]["code"], "device_off");
 }
@@ -315,7 +306,7 @@ fn watch_refuses_bad_requests_with_one_json_line() {
 #[test]
 fn without_a_daemon_commands_run_in_process() {
     let b = Bench::new();
-    let out = b.run(&["--json", "source", "read", "psu"]);
+    let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert!(b.socket().is_none(), "a plain command started a daemon");
     assert!(!b.runtime().exists());
@@ -324,7 +315,7 @@ fn without_a_daemon_commands_run_in_process() {
 #[test]
 fn the_daemon_exits_when_idle_and_is_private() {
     let b = Bench::new();
-    let w = b.spawn(&["--json", "source", "watch", "psu", "--interval", "50ms"]);
+    let w = b.spawn(&["--json", "watch", "psu", "--interval", "50ms"]);
     w.line();
     let socket = b.socket().expect("a socket while watching");
     #[cfg(unix)]
@@ -337,7 +328,7 @@ fn the_daemon_exits_when_idle_and_is_private() {
     drop(w); // the watcher leaves (killed)
     wait_until("the daemon to exit", || !socket.exists());
     // The next command runs in-process again.
-    assert_eq!(b.run(&["source", "read", "psu"]).code, 0);
+    assert_eq!(b.run(&["get", "psu"]).code, 0);
 }
 
 #[cfg(unix)]
@@ -346,7 +337,7 @@ fn a_stopped_daemon_ends_the_watch_clearly() {
     let b = Bench::new();
     let serve = b.spawn(&["serve", "--idle", "never"]);
     wait_until("the socket", || b.socket().is_some());
-    let w = b.spawn(&["--json", "source", "watch", "psu", "--interval", "50ms"]);
+    let w = b.spawn(&["--json", "watch", "psu", "--interval", "50ms"]);
     w.line();
     let pid = serve.child.id().to_string();
     assert!(
@@ -365,7 +356,7 @@ fn a_stopped_daemon_ends_the_watch_clearly() {
     // Killed hard: the watcher notices the connection is gone.
     let serve = b.spawn(&["serve", "--idle", "never"]);
     wait_until("the socket", || b.socket().is_some());
-    let w = b.spawn(&["--json", "source", "watch", "psu", "--interval", "50ms"]);
+    let w = b.spawn(&["--json", "watch", "psu", "--interval", "50ms"]);
     w.line();
     let pid = serve.child.id().to_string();
     assert!(
@@ -397,12 +388,12 @@ fn programs_can_talk_to_the_socket_directly() {
         serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
     };
     // Several requests on one connection, same envelope as --json plus `human` and `exit`.
-    let r = ask(r#"{"args": ["source", "set", "psu", "4v", "--on"]}"#);
+    let r = ask(r#"{"args": ["set", "psu", "voltage", "4v", "output", "on"]}"#);
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!(r["exit"], 0);
-    assert_eq!(r["data"]["reading"]["voltage_set"], 4.0);
+    assert_eq!(r["data"]["values"]["voltage"], 4.0);
     assert!(r["human"].as_str().unwrap().contains("confirmed"));
-    let r = ask(r#"{"args": ["source", "read", "nope"]}"#);
+    let r = ask(r#"{"args": ["get", "nope"]}"#);
     assert_eq!(r["error"]["code"], "device_not_found");
     assert_eq!(r["exit"], 2);
     let r = ask(r#"{"args": ["schema"]}"#);
@@ -411,8 +402,8 @@ fn programs_can_talk_to_the_socket_directly() {
     assert_eq!(r["error"]["code"], "usage");
 
     // A watch turns the connection into a stream.
-    let r = ask(r#"{"args": ["source", "watch", "psu", "--interval", "20ms", "--count", "2"]}"#);
-    assert_eq!(r["data"]["reading"]["output"], true, "{r}");
+    let r = ask(r#"{"args": ["watch", "psu", "--interval", "20ms", "--count", "2"]}"#);
+    assert_eq!(r["data"]["values"]["output"], true, "{r}");
     let r: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(r["ok"], true);
     assert!(lines.next().is_none(), "the stream ends after --count");
@@ -421,7 +412,7 @@ fn programs_can_talk_to_the_socket_directly() {
 #[test]
 fn a_device_that_keeps_failing_ends_the_watch_after_three_tries() {
     let b = Bench::new();
-    let out = b.run(&["--json", "source", "watch", "broken", "--interval", "20ms"]);
+    let out = b.run(&["--json", "watch", "broken", "--interval", "20ms"]);
     assert_eq!(out.code, 4, "{}", out.stdout);
     let lines = out.lines();
     assert_eq!(lines.len(), 1, "{}", out.stdout);

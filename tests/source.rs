@@ -109,7 +109,9 @@ fn close(v: &Value, want: f64) -> bool {
 #[test]
 fn set_and_switch_on_with_verification() {
     let b = Bench::new();
-    let out = b.run(&["--json", "source", "set", "psu", "5v", "1a", "--on"]);
+    let out = b.run(&[
+        "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+    ]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     let d = out.data();
     assert_eq!(d["device"], "psu");
@@ -119,32 +121,39 @@ fn set_and_switch_on_with_verification() {
     assert_eq!(d["verified"]["voltage"], true);
     assert_eq!(d["verified"]["current"], true);
     assert_eq!(d["verified"]["output"], true);
-    assert_eq!(d["reading"]["output"], true);
-    assert!(close(&d["reading"]["voltage"], 5.0));
-    assert!(close(&d["reading"]["current"], 0.5), "5 V into 10 Ω");
-    assert!(close(&d["info"]["max_voltage"], 30.0));
+    assert_eq!(d["values"]["output"], true);
+    assert!(close(&d["values"]["measured_voltage"], 5.0));
+    assert!(
+        close(&d["values"]["measured_current"], 0.5),
+        "5 V into 10 Ω"
+    );
 
-    let d = b.run(&["--json", "source", "read", "supply"]).data();
-    assert!(close(&d["reading"]["voltage_set"], 5.0));
+    let d = b.run(&["--json", "get", "supply"]).data();
+    assert!(close(&d["values"]["voltage"], 5.0));
     assert_eq!(d["applied"], false, "a read sends nothing");
-    assert!(d["requested"].as_object().unwrap().is_empty());
+    assert!(d["requested"].is_null(), "nothing requested");
 }
 
 #[test]
 fn constant_current_when_the_load_wants_more() {
     let b = Bench::new();
-    b.run(&["source", "set", "psu", "12v", "500ma", "--on"]);
-    let d = b.run(&["--json", "source", "read", "psu"]).data();
-    assert!(close(&d["reading"]["current"], 0.5));
-    assert!(close(&d["reading"]["voltage"], 5.0), "CC: 0.5 A × 10 Ω");
+    b.run(&[
+        "set", "psu", "voltage", "12v", "current", "500ma", "output", "on",
+    ]);
+    let d = b.run(&["--json", "get", "psu"]).data();
+    assert!(close(&d["values"]["measured_current"], 0.5));
+    assert!(
+        close(&d["values"]["measured_voltage"], 5.0),
+        "CC: 0.5 A × 10 Ω"
+    );
 }
 
 #[test]
 fn limits_refuse_before_anything_is_sent() {
     let b = Bench::new();
-    b.run(&["source", "set", "psu", "5v", "1a"]);
+    b.run(&["set", "psu", "voltage", "5v", "current", "1a"]);
 
-    let out = b.run(&["--json", "source", "set", "psu", "16v"]);
+    let out = b.run(&["--json", "set", "psu", "voltage", "16v"]);
     assert_eq!(out.code, 8);
     assert_eq!(out.code_str(), "limit_exceeded");
     assert!(
@@ -154,7 +163,7 @@ fn limits_refuse_before_anything_is_sent() {
             .contains("bench limit")
     );
 
-    let out = b.run(&["--json", "source", "set", "psu_unlimited", "31v"]);
+    let out = b.run(&["--json", "set", "psu_unlimited", "voltage", "31v"]);
     assert_eq!(out.code, 8);
     assert!(
         out.json()["error"]["message"]
@@ -163,22 +172,22 @@ fn limits_refuse_before_anything_is_sent() {
             .contains("device maximum")
     );
 
-    let out = b.run(&["--json", "source", "set", "psu", "3a", "--on"]);
+    let out = b.run(&["--json", "set", "psu", "current", "3a", "output", "on"]);
     assert_eq!(out.code, 8);
 
-    let d = b.run(&["--json", "source", "read", "psu"]).data();
-    assert!(close(&d["reading"]["voltage_set"], 5.0), "unchanged");
-    assert_eq!(d["reading"]["output"], false, "output never switched on");
+    let d = b.run(&["--json", "get", "psu"]).data();
+    assert!(close(&d["values"]["voltage"], 5.0), "unchanged");
+    assert_eq!(d["values"]["output"], false, "output never switched on");
 }
 
 #[test]
 fn output_on_refuses_existing_setpoints_above_the_limit() {
     let b = Bench::new();
     // Someone else left the instrument at 24 V.
-    let out = b.run(&["--json", "source", "set", "psu_unlimited", "24v"]);
+    let out = b.run(&["--json", "set", "psu_unlimited", "voltage", "24v"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
 
-    let out = b.run(&["--json", "source", "output", "on", "psu"]);
+    let out = b.run(&["--json", "set", "psu", "output", "on"]);
     assert_eq!(out.code, 8, "{}", out.stdout);
     assert!(
         out.json()["error"]["message"]
@@ -186,18 +195,18 @@ fn output_on_refuses_existing_setpoints_above_the_limit() {
             .unwrap()
             .contains("24.00 V")
     );
-    let d = b.run(&["--json", "source", "read", "psu"]).data();
-    assert_eq!(d["reading"]["output"], false);
+    let d = b.run(&["--json", "get", "psu"]).data();
+    assert_eq!(d["values"]["output"], false);
 
     // Setting a safe voltage in the same command is fine.
-    let out = b.run(&["--json", "source", "set", "psu", "12v", "--on"]);
+    let out = b.run(&["--json", "set", "psu", "voltage", "12v", "output", "on"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
 }
 
 #[test]
 fn devices_that_cant_report_setpoints_are_unverified() {
     let b = Bench::new();
-    let out = b.run(&["--json", "source", "set", "cheap", "5v", "--on"]);
+    let out = b.run(&["--json", "set", "cheap", "voltage", "5v", "output", "on"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     let d = out.data();
     assert!(
@@ -206,9 +215,9 @@ fn devices_that_cant_report_setpoints_are_unverified() {
         d["verified"]
     );
     assert!(d["verified"].get("output").is_none());
-    assert!(d["reading"]["voltage_set"].is_null());
+    assert!(d["values"]["voltage"].is_null());
     assert!(
-        close(&d["reading"]["voltage"], 5.0),
+        close(&d["values"]["measured_voltage"], 5.0),
         "measurements still work"
     );
     let warning = d["warnings"][0].as_str().unwrap();
@@ -217,7 +226,7 @@ fn devices_that_cant_report_setpoints_are_unverified() {
         "{warning}"
     );
 
-    let out = b.run(&["source", "set", "cheap", "5v"]);
+    let out = b.run(&["set", "cheap", "voltage", "5v"]);
     assert!(
         out.stdout.contains("voltage NOT confirmed"),
         "{}",
@@ -229,7 +238,7 @@ fn devices_that_cant_report_setpoints_are_unverified() {
 fn mains_off_fails_fast_but_unknown_mains_does_not_block() {
     let b = Bench::new();
     b.run(&["power", "off", "psu"]);
-    let out = b.run(&["--json", "source", "read", "psu"]);
+    let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 4);
     assert_eq!(out.code_str(), "device_off");
     assert!(
@@ -239,22 +248,31 @@ fn mains_off_fails_fast_but_unknown_mains_does_not_block() {
             .contains("desk power on")
     );
 
-    let out = b.run(&["--json", "source", "read", "unknown_mains"]);
+    let out = b.run(&["--json", "get", "unknown_mains"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
 }
 
 #[test]
 fn dry_run_sends_nothing() {
     let b = Bench::new();
-    let out = b.run(&["--json", "source", "set", "psu", "9v", "--on", "--dry-run"]);
+    let out = b.run(&[
+        "--json",
+        "set",
+        "psu",
+        "voltage",
+        "9v",
+        "output",
+        "on",
+        "--dry-run",
+    ]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert_eq!(out.data()["applied"], false);
-    let d = b.run(&["--json", "source", "read", "psu"]).data();
-    assert_eq!(d["reading"]["output"], false);
-    assert!(close(&d["reading"]["voltage_set"], 0.0));
+    let d = b.run(&["--json", "get", "psu"]).data();
+    assert_eq!(d["values"]["output"], false);
+    assert!(close(&d["values"]["voltage"], 0.0));
 
     // Limits are still checked in a dry run.
-    let out = b.run(&["--json", "source", "set", "psu", "20v", "--dry-run"]);
+    let out = b.run(&["--json", "set", "psu", "voltage", "20v", "--dry-run"]);
     assert_eq!(out.code, 8);
 }
 
@@ -262,29 +280,21 @@ fn dry_run_sends_nothing() {
 fn usage_and_config_errors() {
     let b = Bench::new();
     for (args, code, err) in [
-        (&["--json", "source", "set", "psu", "5"][..], 2, "usage"),
+        (&["--json", "set", "psu", "voltage", "5"][..], 2, "usage"),
         (
-            &["--json", "source", "set", "psu", "5v", "6v"][..],
+            &["--json", "set", "psu", "voltage", "5v", "voltage", "6v"][..],
             2,
             "usage",
         ),
-        (&["--json", "source", "set", "psu", "-1v"][..], 2, "usage"),
+        (&["--json", "set", "psu", "voltage", "-1v"][..], 2, "usage"),
         (
-            &["--json", "source", "read", "lamp"][..],
+            &["--json", "set", "lamp", "voltage", "5v"][..],
             3,
             "capability_missing",
         ),
-        (
-            &["--json", "source", "read", "nope"][..],
-            2,
-            "device_not_found",
-        ),
-        (
-            &["--json", "source", "read", "broken"][..],
-            4,
-            "endpoint_unavailable",
-        ),
-        (&["--json", "source", "read", "laggy"][..], 6, "timeout"),
+        (&["--json", "get", "nope"][..], 2, "device_not_found"),
+        (&["--json", "get", "broken"][..], 4, "endpoint_unavailable"),
+        (&["--json", "get", "laggy"][..], 6, "timeout"),
     ] {
         let out = b.run(args);
         assert_eq!(out.code, code, "{args:?}: {}", out.stdout);
@@ -301,15 +311,34 @@ kind = "home-assistant"
 url = "http://127.0.0.1:9"
 token_file = "t"
 [devices.a]
+source = { provider = "ha", entity = "switch.x" }
 limits = { source = { voltage = -1 } }
-[devices.b]
-source = { provider = "nope", endpoint = "x" }
 "#,
     );
     let out = b.run(&["--json", "device", "list"]);
     assert_eq!(out.code, 3);
     let msg = out.json()["error"]["message"].as_str().unwrap().to_string();
-    assert!(msg.contains("limits.source.voltage must be >= 0"), "{msg}");
+    assert!(msg.contains("`source.voltage` must be >= 0"), "{msg}");
+
+    let b = Bench::with(
+        r#"
+[devices.b]
+source = { provider = "nope", endpoint = "x" }
+[devices.c]
+limits = { source = { voltage = 5 } }
+"#,
+    );
+    let out = b.run(&["--json", "device", "list"]);
+    let msg = out.json()["error"]["message"].as_str().unwrap().to_string();
+    assert!(msg.contains("unknown capability `source`"), "{msg}");
+    let b = Bench::with(
+        r#"
+[devices.b]
+source = { provider = "nope", endpoint = "x" }
+"#,
+    );
+    let out = b.run(&["--json", "device", "list"]);
+    let msg = out.json()["error"]["message"].as_str().unwrap().to_string();
     assert!(msg.contains("source provider `nope`"), "{msg}");
 
     let b = Bench::with(
@@ -323,7 +352,7 @@ source = { provider = "ha", entity = "switch.x" }
 "#,
     );
     std::fs::write(b.dir.path().join("t"), "token").unwrap();
-    let out = b.run(&["--json", "source", "read", "a"]);
+    let out = b.run(&["--json", "get", "a"]);
     assert_eq!(out.code, 3);
     assert!(
         out.json()["error"]["message"]
@@ -359,9 +388,14 @@ fn schema_and_device_views_show_the_capability() {
         .iter()
         .map(|c| c["command"].as_str().unwrap())
         .collect();
-    for c in ["desk source set", "desk source output", "desk source read"] {
+    for c in ["desk get", "desk set", "desk do", "desk watch"] {
         assert!(commands.contains(&c), "{c}");
     }
+    assert!(!commands.iter().any(|c| c.starts_with("desk source")));
+    assert!(close(&psu["settings"]["voltage"]["limit"], 15.0));
+    assert_eq!(psu["settings"]["voltage"]["unit"], "V");
+    assert_eq!(psu["settings"]["output"]["switches"], true);
+    assert_eq!(psu["values"]["measured_power"]["unit"], "W");
     let out = b.run(&["device", "show", "psu"]);
     assert!(
         out.stdout
@@ -389,37 +423,41 @@ fn old_style_limits_explain_the_new_form() {
 #[test]
 fn mode_follows_the_load() {
     let b = Bench::new();
-    let out = b.run(&["--json", "source", "set", "psu", "5v", "1a", "--on"]);
+    let out = b.run(&[
+        "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+    ]);
     assert_eq!(
-        out.data()["reading"]["mode"],
+        out.data()["values"]["mode"],
         "cv",
         "0.5 A into 10 Ω is below 1 A"
     );
-    assert_eq!(out.data()["reading"]["protection"], "none");
-    let out = b.run(&["--json", "source", "set", "psu", "200ma"]);
+    assert_eq!(out.data()["values"]["protection"], "none");
+    let out = b.run(&["--json", "set", "psu", "current", "200ma"]);
     assert_eq!(
-        out.data()["reading"]["mode"],
+        out.data()["values"]["mode"],
         "cc",
         "the current limit is reached"
     );
-    assert!(close(&out.data()["reading"]["voltage"], 2.0));
-    let out = b.run(&["source", "read", "psu"]);
+    assert!(close(&out.data()["values"]["measured_voltage"], 2.0));
+    let out = b.run(&["get", "psu"]);
     assert!(
-        out.stdout.contains("CC (current limit reached)"),
+        out.stdout.contains("mode              cc"),
         "{}",
         out.stdout
     );
-    let out = b.run(&["--json", "source", "output", "off", "psu"]);
-    assert!(out.data()["reading"]["mode"].is_null(), "no mode while off");
+    let out = b.run(&["--json", "set", "psu", "output", "off"]);
+    assert!(out.data()["values"]["mode"].is_null(), "no mode while off");
     // Fields a device doesn't report stay null.
-    assert!(out.data()["reading"]["temperature"].is_null());
+    assert!(out.data()["values"]["temperature"].is_null());
 }
 
 #[test]
 fn a_tripped_protection_blocks_output_on_until_cleared() {
     let b = Bench::new();
     // 5 V into 10 Ω wants 0.5 A, above the 0.2 A setpoint: the supply trips at switch-on.
-    let out = b.run(&["--json", "source", "set", "fragile", "5v", "200ma", "--on"]);
+    let out = b.run(&[
+        "--json", "set", "fragile", "voltage", "5v", "current", "200ma", "output", "on",
+    ]);
     assert_eq!(out.code, 4, "{}", out.stdout);
     assert_eq!(out.code_str(), "protection_tripped");
     assert!(
@@ -436,18 +474,18 @@ fn a_tripped_protection_blocks_output_on_until_cleared() {
     );
 
     // Reading says so, as a warning.
-    let out = b.run(&["--json", "source", "read", "fragile"]);
+    let out = b.run(&["--json", "get", "fragile"]);
     assert_eq!(out.code, 0);
-    assert_eq!(out.data()["reading"]["protection"], "ocp");
-    assert_eq!(out.data()["reading"]["output"], false);
+    assert_eq!(out.data()["values"]["protection"], "ocp");
+    assert_eq!(out.data()["values"]["output"], false);
     let warnings = out.data()["warnings"].to_string();
     assert!(warnings.contains("--clear-protection"), "{warnings}");
 
     // Switching on is refused (also as a dry run), and nothing is sent.
     for args in [
-        &["--json", "source", "output", "on", "fragile"][..],
-        &["--json", "source", "output", "on", "fragile", "--dry-run"][..],
-        &["--json", "source", "set", "fragile", "1v", "--on"][..],
+        &["--json", "set", "fragile", "output", "on"][..],
+        &["--json", "set", "fragile", "output", "on", "--dry-run"][..],
+        &["--json", "set", "fragile", "voltage", "1v", "output", "on"][..],
     ] {
         let out = b.run(args);
         assert_eq!(
@@ -457,32 +495,33 @@ fn a_tripped_protection_blocks_output_on_until_cleared() {
             out.stdout
         );
     }
-    let out = b.run(&["--json", "source", "read", "fragile"]);
+    let out = b.run(&["--json", "get", "fragile"]);
     assert!(
-        close(&out.data()["reading"]["voltage_set"], 5.0),
+        close(&out.data()["values"]["voltage"], 5.0),
         "the refused set sent nothing"
     );
 
     // Setpoints alone are fine, and switching off is always allowed.
-    assert_eq!(b.run(&["--json", "source", "set", "fragile", "1v"]).code, 0);
     assert_eq!(
-        b.run(&["--json", "source", "output", "off", "fragile"])
-            .code,
+        b.run(&["--json", "set", "fragile", "voltage", "1v"]).code,
+        0
+    );
+    assert_eq!(
+        b.run(&["--json", "set", "fragile", "output", "off"]).code,
         0
     );
 
     // With the cause fixed (1 V into 10 Ω = 0.1 A), --clear-protection switches on.
     let out = b.run(&[
         "--json",
-        "source",
+        "set",
+        "fragile",
         "output",
         "on",
-        "fragile",
         "--clear-protection",
     ]);
     assert_eq!(out.code, 0, "{}", out.stdout);
-    assert_eq!(out.data()["requested"]["clear_protection"], true);
-    assert_eq!(out.data()["reading"]["protection"], "none");
+    assert_eq!(out.data()["values"]["protection"], "none");
     assert_eq!(out.data()["verified"]["output"], true);
     assert!(out.data()["warnings"].to_string().contains("was tripped"));
 }
@@ -492,17 +531,24 @@ fn clear_protection_needs_switching_on() {
     let b = Bench::new();
     let out = b.run(&[
         "--json",
-        "source",
+        "set",
+        "psu",
         "output",
         "off",
-        "psu",
         "--clear-protection",
     ]);
     assert_eq!(out.code_str(), "usage");
-    let out = b.run(&["--json", "source", "set", "psu", "5v", "--clear-protection"]);
+    let out = b.run(&[
+        "--json",
+        "set",
+        "psu",
+        "voltage",
+        "5v",
+        "--clear-protection",
+    ]);
     assert_eq!(
         out.code, 2,
-        "--clear-protection requires --on: {}",
+        "--clear-protection needs output on: {}",
         out.stdout
     );
 }

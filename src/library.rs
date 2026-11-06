@@ -22,7 +22,7 @@ mod bundled {
 /// Paths of bundled files look like `bundled:acme/shared/x.lua`.
 pub const BUNDLED_PREFIX: &str = "bundled:";
 
-/// Capability binding keys a definition (and a device) may contain.
+/// The well-known capability keys; any other key is a declared capability.
 pub const BINDING_KEYS: &[&str] = &["power", "source"];
 
 #[derive(Debug, Clone, Serialize)]
@@ -353,15 +353,24 @@ fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Resu
 
     let mut bindings = IndexMap::new();
     for (key, value) in table {
-        if !BINDING_KEYS.contains(&key.as_str()) {
+        if !crate::config::valid_cap_name(&key) {
             return Err(bad(format!(
-                "unknown section `{key}` (allowed: device, {})",
-                BINDING_KEYS.join(", ")
+                "`{key}` can't be a capability name (lowercase letters, digits, `_`; not `mains`)"
             )));
         }
         let toml::Value::Table(mut binding) = value else {
             return Err(bad(format!("`{key}` must be a table")));
         };
+        // Declarations are checked here too, so `library check` reports them.
+        let mut rest = binding.clone();
+        let decls = crate::declared::Declarations::take(&mut rest)
+            .map_err(|e| bad(format!("`{key}`: {e}")))?;
+        if !BINDING_KEYS.contains(&key.as_str()) && decls.is_empty() {
+            return Err(bad(format!(
+                "`{key}` declares no `values`, `settings` or `actions` (a capability other than \
+                 power or source must; is `{key}` a typo?)"
+            )));
+        }
         if binding.contains_key("provider") {
             return Err(bad(format!(
                 "`{key}` uses a provider; definitions may only use scripts (providers such as \

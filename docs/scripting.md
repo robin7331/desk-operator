@@ -52,6 +52,7 @@ function state(ctx) ... end -- optional
 | `ctx.sleep(ms)` / `ctx.sleep("1.5s")` | Wait without blocking other devices |
 | `ctx.clock()` | Monotonic milliseconds (float), for deadlines and "measured after my command?" checks |
 | `ctx.log(...)` | Log a line (arguments are joined with spaces). Shown on stderr as `device: line` and returned in `--json` output as `log` |
+| `ctx.channel` | The channel of this call (`"1"`, `"ch2"`, …) when the capability declares `channels`; `nil` otherwise |
 
 A power handle `p` (both `p:on()` and `p.on()` work):
 
@@ -97,9 +98,47 @@ Ports are opened **exclusively**: while one command uses a port, nothing else ca
 `endpoint_unavailable` says "port is busy". Binary protocols are easy with Lua 5.4's
 `string.pack`/`string.unpack` (`"<f"` = little-endian float32, `"B"` = byte, `">H"` = big-endian u16).
 
-## Instrument drivers (`source = { script = … }`)
+## Drivers of declared capabilities
 
-A script can also be the driver of a capability. For a bench power supply (`voltage_source`):
+Any capability other than `power` and `source` is declared: the binding (or the device definition)
+lists its `values`, `settings` and `actions` (format: [`definition-format.md`](definition-format.md)),
+and the driver implements what they need:
+
+```toml
+[devices.iron.heater]
+script   = "drivers/iron.lua"
+port     = { path = "/dev/ttyUSB0" }
+values   = { temperature = { type = "number", unit = "°C" } }
+settings = { setpoint = { type = "number", unit = "°C", min = 50, max = 450 } }
+actions  = { standby = { switches = true } }
+```
+
+```lua
+function read(ctx)                   -- required if anything is readable: every value and setting
+  return { temperature = 312.5, setpoint = 330 }
+end
+function set(ctx, name, value) end   -- required if there are settings
+function action(ctx, name, args) end -- required if there are actions; args = { seconds = 10, … }
+function open(ctx) end               -- optional: start of a session (connect, handshake)
+function close(ctx) end              -- optional: end of a session (always called)
+```
+
+- `read()` returns **everything at once** (one round trip; `watch` calls it in a loop), numbers in
+  the declared unit, choices as one of their strings. Names that aren't declared, wrong types, a
+  choice outside its list are `script_failed`. Leave out what the device doesn't report.
+- A value declared with `units = [...]` is returned as `{ value = 4.98, unit = "V" }`.
+- `set` and `action` get values that desk already parsed (units), converted (to the declared
+  unit) and checked (range, bench limits). Several settings of one command arrive one by one, in
+  declaration order; desk calls `read()` afterwards to verify them.
+- With `channels`, every call sees `ctx.channel`.
+
+Everything else is desk's, the same for every driver: units, ranges and limits before anything is
+sent, the order of settings, verification (`verified`, or "not confirmed" for settings `read()`
+doesn't return), dry runs, sessions with timeouts (default `10s`), streaming.
+
+## Power supply drivers (`source = { script = … }`)
+
+For a bench power supply (`voltage_source`, a well-known capability with fixed names):
 
 ```toml
 [devices.psu]
@@ -119,13 +158,14 @@ function open(ctx) ... end                 -- optional: start of a session (conn
 function close(ctx) ... end                -- optional: end of a session
 ```
 
-`read()` fields, all optional (leave out what the device doesn't report):
+`read()` fields, all optional (leave out what the device doesn't report). Users see them under the
+generic names in parentheses (`desk get psu`):
 
 | Field | Meaning |
 |---|---|
-| `output` | output terminals on (`true`) or off |
-| `voltage_set`, `current_set` | setpoints, V and A |
-| `voltage`, `current`, `power` | measured at the output, V, A, W |
+| `output` | output terminals on (`true`) or off (`output`) |
+| `voltage_set`, `current_set` | setpoints, V and A (`voltage`, `current`) |
+| `voltage`, `current`, `power` | measured at the output, V, A, W (`measured_voltage`, `measured_current`, `measured_power`) |
 | `mode` | `"cv"` (holding the voltage) or `"cc"` (current limit reached); ignored while the output is off |
 | `protection` | `"none"`, or what tripped: `"ovp"`, `"ocp"`, `"opp"`, `"otp"`, `"uvp"` (input under-voltage), `"other"` |
 | `temperature` | internal temperature, °C |
@@ -157,7 +197,11 @@ every driver:
 - **Limits:** values above `info()`'s maximum or the device's bench `limits` are refused before
   the driver is called. Switching the output on is also refused when the device *already* holds a
   setpoint above the bench limits (as far as `read()` reports it).
-- **Order:** voltage, then current, then output.
+- **Order:** voltage, then current, then output (`desk set psu output on voltage 5v` is applied
+  in that order too).
+- **Channels:** with `channels = 2` on the binding, every call sees `ctx.channel`; users address
+  `psu:1`, and `limits` can be per channel (`limits = { source = { voltage = 12, "2" = { voltage
+  = 5 } } }`).
 - **Protections:** while `read()` reports a tripped `protection`, switching the output on is
   refused (`protection_tripped`) unless the user passes `--clear-protection`. If a protection trips
   right after switching on, that's reported as `protection_tripped` too.

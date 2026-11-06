@@ -1,14 +1,14 @@
 //! The daemon (`desk serve`): a background process that owns device sessions, so programs can
 //! watch a device while `desk` and others keep controlling it.
 //!
-//! It starts on demand (the first `desk source watch`) and exits when nothing has used it for
-//! `--idle`. While it runs, `desk power …` and `desk source …` go through it; otherwise they run
-//! in-process as before. One daemon per config file and desk build.
+//! It starts on demand (the first `desk watch`) and exits when nothing has used it for `--idle`.
+//! While it runs, `desk power|get|set|do …` go through it; otherwise they run in-process. One
+//! daemon per config file and desk build.
 //!
 //! Protocol (JSON lines over the local socket, see `docs/streaming.md`): a request is
 //! `{"args": [...]}` with the same arguments as the CLI; the reply is the `--json` envelope plus
-//! `human` and `exit`. A `source watch` request turns the connection into a stream: one envelope
-//! per reading, and an `ok: false` envelope if the session ends with an error.
+//! `human` and `exit`. A `watch` request turns the connection into a stream: one envelope per
+//! reading, and an `ok: false` envelope if the session ends with an error.
 
 mod ipc;
 pub mod session;
@@ -24,8 +24,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::bench::Bench;
-use crate::cli::{self, Cli, Command, SourceCmd};
+use crate::cli::{self, Cli, Command};
 use crate::error::{DeskError, ErrorJson, Result};
+use crate::ops::{self, DeviceReadings};
 use crate::output::Report;
 use session::{Event, Sessions};
 
@@ -267,8 +268,10 @@ struct Request {
 enum Parsed {
     Watch {
         device: String,
+        names: Vec<String>,
         interval: Duration,
         count: Option<u64>,
+        changes: bool,
     },
     Command(Command),
 }
@@ -276,7 +279,7 @@ enum Parsed {
 fn parse(line: &str) -> Result<Parsed> {
     let req: Request = serde_json::from_str(line).map_err(|e| {
         DeskError::Usage(format!(
-            "a request is one JSON line like {{\"args\": [\"source\", \"read\", \"psu\"]}}: {e}"
+            "a request is one JSON line like {{\"args\": [\"get\", \"psu\"]}}: {e}"
         ))
     })?;
     let cli =
@@ -285,21 +288,22 @@ fn parse(line: &str) -> Result<Parsed> {
             DeskError::Usage(msg.trim().trim_start_matches("error: ").to_string())
         })?;
     match cli.command {
-        Command::Source {
-            action:
-                SourceCmd::Watch {
-                    device,
-                    interval,
-                    count,
-                },
+        Command::Watch {
+            device,
+            names,
+            interval,
+            count,
+            changes,
         } => Ok(Parsed::Watch {
             device,
+            names,
             interval: cli::parse_interval(&interval)?,
             count,
+            changes,
         }),
         cmd if cli::routed(&cmd) => Ok(Parsed::Command(cmd)),
         _ => Err(DeskError::Usage(
-            "only `desk power …` and `desk source …` commands run through the daemon".into(),
+            "only `desk power|get|set|do|watch …` run through the daemon".into(),
         )),
     }
 }
@@ -324,10 +328,18 @@ async fn handle(state: Arc<State>, conn: impl ipc::Conn) {
         match parse(&line) {
             Ok(Parsed::Watch {
                 device,
+                names,
                 interval,
                 count,
+                changes,
             }) => {
-                stream(&state, &mut lines, &mut write, &device, interval, count).await;
+                let want = Want {
+                    names,
+                    interval,
+                    count,
+                    changes,
+                };
+                stream(&state, &mut lines, &mut write, &device, want).await;
                 return;
             }
             Ok(Parsed::Command(cmd)) => {
@@ -377,30 +389,64 @@ async fn send(w: &mut (impl AsyncWrite + Unpin), v: &Value) -> std::io::Result<(
     w.flush().await
 }
 
+/// What one watcher asked for.
+struct Want {
+    names: Vec<String>,
+    interval: Duration,
+    count: Option<u64>,
+    changes: bool,
+}
+
+/// What a watcher sees of a reading: one channel only (`psu:2`), only the named values.
+fn view(r: &DeviceReadings, channel: Option<&str>, names: Option<&[String]>) -> DeviceReadings {
+    let mut r = match channel {
+        None => r.clone(),
+        Some(ch) => {
+            let mut values = r.values.clone();
+            if let Some(c) = r.channels.get(ch) {
+                values.extend(c.clone());
+            }
+            DeviceReadings {
+                values,
+                channels: Default::default(),
+            }
+        }
+    };
+    if let Some(n) = names {
+        r = r.filtered(n);
+    }
+    r
+}
+
 async fn stream<R: tokio::io::AsyncBufRead + Unpin>(
     state: &State,
     lines: &mut tokio::io::Lines<R>,
     w: &mut (impl AsyncWrite + Unpin),
-    query: &str,
-    interval: Duration,
-    count: Option<u64>,
+    target: &str,
+    want: Want,
 ) {
+    let (query, channel) = ops::split_channel(target);
     let started = async {
         let bench = state.bench()?;
         let device = bench.config.resolve_device(query)?;
-        let watcher = bench.watch(device, interval).await?;
-        Ok::<_, DeskError>((device.id.clone(), watcher))
+        // Names and the channel are checked before anything is opened.
+        let cat = ops::Catalog::of(device)?;
+        let (_, names) = ops::plan_get(&cat, channel, &want.names)?;
+        let (watcher, cat) = bench.watch(device, want.interval).await?;
+        Ok::<_, DeskError>((device.id.clone(), watcher, cat, names))
     }
     .await;
-    let (device, mut watcher) = match started {
+    let (device, mut watcher, cat, names) = match started {
         Ok(v) => v,
         Err(e) => {
             let _ = send(w, &error_line(&e)).await;
             return;
         }
     };
+    let interval = want.interval;
     let start = Instant::now();
     let mut last_sent: Option<Instant> = None;
+    let mut last_shown: Option<DeviceReadings> = None;
     let mut dropped = 0u64;
     let mut failed = 0u64;
     let mut sent = 0u64;
@@ -408,6 +454,13 @@ async fn stream<R: tokio::io::AsyncBufRead + Unpin>(
         tokio::select! {
             ev = watcher.events.recv() => match ev {
                 Ok(Event::Reading { reading, at, time, log }) => {
+                    let shown = view(&reading, channel, names.as_deref());
+                    if want.changes {
+                        // Only when something changed, and still at most once per interval.
+                        if last_shown.as_ref().is_some_and(|old| !ops::changed(&cat, old, &shown)) {
+                            continue;
+                        }
+                    }
                     // At most one reading per interval (the session reads for its fastest watcher).
                     if last_sent.is_some_and(|t| at.saturating_duration_since(t) < interval * 9 / 10) {
                         continue;
@@ -417,18 +470,25 @@ async fn stream<R: tokio::io::AsyncBufRead + Unpin>(
                         "device": device,
                         "time": humantime::format_rfc3339_millis(time).to_string(),
                         "elapsed": round_ms(at.saturating_duration_since(start)),
-                        "reading": reading,
-                        "dropped": dropped,
-                        "failed": failed,
                     });
+                    if let Some(ch) = channel {
+                        data["channel"] = json!(ch);
+                    }
+                    data["values"] = json!(shown.values);
+                    if !shown.channels.is_empty() {
+                        data["channels"] = json!(shown.channels);
+                    }
+                    data["dropped"] = json!(dropped);
+                    data["failed"] = json!(failed);
                     if !log.is_empty() {
                         data["log"] = json!(log);
                     }
+                    last_shown = Some(shown);
                     if send(w, &json!({ "ok": true, "data": data })).await.is_err() {
                         return;
                     }
                     sent += 1;
-                    if count.is_some_and(|c| sent >= c) {
+                    if want.count.is_some_and(|c| sent >= c) {
                         return;
                     }
                 }
@@ -530,12 +590,14 @@ pub async fn forward(config: Option<&Path>, args: &[String]) -> Result<Option<Re
     Ok(Some(reply.into_report()))
 }
 
-/// `desk source watch`: stream readings from the daemon (starting it if needed) to stdout.
+/// `desk watch`: stream readings from the daemon (starting it if needed) to stdout. `cat` gives
+/// units for the human table.
 pub async fn watch(
     config: Option<&Path>,
     args: &[String],
     json_mode: bool,
     count: Option<u64>,
+    cat: Option<ops::Catalog>,
 ) -> Result<Report> {
     let ep = Endpoint::resolve(config)?;
     let conn = connect_or_start(&ep).await?;
@@ -544,7 +606,7 @@ pub async fn watch(
         .await
         .map_err(|e| lost(&ep, &format!("cannot talk to the desk daemon: {e}")))?;
     let mut lines = BufReader::new(read).lines();
-    let mut printer = Printer::default();
+    let mut printer = Printer::new(cat);
     let mut received = 0u64;
     loop {
         let line = lines.next_line().await.map_err(|e| {
@@ -633,46 +695,91 @@ fn start(ep: &Endpoint) -> Result<std::process::Child> {
     cmd.spawn().map_err(fail)
 }
 
-/// Human output of `watch`: one row per reading.
-#[derive(Default)]
+/// Human output of `watch`: one row per reading, a column per value (units from the catalog).
 struct Printer {
-    header: bool,
+    cat: Option<ops::Catalog>,
+    columns: Option<Vec<(Option<String>, String)>>,
     dropped: u64,
     failed: u64,
 }
 
 impl Printer {
+    fn new(cat: Option<ops::Catalog>) -> Self {
+        Printer {
+            cat,
+            columns: None,
+            dropped: 0,
+            failed: 0,
+        }
+    }
+
+    fn cell(&self, name: &str, v: &Value) -> String {
+        let unit = self
+            .cat
+            .as_ref()
+            .and_then(|c| c.readable_decl(name))
+            .and_then(|d| d.unit.clone());
+        match v {
+            Value::Number(n) => {
+                crate::units::format(n.as_f64().unwrap_or(f64::NAN), unit.as_deref())
+            }
+            Value::Bool(b) => if *b { "on" } else { "off" }.to_string(),
+            Value::String(s) => s.clone(),
+            Value::Object(o) => match (
+                o.get("value").and_then(Value::as_f64),
+                o.get("unit").and_then(Value::as_str),
+            ) {
+                (Some(v), Some(u)) => crate::units::format(v, Some(u)),
+                _ => v.to_string(),
+            },
+            Value::Null => "?".into(),
+            other => other.to_string(),
+        }
+    }
+
     fn row(&mut self, data: &Value) -> String {
         let mut out = String::new();
-        if !self.header {
-            self.header = true;
-            out.push_str("ELAPSED     OUTPUT  VOLTAGE    CURRENT    POWER      MODE\n");
+        let get = |ch: &Option<String>, name: &str| -> Value {
+            match ch {
+                None => data["values"][name].clone(),
+                Some(c) => data["channels"][c][name].clone(),
+            }
+        };
+        if self.columns.is_none() {
+            let mut cols: Vec<(Option<String>, String)> = Vec::new();
+            if let Some(o) = data["values"].as_object() {
+                cols.extend(o.keys().map(|k| (None, k.clone())));
+            }
+            if let Some(chs) = data["channels"].as_object() {
+                for (c, vals) in chs {
+                    if let Some(o) = vals.as_object() {
+                        cols.extend(o.keys().map(|k| (Some(c.clone()), k.clone())));
+                    }
+                }
+            }
+            let mut head = format!("{:<10}", "ELAPSED");
+            for (c, n) in &cols {
+                let title = match c {
+                    Some(c) => format!("{c}:{n}"),
+                    None => n.clone(),
+                };
+                head.push_str(&format!("  {:<w$}", title, w = title.len().max(10)));
+            }
+            out.push_str(head.trim_end());
+            out.push('\n');
+            self.columns = Some(cols);
         }
-        let r = &data["reading"];
-        let num = |k: &str, unit: &str, digits: usize| {
-            r[k].as_f64()
-                .map_or_else(|| "?".to_string(), |v| format!("{v:.digits$} {unit}"))
-        };
-        let output = match r["output"].as_bool() {
-            Some(true) => "on",
-            Some(false) => "off",
-            None => "?",
-        };
-        let mode = r["mode"]
-            .as_str()
-            .map(str::to_uppercase)
-            .unwrap_or_default();
         let mut line = format!(
-            "{:<10}  {:<6}  {:<9}  {:<9}  {:<9}  {}",
-            format!("{:.3} s", data["elapsed"].as_f64().unwrap_or_default()),
-            output,
-            num("voltage", "V", 2),
-            num("current", "A", 3),
-            num("power", "W", 2),
-            mode
+            "{:<10}",
+            format!("{:.3} s", data["elapsed"].as_f64().unwrap_or_default())
         );
-        if let Some(p) = r["protection"].as_str().filter(|p| *p != "none") {
-            line.push_str(&format!("  {} TRIPPED", p.to_uppercase()));
+        for (c, n) in self.columns.clone().unwrap_or_default() {
+            let title_len = c.as_ref().map_or(n.len(), |c| c.len() + 1 + n.len());
+            line.push_str(&format!(
+                "  {:<w$}",
+                self.cell(&n, &get(&c, &n)),
+                w = title_len.max(10)
+            ));
         }
         out.push_str(line.trim_end());
         out.push('\n');

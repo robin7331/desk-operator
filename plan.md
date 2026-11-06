@@ -756,20 +756,27 @@ USB ids only).
 
 ### Build order
 
-1. Format: parse and validate custom capabilities and declarations (JSON schema,
-   `desk library check`, `desk library new --capability <name>` writes a skeleton), merge, limits.
-2. Core: argument parsing with units, range and limit checks, verify, sessions; a simulated custom
-   device in the mock provider for tests.
-3. Lua contract (`read`, `set`, `action`) + `docs/scripting.md`, `docs/definition-format.md` (v2).
-4. CLI `get`, `set`, `do`, `watch`; schema; daemon routing for them. `voltage_source` moves onto
-   the generic commands with its rules intact (its tests carried over); **`desk source` is
-   removed** everywhere: CLI, schema, skills, `docs/streaming.md`, `examples/watch_to_csv.py`,
-   tests.
-5. Skills: desk-operator uses the generic commands; desk-add-device writes declarations, and only
-   stops when a connection type is missing.
-6. Channels.
-7. The multimeter's connection type (needs its model and interface).
-8. Update CLAUDE.md (core concepts: capability, value, setting, action).
+1. [x] Format: custom capabilities and declarations parsed and checked (config, definitions,
+   JSON schema, `desk library check`; `desk library new --capability <name>` writes a skeleton),
+   merge, limits per capability/setting/channel.
+2. [x] Core: unit table (`units.rs`), declarations and generic rules (`declared.rs`), catalog and
+   ops (`ops.rs`); the mock simulates declared devices (`follow`, `fixed`, `last_action`,
+   `stuck_`/`blind_`/`fail_`).
+3. [x] Lua contract (`read`, `set`, `action`, `ctx.channel`); `docs/scripting.md`,
+   `docs/definition-format.md` (v2).
+4. [x] CLI `get`, `set`, `do`, `watch` (`--changes`, names, channels); schema and `device show`
+   list every name with type, unit, range, limit, `switches`; daemon routing. `voltage_source`
+   runs on the generic commands with its rules intact; **`desk source` removed** (CLI, schema,
+   skills, docs, example, tests).
+5. [x] Skills: desk-operator uses the generic commands; desk-add-device declares capabilities and
+   only stops for a missing connection type.
+6. [x] Channels (declared and `source`), per-channel limits.
+7. [ ] The multimeter's connection type (needs its model and interface).
+8. [x] CLAUDE.md (core concepts: capability, value, setting, action).
+
+Not built yet (in the design, no device needs it so far): extra values, settings and actions on
+`source` (the IPS3608's protection thresholds would use this), declarative cross-value rules and
+the `check` hook, events, captures.
 
 ### Open questions (for the user)
 

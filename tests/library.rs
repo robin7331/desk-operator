@@ -107,11 +107,11 @@ fn model_supplies_bindings_and_name() {
     );
     assert_eq!(dev["capabilities"][0], "voltage_source");
 
-    let out = b.run(&["--json", "source", "set", "psu", "5v", "--on"]);
+    let out = b.run(&["--json", "set", "psu", "voltage", "5v", "output", "on"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert_eq!(out.json()["data"]["verified"]["voltage"], true);
     // The device's own bench limits still apply.
-    assert_eq!(b.run(&["--json", "source", "set", "psu", "13v"]).code, 8);
+    assert_eq!(b.run(&["--json", "set", "psu", "voltage", "13v"]).code, 8);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn own_values_merge_over_the_definition() {
     let b = Bench::new(
         "[devices.psu]\nmodel = \"acme/psu-3000\"\nname = \"Mine\"\nsource = { ratings = { max_voltage = 12.0 } }\n",
     );
-    let out = b.run(&["--json", "source", "set", "psu", "13v"]);
+    let out = b.run(&["--json", "set", "psu", "voltage", "13v"]);
     assert_eq!(out.code, 8, "{}", out.stdout);
     assert!(
         out.message().contains("device maximum of 12.00 V"),
@@ -144,7 +144,7 @@ fn own_script_replaces_the_definition() {
         "[devices.psu]\nmodel = \"acme/psu-3000\"\nsource = { script = \"mine.lua\", params = { flavor = \"mine\" } }\n",
     );
     b.write("mine.lua", SIM_DRIVER);
-    let out = b.run(&["--json", "source", "read", "psu"]);
+    let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert_eq!(out.json()["data"]["log"][0], "driver mine");
 }
@@ -192,7 +192,7 @@ fn local_definitions_shadow_bundled_ones() {
     assert_eq!(ips[1]["shadowed"], true);
 
     // The device uses the local one (a simulated PSU: no hardware needed).
-    let out = b.run(&["--json", "source", "read", "psu"]);
+    let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
 }
 
@@ -245,7 +245,11 @@ fn malformed_definitions() {
     };
     assert!(error_of("acme/wrong-id").contains("id is `acme/other`"));
     assert!(error_of("acme/too-new").contains("update desk"));
-    assert!(error_of("acme/typo").contains("unknown section `sauce`"));
+    assert!(
+        error_of("acme/typo").contains("is `sauce` a typo"),
+        "{}",
+        error_of("acme/typo")
+    );
 }
 
 #[test]
@@ -305,10 +309,7 @@ fn desk_devices_adds_a_library_path() {
         3,
         "not found without DESK_DEVICES"
     );
-    let out = b.run_env(
-        &["--json", "source", "read", "x"],
-        &[("DESK_DEVICES", lib.path())],
-    );
+    let out = b.run_env(&["--json", "get", "x"], &[("DESK_DEVICES", lib.path())]);
     assert_eq!(out.code, 0, "{}", out.stdout);
 }
 
@@ -332,7 +333,7 @@ fn bundled_definitions_work_with_your_own_port() {
         source["port"]["path"], "/dev/desk-test-missing",
         "added by the device"
     );
-    let out = b.run(&["--json", "source", "read", "psu"]);
+    let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(
         out.code, 4,
         "a missing port keeps its own error code: {}",
@@ -515,7 +516,7 @@ fn params_are_validated_against_the_driver() {
     );
 
     let b = Bench::new("[devices.psu]\nmodel = \"acme/psu-3000\"\n");
-    let out = b.run(&["--json", "source", "read", "psu"]);
+    let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(
         out.json()["data"]["log"][0],
         "driver definition",
@@ -586,6 +587,14 @@ fn json_schema_agrees_with_the_definitions() {
         }
     }
     assert!(checked >= 2);
+    let declared = format!(
+        "{DEFINITION}\n[heater]\nscript = \"h.lua\"\nchannels = 2\n[heater.values]\nt = {{ type = \"number\", unit = \"°C\" }}\nr = {{ type = \"number\", units = [\"V\", \"Ω\"] }}\n[heater.settings]\nsp = {{ type = \"number\", unit = \"°C\", min = 50, max = 450 }}\n[heater.actions]\ngo = {{ switches = true, args = {{ s = {{ type = \"number\", unit = \"s\" }} }} }}\n"
+    );
+    let errors: Vec<String> = validator
+        .iter_errors(&as_json(&declared))
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "a declared capability: {errors:?}");
 
     for (broken, why) in [
         (
@@ -603,6 +612,18 @@ fn json_schema_agrees_with_the_definitions() {
         (
             DEFINITION.replace("[device]", "[device]\nkind = \"psu\""),
             "kind",
+        ),
+        (
+            format!(
+                "{DEFINITION}\n[heater]\nscript = \"h.lua\"\nvalues = {{ t = {{ type = \"float\" }} }}\n"
+            ),
+            "declaration type",
+        ),
+        (
+            format!(
+                "{DEFINITION}\n[heater]\nscript = \"h.lua\"\nactions = {{ go = {{ doc = \"x\" }} }}\n"
+            ),
+            "action without switches",
         ),
     ] {
         assert!(
@@ -662,7 +683,7 @@ fn scaffold_creates_a_checkable_definition() {
         .json();
     assert_eq!(def["data"]["definition"]["name"], "ACME PSU 9000");
     b.write("desk.toml", "[devices.x]\nmodel = \"acme/psu-9000\"\n");
-    let out = b.run(&["--json", "source", "set", "x", "5v"]);
+    let out = b.run(&["--json", "set", "x", "voltage", "5v"]);
     assert_eq!(out.code, 5);
     assert!(
         out.message().contains("not implemented: set_voltage"),

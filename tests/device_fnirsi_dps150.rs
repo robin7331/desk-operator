@@ -341,7 +341,9 @@ fn set_and_switch_on_in_one_session() {
     let dir = bench(&psu.path);
     let out = run(
         dir.path(),
-        &["--json", "source", "set", "psu", "5v", "1a", "--on"],
+        &[
+            "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+        ],
     );
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert_eq!(
@@ -364,24 +366,24 @@ fn set_and_switch_on_in_one_session() {
         d["verified"]
     );
     assert!(
-        close(&d["reading"]["voltage"], 5.0),
+        close(&d["values"]["measured_voltage"], 5.0),
         "a fresh measurement, after the output went on: {}",
-        d["reading"]
+        d["values"]
     );
-    assert_eq!(d["reading"]["output"], true);
+    assert_eq!(d["values"]["output"], true);
 }
 
 #[test]
 fn read_only_connects_and_measures() {
     let psu = FakePsu::start(Behavior::default());
     let dir = bench(&psu.path);
-    let out = run(dir.path(), &["--json", "source", "read", "psu"]);
+    let out = run(dir.path(), &["--json", "get", "psu"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert_eq!(psu.log(), ["connect", "disconnect"]);
     let d = out.data();
-    assert!(close(&d["reading"]["voltage"], 0.0));
+    assert!(close(&d["values"]["measured_voltage"], 0.0));
     assert!(
-        d["reading"]["output"].is_null(),
+        d["values"]["output"].is_null(),
         "output unknown without a command in this session"
     );
 }
@@ -393,7 +395,7 @@ fn without_echo_the_output_is_not_confirmed() {
         ..Behavior::default()
     });
     let dir = bench(&psu.path);
-    let out = run(dir.path(), &["--json", "source", "output", "on", "psu"]);
+    let out = run(dir.path(), &["--json", "set", "psu", "output", "on"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     let d = out.data();
     assert!(d["verified"].get("output").is_none(), "{}", d["verified"]);
@@ -409,13 +411,13 @@ fn resynchronizes_after_garbage_and_foreign_frames() {
     let dir = bench(&psu.path);
     let out = run(
         dir.path(),
-        &["--json", "source", "set", "psu", "12v", "--on"],
+        &["--json", "set", "psu", "voltage", "12v", "output", "on"],
     );
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert!(
-        close(&out.data()["reading"]["voltage"], 12.0),
+        close(&out.data()["values"]["measured_voltage"], 12.0),
         "{}",
-        out.data()["reading"]
+        out.data()["values"]
     );
 }
 
@@ -426,7 +428,7 @@ fn silent_device_fails_clearly_and_still_disconnects() {
         ..Behavior::default()
     });
     let dir = bench(&psu.path);
-    let out = run(dir.path(), &["--json", "source", "read", "psu"]);
+    let out = run(dir.path(), &["--json", "get", "psu"]);
     assert_eq!(out.code, 5, "{}", out.stdout);
     let msg = out.json()["error"]["message"].as_str().unwrap().to_string();
     assert!(msg.contains("no measurement from the device"), "{msg}");
@@ -439,11 +441,11 @@ fn limits_are_enforced_before_any_setpoint_is_sent() {
     let dir = bench(&psu.path);
     for (args, why) in [
         (
-            &["--json", "source", "set", "psu", "25v"][..],
+            &["--json", "set", "psu", "voltage", "25v"][..],
             "bench limit",
         ),
         (
-            &["--json", "source", "set", "psu", "9a"][..],
+            &["--json", "set", "psu", "current", "9a"][..],
             "device maximum",
         ),
     ] {
@@ -485,16 +487,22 @@ source = {{ port = {{ path = "{}" }}, params = {{ wait = "0s", boot_ms = 1500, s
     .unwrap();
     let out = run(
         dir.path(),
-        &["--json", "source", "set", "psu", "12v", "2a", "--on"],
+        &[
+            "--json", "set", "psu", "voltage", "12v", "current", "2a", "output", "on",
+        ],
     );
     assert_eq!(out.code, 0, "{}", out.stdout);
     let d = out.data();
     assert_eq!(d["verified"]["voltage"], true, "{}", d["verified"]);
     assert_eq!(d["verified"]["current"], true);
     assert_eq!(d["verified"]["output"], true);
-    assert!(close(&d["info"]["max_voltage"], 36.0));
+    let view = run(dir.path(), &["--json", "device", "show", "psu"]).data();
+    assert!(
+        close(&view["device"]["settings"]["voltage"]["max"], 36.0),
+        "{view}"
+    );
     assert_eq!(
-        run(dir.path(), &["--json", "source", "set", "psu", "37v"]).code,
+        run(dir.path(), &["--json", "set", "psu", "voltage", "37v"]).code,
         8
     );
 }
@@ -507,15 +515,17 @@ fn ips3608_confirms_setpoints_and_output_from_the_status() {
     let dir = bench_with(&psu.path, IPS3608_PARAMS);
     let out = run(
         dir.path(),
-        &["--json", "source", "set", "psu", "5v", "1a", "--on"],
+        &[
+            "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+        ],
     );
     assert_eq!(out.code, 0, "{}", out.stdout);
     let d = out.data();
     assert_eq!(d["verified"]["voltage"], true, "{}", d["verified"]);
     assert_eq!(d["verified"]["current"], true);
     assert_eq!(d["verified"]["output"], true);
-    assert!(close(&d["reading"]["voltage_set"], 5.0));
-    assert!(close(&d["reading"]["voltage"], 5.0));
+    assert!(close(&d["values"]["voltage"], 5.0));
+    assert!(close(&d["values"]["measured_voltage"], 5.0));
     assert_eq!(
         psu.log(),
         [
@@ -531,8 +541,8 @@ fn ips3608_confirms_setpoints_and_output_from_the_status() {
     );
 
     // The output state is known without switching it in this session.
-    let d = run(dir.path(), &["--json", "source", "read", "psu"]).data();
-    assert_eq!(d["reading"]["output"], true);
+    let d = run(dir.path(), &["--json", "get", "psu"]).data();
+    assert_eq!(d["values"]["output"], true);
 }
 
 #[test]
@@ -544,7 +554,7 @@ fn another_device_on_the_same_usb_id_is_refused() {
     let dir = bench_with(&psu.path, IPS3608_PARAMS);
     let out = run(
         dir.path(),
-        &["--json", "source", "set", "psu", "5v", "--on"],
+        &["--json", "set", "psu", "voltage", "5v", "output", "on"],
     );
     assert_eq!(out.code, 5, "{}", out.stdout);
     let msg = out.json()["error"]["message"].as_str().unwrap().to_string();
@@ -565,7 +575,7 @@ fn a_device_that_does_not_answer_the_name_query_is_refused() {
         ..Behavior::ips3608()
     });
     let dir = bench_with(&psu.path, IPS3608_PARAMS);
-    let out = run(dir.path(), &["--json", "source", "read", "psu"]);
+    let out = run(dir.path(), &["--json", "get", "psu"]);
     assert_eq!(out.code, 5);
     assert!(
         out.json()["error"]["message"]
@@ -582,7 +592,7 @@ fn a_device_that_is_still_booting_is_retried() {
         ..Behavior::ips3608()
     });
     let dir = bench_with(&psu.path, IPS3608_PARAMS);
-    let out = run(dir.path(), &["--json", "source", "read", "psu"]);
+    let out = run(dir.path(), &["--json", "get", "psu"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     let queries = psu.log().iter().filter(|c| *c == "query name").count();
     assert_eq!(
@@ -615,8 +625,8 @@ source = {{ port = {{ path = "{}" }}, params = {{ wait = "0s", boot_ms = 1500, s
 #[test]
 fn ips3608_reports_everything_its_status_has() {
     let (psu, dir) = bundled_ips3608(Behavior::ips3608());
-    let d = run(dir.path(), &["--json", "source", "read", "psu"]).data();
-    let r = &d["reading"];
+    let d = run(dir.path(), &["--json", "get", "psu"]).data();
+    let r = &d["values"];
     assert_eq!(r["output"], false);
     assert!(r["mode"].is_null(), "no mode while the output is off: {r}");
     assert_eq!(r["protection"], "none");
@@ -627,18 +637,24 @@ fn ips3608_reports_everything_its_status_has() {
     );
     assert!(close(&r["charge"], 0.25));
     assert!(close(&r["energy"], 1.5));
-    assert!(close(&d["info"]["max_power"], 285.0));
+    let view = run(dir.path(), &["--json", "device", "show", "psu"]).data();
+    assert!(
+        close(&view["device"]["values"]["measured_power"]["max"], 285.0),
+        "{view}"
+    );
 
     let out = run(
         dir.path(),
-        &["--json", "source", "set", "psu", "5v", "1a", "--on"],
+        &[
+            "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+        ],
     );
     assert_eq!(out.code, 0, "{}", out.stdout);
-    assert_eq!(out.data()["reading"]["mode"], "cv");
+    assert_eq!(out.data()["values"]["mode"], "cv");
 
-    let out = run(dir.path(), &["source", "read", "psu"]);
+    let out = run(dir.path(), &["get", "psu"]);
     assert!(
-        out.stdout.contains("CV (constant voltage)"),
+        out.stdout.contains("mode              cv"),
         "{}",
         out.stdout
     );
@@ -657,7 +673,9 @@ fn ips3608_keeps_quiet_after_every_write() {
     let (psu, dir) = bundled_ips3608(Behavior::ips3608());
     let out = run(
         dir.path(),
-        &["--json", "source", "set", "psu", "5v", "1a", "--on"],
+        &[
+            "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+        ],
     );
     assert_eq!(out.code, 0, "{}", out.stdout);
     let log = psu.timed_log();
@@ -679,10 +697,10 @@ fn ips3608_with_a_tripped_protection_stays_off_until_cleared() {
         tripped: 2, // OCP
         ..Behavior::ips3608()
     });
-    let d = run(dir.path(), &["--json", "source", "read", "psu"]).data();
-    assert_eq!(d["reading"]["protection"], "ocp");
+    let d = run(dir.path(), &["--json", "get", "psu"]).data();
+    assert_eq!(d["values"]["protection"], "ocp");
 
-    let out = run(dir.path(), &["--json", "source", "output", "on", "psu"]);
+    let out = run(dir.path(), &["--json", "set", "psu", "output", "on"]);
     assert_eq!(
         out.json()["error"]["code"],
         "protection_tripped",
@@ -697,18 +715,11 @@ fn ips3608_with_a_tripped_protection_stays_off_until_cleared() {
 
     let out = run(
         dir.path(),
-        &[
-            "--json",
-            "source",
-            "output",
-            "on",
-            "psu",
-            "--clear-protection",
-        ],
+        &["--json", "set", "psu", "output", "on", "--clear-protection"],
     );
     assert_eq!(out.code, 0, "{}", out.stdout);
-    assert_eq!(out.data()["reading"]["protection"], "none");
-    assert_eq!(out.data()["reading"]["output"], true);
+    assert_eq!(out.data()["values"]["protection"], "none");
+    assert_eq!(out.data()["values"]["output"], true);
 }
 
 /// Watching through the daemon: one connection for the whole watch, commands run inside it (the
@@ -730,7 +741,7 @@ fn ips3608_watch_keeps_one_session_and_commands_join_it() {
     };
     let mut watch = {
         let _g = FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        desk(&["--json", "source", "watch", "psu", "--interval", "100ms"])
+        desk(&["--json", "watch", "psu", "--interval", "100ms"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -741,16 +752,18 @@ fn ips3608_watch_keeps_one_session_and_commands_join_it() {
         || -> Value { serde_json::from_str(&lines.next().expect("a line").unwrap()).unwrap() };
     let first = next();
     assert_eq!(first["ok"], true, "{first}");
-    assert_eq!(first["data"]["reading"]["output"], false);
-    assert!(close(&first["data"]["reading"]["input_voltage"], 44.7));
+    assert_eq!(first["data"]["values"]["output"], false);
+    assert!(close(&first["data"]["values"]["input_voltage"], 44.7));
 
     let set = {
         let _g = FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        desk(&["--json", "source", "set", "psu", "5v", "1a", "--on"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+        desk(&[
+            "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
     };
     let set = set.wait_with_output().unwrap();
     let out = String::from_utf8_lossy(&set.stdout);
@@ -761,9 +774,7 @@ fn ips3608_watch_keeps_one_session_and_commands_join_it() {
     let mut on = false;
     for _ in 0..30 {
         let r = next();
-        if r["data"]["reading"]["output"] == true
-            && close(&r["data"]["reading"]["voltage_set"], 5.0)
-        {
+        if r["data"]["values"]["output"] == true && close(&r["data"]["values"]["voltage"], 5.0) {
             on = true;
             break;
         }
@@ -809,7 +820,6 @@ fn ips3608_watch_survives_a_lost_reply() {
             .arg(dir.path().join("desk.toml"))
             .args([
                 "--json",
-                "source",
                 "watch",
                 "psu",
                 "--interval",
@@ -851,16 +861,7 @@ fn ips3608_reads_fast_and_rounds_floats() {
             .env("DESK_DAEMON_IDLE", "1s")
             .arg("--config")
             .arg(dir.path().join("desk.toml"))
-            .args([
-                "--json",
-                "source",
-                "watch",
-                "psu",
-                "--interval",
-                "0",
-                "--count",
-                "11",
-            ])
+            .args(["--json", "watch", "psu", "--interval", "0", "--count", "11"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -877,7 +878,7 @@ fn ips3608_reads_fast_and_rounds_floats() {
     let t = |i: usize| lines[i]["data"]["elapsed"].as_f64().unwrap();
     // Two queries per reading; waiting out 50 ms read timeouts took ~1 s for these ten.
     assert!(t(10) - t(0) < 0.5, "10 readings took {:.3} s", t(10) - t(0));
-    let r = &lines[0]["data"]["reading"];
+    let r = &lines[0]["data"]["values"];
     assert_eq!(r["input_voltage"], 44.7, "{r}");
     assert_eq!(r["temperature"], 31.5, "{r}");
 }

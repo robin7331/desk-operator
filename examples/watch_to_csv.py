@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Log `desk source watch` to a CSV file, e.g. a LiPo charge.
+"""Log `desk watch` of a power supply to a CSV file, e.g. a LiPo charge.
 
     python3 watch_to_csv.py psu charge.csv --interval 1s
     python3 watch_to_csv.py psu charge.csv --interval 1s --off-below 0.05
@@ -7,7 +7,7 @@
 desk only streams and executes; this script decides. With --off-below, it switches the output
 off once the supply is in CV and the current stayed below that many amps for --hold readings
 (the usual end of a CC/CV charge). Set voltage and current limit yourself first, for example
-`desk source set psu 4.2v 1a --on`.
+`desk set psu voltage 4.2v current 1a output on`.
 
 Standard library only. Stop with Ctrl-C.
 """
@@ -18,7 +18,7 @@ import json
 import subprocess
 import sys
 
-FIELDS = ["time", "elapsed", "output", "voltage", "current", "power", "mode", "charge", "energy"]
+FIELDS = ["time", "elapsed", "output", "measured_voltage", "measured_current", "measured_power", "mode", "charge", "energy"]
 
 
 def main() -> int:
@@ -32,7 +32,7 @@ def main() -> int:
     args = p.parse_args()
 
     watch = subprocess.Popen(
-        [args.desk, "source", "watch", args.device, "--json", "--interval", args.interval],
+        [args.desk, "watch", args.device, "--json", "--interval", args.interval],
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -47,7 +47,7 @@ def main() -> int:
                     print(f"watch ended: {msg['error']['message']}", file=sys.stderr)
                     return 1
                 d = msg["data"]
-                r = d["reading"]
+                r = d["values"]
                 out.writerow([d["time"], d["elapsed"]] + [r.get(k) for k in FIELDS[2:]])
                 f.flush()
                 if d["dropped"]:
@@ -55,11 +55,11 @@ def main() -> int:
 
                 if args.off_below is None or not r.get("output"):
                     continue
-                done = r.get("mode") == "cv" and r.get("current") is not None and r["current"] < args.off_below
+                done = r.get("mode") == "cv" and r.get("measured_current") is not None and r["measured_current"] < args.off_below
                 below = below + 1 if done else 0
                 if below >= args.hold:
                     # The decision is ours; desk executes it (and checks it like any command).
-                    off = subprocess.run([args.desk, "source", "output", "off", args.device, "--json"],
+                    off = subprocess.run([args.desk, "set", args.device, "output", "off", "--json"],
                                          capture_output=True, text=True)
                     result = json.loads(off.stdout)
                     print("output off:", "ok" if result["ok"] else result["error"]["message"], file=sys.stderr)
