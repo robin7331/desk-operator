@@ -64,3 +64,49 @@ fn the_dps150_driver_declares_its_params() {
     }
     assert_eq!(d["definition"]["status"], "tested");
 }
+
+/// The rows of the *Supported devices* table in the README: (device name, status).
+fn supported_devices() -> Vec<(String, String)> {
+    let readme = std::fs::read_to_string(root().join("README.md")).unwrap();
+    readme
+        .lines()
+        .skip_while(|l| *l != "## Supported devices")
+        .skip(1)
+        .take_while(|l| !l.starts_with("## "))
+        .filter_map(|l| {
+            let cells: Vec<&str> = l.trim_matches('|').split('|').map(str::trim).collect();
+            let name = cells.first()?.strip_prefix('[')?.split(']').next()?;
+            Some((name.to_string(), cells.get(2)?.to_string()))
+        })
+        .collect()
+}
+
+#[test]
+fn the_readme_lists_every_definition_with_its_status() {
+    let mut expected: Vec<(String, String)> = definitions()
+        .iter()
+        .map(|def| {
+            let model = def.parent().unwrap();
+            let vendor = model
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy();
+            let id = format!("{vendor}/{}", model.file_name().unwrap().to_string_lossy());
+            let out = run(&["--json", "library", "show", &id]);
+            assert_eq!(out.code, 0, "{}", out.stdout);
+            let d = &out.data()["definition"];
+            (
+                d["name"].as_str().unwrap().to_string(),
+                d["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(
+        supported_devices(),
+        expected,
+        "README *Supported devices* must list every definition, sorted, with its status"
+    );
+}
