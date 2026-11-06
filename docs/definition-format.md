@@ -1,4 +1,4 @@
-# Device definition format (v2)
+# Device definition format
 
 A **device definition** describes what's true for every unit of a model. It lives at
 `<vendor>/<model>/device.toml` in a device library and is used by devices with
@@ -43,8 +43,6 @@ status    = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, powe
 | `sources` | no | list of strings | manuals, protocol docs, community work it's based on |
 
 No other fields. What kind of device it is follows from its capabilities.
-
-v2 adds declared capabilities, channels and units; every v1 definition is a valid v2 definition.
 
 ## Capabilities
 

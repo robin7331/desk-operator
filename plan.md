@@ -576,7 +576,7 @@ Its extra rules stay in the core, whichever command is used:
 - `output on` is refused while a protection is tripped, unless `--clear-protection` (a `set` flag,
   a usage error anywhere else).
 
-### Definition format (v2, additive: every v1 definition stays valid)
+### Definition format
 
 Every top-level table other than `[device]` is a capability; its name is the key, as `[power]` and
 `[source]` already are. A custom capability needs a `script` and at least one declaration, so a

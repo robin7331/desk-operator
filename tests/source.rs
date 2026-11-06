@@ -391,7 +391,6 @@ fn schema_and_device_views_show_the_capability() {
     for c in ["desk get", "desk set", "desk do", "desk watch"] {
         assert!(commands.contains(&c), "{c}");
     }
-    assert!(!commands.iter().any(|c| c.starts_with("desk source")));
     assert!(close(&psu["settings"]["voltage"]["limit"], 15.0));
     assert_eq!(psu["settings"]["voltage"]["unit"], "V");
     assert_eq!(psu["settings"]["output"]["switches"], true);

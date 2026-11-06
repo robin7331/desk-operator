@@ -128,7 +128,7 @@ src/
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
 docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
-docs/definition-format.md  device definition format v1 (spec); schemas/ has its JSON Schema (tested
+docs/definition-format.md  device definition format (spec); schemas/ has its JSON Schema (tested
                        against every definition in tests/library.rs)
 skills/<name>/         SKILL.md per agent skill (desk-operator, desk-add-device), embedded via
                        include_str! in src/cli/skill.rs (`desk skill list|<name>|install`); update

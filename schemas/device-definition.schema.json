@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "desk-operator device definition (device.toml), format v2",
+  "title": "desk-operator device definition (device.toml)",
   "description": "What's true for every unit of a model. Nothing bench-specific (no providers, entities, bench limits, serial numbers). Spec: docs/definition-format.md. desk itself validates more than this schema can express (`desk library check`).",
   "type": "object",
   "required": [

@@ -97,6 +97,27 @@ impl Endpoint {
         }
         Ok(())
     }
+
+    /// Remove the lock and log of daemons that no longer run (other builds or configs get other
+    /// keys, so their files would pile up). A lock nobody holds belongs to no daemon.
+    fn remove_stale(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == self.lock || path.extension().is_none_or(|e| e != "lock") {
+                continue;
+            }
+            let Ok(file) = std::fs::File::options().write(true).open(&path) else {
+                continue;
+            };
+            if file.try_lock().is_ok() {
+                let _ = std::fs::remove_file(path.with_extension("log"));
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// `$DESK_RUNTIME_DIR`, else the platform's per-user runtime or cache folder.
@@ -184,6 +205,7 @@ pub async fn serve(config: Option<&Path>, idle: Option<Duration>) -> Result<Repo
             )));
         }
     }
+    ep.remove_stale();
     let mut listener = ipc::bind(&ep.address).map_err(|e| {
         DeskError::DaemonUnavailable(format!("cannot listen on {}: {e}", ep.address))
     })?;

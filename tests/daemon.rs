@@ -418,3 +418,24 @@ fn a_device_that_keeps_failing_ends_the_watch_after_three_tries() {
     assert_eq!(lines.len(), 1, "{}", out.stdout);
     assert_eq!(lines[0]["error"]["code"], "endpoint_unavailable");
 }
+
+#[test]
+fn a_starting_daemon_removes_files_of_daemons_that_are_gone() {
+    let b = Bench::new();
+    let run = b.runtime();
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(run.join("desk-0000000000000000.lock"), "").unwrap();
+    std::fs::write(run.join("desk-0000000000000000.log"), "old build\n").unwrap();
+    // A lock someone holds belongs to a running daemon: it stays.
+    let held = std::fs::File::create(run.join("desk-1111111111111111.lock")).unwrap();
+    held.lock().unwrap();
+    std::fs::write(run.join("desk-1111111111111111.log"), "running\n").unwrap();
+
+    let w = b.spawn(&["--json", "watch", "psu", "--interval", "50ms"]);
+    w.line();
+    assert!(!run.join("desk-0000000000000000.lock").exists());
+    assert!(!run.join("desk-0000000000000000.log").exists());
+    assert!(run.join("desk-1111111111111111.lock").exists());
+    assert!(run.join("desk-1111111111111111.log").exists());
+    drop(held);
+}
