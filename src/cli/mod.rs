@@ -1,6 +1,7 @@
 //! Command-line interface. Every command returns a [`Report`] so `--json` and human output can
 //! never drift apart.
 
+pub mod complete;
 mod device;
 mod library;
 mod ops;
@@ -14,6 +15,7 @@ mod status;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use clap_complete::engine::ArgValueCompleter;
 
 use crate::bench::Bench;
 use crate::error::{DeskError, ErrorJson, Result};
@@ -64,18 +66,23 @@ pub enum Command {
     /// measured_voltage`)
     Get {
         /// Device id, alias or name; `device:channel` for one channel
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         device: String,
         /// Values or settings to show [default: all]
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         names: Vec<String>,
     },
     /// Change settings, e.g. `desk set psu voltage 5v current 1a output on` or `desk set iron
-    /// setpoint 330c`. Units are required; several settings apply in the device's safe order
+    /// setpoint 330c`. Units are required; several settings apply in the device's safe order.
+    /// Without a setting or a value, lists what it takes, changes nothing and exits as a usage
+    /// error
     Set {
         /// Device id, alias or name; `device:channel` for one channel
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         device: String,
         /// Setting and value pairs: `<name> <value> [<name> <value>...]` (a negative value goes
         /// after `--`: `desk set dev -- offset -1v`)
-        #[arg(required = true, num_args = 2.., value_names = ["NAME", "VALUE"])]
+        #[arg(num_args = 0.., value_names = ["NAME", "VALUE"], add = ArgValueCompleter::new(complete::candidates))]
         pairs: Vec<String>,
         /// Power supplies: switch the output on although a protection (OVP, OCP, ...) tripped,
         /// which clears it
@@ -85,13 +92,18 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Run an action of a device, e.g. `desk do iron standby` or `desk do iron boost seconds=10s`
+    /// Run an action of a device, e.g. `desk do iron standby` or `desk do iron boost seconds=10s`.
+    /// Without an action, or without the arguments it needs, lists what it takes, does nothing and
+    /// exits as a usage error
     Do {
         /// Device id, alias or name; `device:channel` for one channel
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         device: String,
         /// The action
-        action: String,
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
+        action: Option<String>,
         /// Arguments as name=value (every declared argument is required)
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         args: Vec<String>,
         /// Check the arguments and show what would be done, without doing it
         #[arg(long)]
@@ -101,8 +113,10 @@ pub enum Command {
     /// keep working meanwhile (a background daemon holds the session)
     Watch {
         /// Device id, alias or name; `device:channel` for one channel
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         device: String,
         /// Values or settings to stream [default: all]
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         names: Vec<String>,
         /// Time between readings ("0": as fast as the device answers)
         #[arg(long, default_value = "100ms", value_name = "DURATION")]
@@ -140,6 +154,20 @@ pub enum Command {
     Schema,
     /// Agent skills (SKILL.md) matching this version of desk: print, list or install them
     Skill(SkillArgs),
+    /// Print a shell's completion script. It completes commands, devices, settings and choices
+    /// from your config, and stays current: load it on shell start rather than saving it
+    #[command(after_help = "\
+Add to your shell's startup file:
+  bash        ~/.bashrc                    source <(desk completions bash)
+  zsh         ~/.zshrc (after compinit)    source <(desk completions zsh)
+  fish        config.fish                  desk completions fish | source
+  elvish      rc.elv                       eval (desk completions elvish | slurp)
+  powershell  $PROFILE                     desk completions powershell | Out-String | Invoke-Expression")]
+    Completions {
+        /// The shell
+        #[arg(value_parser = ["bash", "zsh", "fish", "elvish", "powershell"])]
+        shell: String,
+    },
     /// Run the background daemon that keeps device sessions open for `desk watch`.
     /// Started automatically; while it runs, `desk power|get|set|do` go through it
     Serve {
@@ -158,6 +186,7 @@ pub enum Command {
 #[command(args_conflicts_with_subcommands = true)]
 pub struct SkillArgs {
     /// Skill to print [default: desk-operator]
+    #[arg(add = ArgValueCompleter::new(complete::candidates))]
     pub name: Option<String>,
 
     #[command(subcommand)]
@@ -200,6 +229,7 @@ pub enum PowerCmd {
     /// Show mains power state [default: all devices with a power path]
     Status {
         /// Device ids, aliases or names
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         devices: Vec<String>,
     },
 }
@@ -207,7 +237,7 @@ pub enum PowerCmd {
 #[derive(Debug, Args)]
 pub struct Targets {
     /// Device ids, aliases or names
-    #[arg(conflicts_with = "all")]
+    #[arg(conflicts_with = "all", add = ArgValueCompleter::new(complete::candidates))]
     pub devices: Vec<String>,
 
     /// Every device that has a power path
@@ -226,11 +256,13 @@ pub enum LibraryCmd {
     /// Show one definition: bindings, status, and how to use it
     Show {
         /// Definition id, e.g. vendor/model
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         id: String,
     },
     /// Validate definitions and load their drivers (no hardware is touched)
     Check {
         /// Definition ids or paths to device.toml files [default: all]
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         targets: Vec<String>,
     },
     /// Create a new definition: device.toml, a driver skeleton and a vendor README
@@ -306,11 +338,13 @@ pub enum ProviderCmd {
     /// Check that a provider is reachable and authenticated
     Test {
         /// Provider id from [providers.<id>]
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         provider: String,
     },
     /// List what a provider can switch, e.g. Home Assistant entities, to use in a power binding
     Endpoints {
         /// Provider id from [providers.<id>]
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         provider: String,
         /// Only show endpoints whose id or name contains this text (case-insensitive)
         #[arg(long, short)]
@@ -325,6 +359,7 @@ pub enum DeviceCmd {
     /// Show one device in detail
     Show {
         /// Device id, alias or name
+        #[arg(add = ArgValueCompleter::new(complete::candidates))]
         device: String,
     },
 }
@@ -379,6 +414,7 @@ pub async fn run(cli: Cli) -> Result<Report> {
         }
         Command::Library { action } => return library::run(cli.config.as_deref(), action),
         Command::Skill(SkillArgs { name, action }) => return skill::run(name, action, cli.json),
+        Command::Completions { ref shell } => return complete::script(shell),
         _ => {}
     }
     // A running daemon may hold the device's session: then it runs the command.
@@ -419,6 +455,7 @@ pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
     match command {
         Command::Schema
         | Command::Skill(_)
+        | Command::Completions { .. }
         | Command::Port { .. }
         | Command::Library { .. }
         | Command::Serve { .. } => Err(DeskError::Usage(
@@ -437,7 +474,7 @@ pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
             action,
             args,
             dry_run,
-        } => ops::act(bench, &device, &action, &args, dry_run).await,
+        } => ops::act(bench, &device, action.as_deref(), &args, dry_run).await,
         Command::Watch { .. } => Err(DeskError::Usage(
             "`desk watch` streams through the daemon; it can't run here".into(),
         )),

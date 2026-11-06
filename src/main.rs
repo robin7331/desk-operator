@@ -15,13 +15,19 @@ mod serial;
 mod source;
 mod units;
 
-use clap::Parser;
 use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 
 use crate::cli::Cli;
 use crate::error::DeskError;
 
 fn main() {
+    // A shell asking for completions (`desk completions <shell>` set it up): answers and exits.
+    CompleteEnv::with_factory(Cli::command)
+        .var(cli::complete::VAR)
+        .complete();
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

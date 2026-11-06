@@ -45,7 +45,7 @@ heater = { provider = "sim", endpoint = "stuck_iron", settings = { setpoint = { 
 heater = { provider = "sim", endpoint = "blind_iron", settings = { setpoint = { type = "number", unit = "°C" } }, values = { temperature = { type = "number", unit = "°C" } }, fixed = { temperature = 21.5 } }
 
 [devices.broken]
-heater = { provider = "sim", endpoint = "fail_iron", values = { temperature = { type = "number", unit = "°C" } } }
+heater = { provider = "sim", endpoint = "fail_iron", values = { temperature = { type = "number", unit = "°C" } }, settings = { setpoint = { type = "number", unit = "°C" } } }
 
 [devices.lamp]
 power = { provider = "sim", endpoint = "lamp" }
@@ -278,7 +278,7 @@ fn mistakes_get_clear_usage_errors() {
             vec!["set", "iron", "setpoint", "300c", "setpoint", "310c"],
             "given twice",
         ),
-        (vec!["set", "iron", "setpoint"], "VALUE"),
+        (vec!["set", "iron", "setpoint"], "needs a value"),
         (vec!["do", "iron", "boost"], "needs `seconds=…`"),
         (
             vec!["do", "iron", "boost", "secs=10s"],
@@ -314,6 +314,196 @@ fn mistakes_get_clear_usage_errors() {
 }
 
 #[test]
+fn a_left_out_value_or_setting_lists_what_it_takes() {
+    let b = iron();
+    assert_eq!(b.run(&["set", "iron", "setpoint", "300c"]).code, 0);
+
+    // One setting: a number, with its current value.
+    let out = b.run(&["set", "iron", "setpoint"]);
+    assert_eq!(out.code, 2, "{}", out.stdout);
+    for needle in [
+        "setpoint: 300 °C (current)\n",
+        "unit: °C\n",
+        "range: 50…450\n",
+        "bench limit: 380\n",
+        "`setpoint` needs a value (nothing was set): desk set iron setpoint <value>",
+    ] {
+        assert!(out.stdout.contains(needle), "{needle}\n{}", out.stdout);
+    }
+    assert!(!out.stderr.contains("error"), "said once: {}", out.stderr);
+    let out = b.run(&["--json", "set", "iron", "setpoint"]);
+    assert_eq!(out.code_str(), "usage");
+    let d = out.data();
+    assert_eq!(d["setting"], "setpoint");
+    assert_eq!(d["value"], 300.0, "{d}");
+    assert_eq!(d["max"], 450.0);
+    assert_eq!(d["limit"], 380.0);
+
+    // A choice and a boolean.
+    let out = b.run(&["set", "iron", "mode"]);
+    assert!(
+        out.stdout.contains("choices: normal, boost\n"),
+        "{}",
+        out.stdout
+    );
+    let out = b.run(&["set", "iron", "enabled"]);
+    assert!(out.stdout.contains("choices: on, off\n"), "{}", out.stdout);
+
+    // Every setting.
+    let out = b.run(&["set", "iron"]);
+    assert_eq!(out.code, 2);
+    for needle in [
+        "setpoint  number in °C, 50…450, limit 380\n",
+        "mode      normal | boost\n",
+        "enabled   on | off\n",
+        "desk set iron <setting> <value>",
+    ] {
+        assert!(out.stdout.contains(needle), "{needle}\n{}", out.stdout);
+    }
+    let out = b.run(&["--json", "set", "iron"]);
+    assert_eq!(out.code_str(), "usage");
+    assert_eq!(out.data()["settings"]["mode"]["type"], "choice");
+
+    // A pair short: nothing of the line is applied.
+    let out = b.run(&["set", "iron", "setpoint", "320c", "mode"]);
+    assert_eq!(out.code, 2);
+    assert!(
+        out.stdout
+            .contains("desk set iron setpoint 320c mode <value>"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(
+        b.run(&["--json", "get", "iron"]).data()["values"]["setpoint"],
+        300.0
+    );
+
+    // What can't be listed is still refused the usual way.
+    for (args, needle) in [
+        (
+            vec!["set", "iron", "temperature"],
+            "a value the device reports",
+        ),
+        (vec!["set", "iron", "standby"], "is an action"),
+        (vec!["set", "iron", "tip"], "has no `tip`"),
+        (vec!["set", "lamp"], "has no settings"),
+        (vec!["do", "lamp"], "has no actions"),
+        (vec!["set", "iron:2"], "no channels"),
+    ] {
+        let mut a = vec!["--json"];
+        a.extend(&args);
+        let out = b.run(&a);
+        assert_eq!(out.code_str(), "usage", "{args:?}");
+        assert!(
+            out.message().contains(needle),
+            "{args:?}: {}",
+            out.message()
+        );
+        assert!(out.json().get("data").is_none(), "{args:?}");
+    }
+    assert_eq!(
+        b.run(&["--json", "set", "nope"]).code_str(),
+        "device_not_found"
+    );
+}
+
+#[test]
+fn listing_never_switches_mains_and_says_why_a_value_is_missing() {
+    let b = iron();
+    assert_eq!(b.run(&["power", "off", "iron"]).code, 0);
+    let out = b.run(&["set", "iron", "mode"]);
+    assert_eq!(out.code, 2);
+    assert!(out.stdout.contains("mode: not read ("), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("choices: normal, boost"),
+        "{}",
+        out.stdout
+    );
+    let d = b.run(&["--json", "set", "iron", "mode"]).data();
+    assert_eq!(d["value_error"]["code"], "device_off", "{d}");
+    assert!(d.get("value").is_none());
+    // The list of settings doesn't need the device at all.
+    assert_eq!(b.run(&["--json", "set", "iron"]).code_str(), "usage");
+    let status = b.run(&["--json", "power", "status", "iron"]).data();
+    assert_eq!(status["devices"][0]["power"]["state"], "off", "{status}");
+
+    // A device that fails to answer: the description still comes, with the reason.
+    let out = b.run(&["--json", "set", "broken", "setpoint"]);
+    assert_eq!(out.code_str(), "usage");
+    let d = out.data();
+    assert_eq!(d["unit"], "°C");
+    assert_eq!(d["value_error"]["code"], "endpoint_unavailable", "{d}");
+}
+
+#[test]
+fn a_left_out_action_lists_actions_and_their_arguments() {
+    let b = iron();
+    let out = b.run(&["do", "iron"]);
+    assert_eq!(out.code, 2);
+    for needle in [
+        "standby  to standby temperature\n",
+        "boost    seconds=<number in s, 1…60>\n",
+        "desk do iron <action>",
+    ] {
+        assert!(out.stdout.contains(needle), "{needle}\n{}", out.stdout);
+    }
+    let out = b.run(&["--json", "do", "iron"]);
+    assert_eq!(out.code_str(), "usage");
+    assert_eq!(
+        out.data()["actions"]["boost"]["args"]["seconds"]["max"],
+        60.0
+    );
+
+    // An action that needs arguments says what they take, and isn't run.
+    let out = b.run(&["do", "iron", "boost"]);
+    assert_eq!(out.code, 2);
+    assert!(
+        out.stdout.contains("seconds=<number in s, 1…60>"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("desk do iron boost seconds=<value>"),
+        "{}",
+        out.stdout
+    );
+    let got = b.run(&["--json", "get", "iron"]).data();
+    assert!(got["values"].get("last_action").is_none(), "{got}");
+    // One that needs none runs, as before.
+    assert_eq!(b.run(&["do", "iron", "standby"]).code, 0);
+}
+
+#[test]
+fn listings_address_channels() {
+    let b = Bench::with(RELAYS);
+    b.file("relays.lua", RELAYS_DRIVER);
+    let out = b.run(&["set", "relays"]);
+    assert!(out.stdout.contains("channels of"), "{}", out.stdout);
+    assert!(
+        out.stdout
+            .contains("desk set relays:<channel> <setting> <value>"),
+        "{}",
+        out.stdout
+    );
+    // Without a channel there's no one current value.
+    let d = b.run(&["--json", "set", "relays", "on"]).data();
+    assert!(d.get("value").is_none(), "{d}");
+    assert_eq!(d["channels"], serde_json::json!(["ch1", "ch2"]));
+    let d = b.run(&["--json", "set", "relays:ch2", "on"]).data();
+    assert_eq!(d["value"], true, "{d}");
+    // The channel's own limit.
+    let d = b.run(&["--json", "set", "relays:ch2", "delay"]).data();
+    let ch1 = b.run(&["--json", "set", "relays:ch1", "delay"]).data();
+    assert_ne!(d["limit"], ch1["limit"], "{d} {ch1}");
+    let out = b.run(&["--json", "set", "relays:ch3", "on"]);
+    assert!(
+        out.message().contains("no channel `ch3`"),
+        "{}",
+        out.message()
+    );
+}
+
+#[test]
 fn the_schema_describes_every_declared_name() {
     let b = iron();
     let d = b.run(&["--json", "schema"]).data();
@@ -341,9 +531,13 @@ fn the_schema_describes_every_declared_name() {
     let out = b.run(&["device", "show", "iron"]);
     for needle in [
         "capabilities: power_switch, heater",
-        "settings:     setpoint (°C, 50…450, limit 380), mode (normal|boost), enabled (on|off)",
-        "values:       temperature (°C), last_action",
-        "actions:      standby, boost (seconds)",
+        "settings:\n  setpoint  number in °C, 50…450, limit 380\n",
+        "  mode      normal | boost\n",
+        "  enabled   on | off\n",
+        "values:\n  temperature  number in °C\n               tip temperature\n",
+        "  last_action  text\n",
+        "actions:\n  standby  to standby temperature\n",
+        "  boost    seconds=<number in s, 1…60>\n",
         "limits:       heater setpoint ≤ 380",
     ] {
         assert!(out.stdout.contains(needle), "{needle}\n{}", out.stdout);
@@ -792,4 +986,120 @@ fn library_new_scaffolds_a_declared_capability() {
         "5",
     ]);
     assert_eq!(out.code_str(), "usage");
+}
+
+/// What the shell's completion script asks for: the words so far, the last one at the cursor.
+fn complete(b: &Bench, shell: &str, words: &[&str]) -> Vec<String> {
+    let dir = b.dir.path();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_desk"));
+    c.env("DESK_COMPLETE", shell)
+        .env("DESK_CONFIG", dir.join("desk.toml"))
+        .env("DESK_MOCK_STATE", dir.join("mock-state.json"))
+        .env("_CLAP_IFS", "\n")
+        .env("_CLAP_COMPLETE_INDEX", words.len().to_string())
+        .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+        .env("_CLAP_COMPLETE_SPACE", "true")
+        .args(["--", "desk"])
+        .args(words);
+    let out = c.output().unwrap();
+    assert!(out.status.success(), "{words:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.split('\t').next().unwrap_or(l).to_string())
+        .filter(|l| !l.starts_with('-'))
+        .collect()
+}
+
+#[test]
+fn completions_come_from_the_config_and_definitions() {
+    let b = Bench::with(RELAYS);
+    b.file("relays.lua", RELAYS_DRIVER);
+    let b2 = iron();
+    for shell in ["bash", "fish"] {
+        let c = |words: &[&str]| complete(&b2, shell, words);
+        assert!(c(&["set", ""]).contains(&"iron".to_string()), "{shell}");
+        assert_eq!(c(&["set", "ir"]), ["iron"]);
+        assert_eq!(c(&["set", "iron", ""]), ["setpoint", "mode", "enabled"]);
+        assert_eq!(c(&["set", "iron", "mo"]), ["mode"]);
+        assert_eq!(c(&["set", "iron", "mode", ""]), ["normal", "boost"]);
+        assert_eq!(c(&["set", "iron", "enabled", "o"]), ["on", "off"]);
+        assert!(c(&["set", "iron", "setpoint", ""]).is_empty(), "a number");
+        // A setting that's been given isn't offered again.
+        assert_eq!(
+            c(&["set", "iron", "mode", "boost", ""]),
+            ["setpoint", "enabled"]
+        );
+        assert_eq!(
+            c(&["get", "iron", ""]),
+            ["setpoint", "mode", "enabled", "temperature", "last_action"]
+        );
+        assert_eq!(c(&["do", "iron", ""]), ["standby", "boost"]);
+        assert_eq!(c(&["do", "iron", "boost", ""]), ["seconds="]);
+        assert_eq!(c(&["--json", "power", "on", "ir"]), ["iron"]);
+        assert_eq!(c(&["provider", "test", ""]), ["sim"]);
+        assert_eq!(c(&["device", "show", "ir"]), ["iron"]);
+        assert_eq!(c(&["skill", "desk-a"]), ["desk-add-device"]);
+    }
+    // An action's arguments and their choices, whole or as bash splits them.
+    let picks = Bench::with(
+        r#"
+[providers.sim]
+kind = "mock"
+[devices.cam]
+[devices.cam.shutter]
+provider = "sim"
+endpoint = "cam"
+actions = { shoot = { switches = false, args = { mode = { type = "choice", choices = ["fast", "slow"] }, count = { type = "number" } } } }
+"#,
+    );
+    assert_eq!(
+        complete(&picks, "fish", &["do", "cam", "shoot", ""]),
+        ["mode=", "count="]
+    );
+    assert_eq!(
+        complete(&picks, "fish", &["do", "cam", "shoot", "mode=f"]),
+        ["mode=fast"]
+    );
+    assert_eq!(
+        complete(&picks, "bash", &["do", "cam", "shoot", "mode", "=", ""]),
+        ["fast", "slow"]
+    );
+    assert_eq!(
+        complete(&picks, "fish", &["do", "cam", "shoot", "mode=fast", ""]),
+        ["count="]
+    );
+    // Channels, whole (one word) or as bash splits them.
+    assert_eq!(
+        complete(&b, "fish", &["set", "relays:"]),
+        ["relays:ch1", "relays:ch2"]
+    );
+    assert_eq!(
+        complete(&b, "bash", &["set", "relays", ":", ""]),
+        ["ch1", "ch2"]
+    );
+    assert_eq!(
+        complete(&b, "bash", &["set", "relays", ":", "ch1", "o"]),
+        ["on"]
+    );
+}
+
+#[test]
+fn completions_scripts_and_a_broken_config_are_harmless() {
+    let b = iron();
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let out = b.run(&["completions", shell]);
+        assert_eq!(out.code, 0, "{shell}: {}", out.stderr);
+        assert!(
+            out.stdout.contains("DESK_COMPLETE"),
+            "{shell}: {}",
+            out.stdout
+        );
+    }
+    let out = b.run(&["--json", "completions", "bash"]);
+    assert_eq!(out.data()["shell"], "bash");
+    assert!(b.run(&["completions", "nushell"]).code != 0);
+    // No device or config needed for the script; Tab on a broken config offers nothing.
+    b.file("desk.toml", "this is not toml");
+    assert_eq!(b.run(&["completions", "bash"]).code, 0);
+    assert!(complete(&b, "bash", &["set", "ir"]).is_empty());
 }

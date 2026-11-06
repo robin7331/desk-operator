@@ -59,6 +59,8 @@ desk set <device> <setting> <value> --dry-run --json  # ranges and limits checke
 desk do <device> <action> [<arg>=<value>...] --json  # e.g. desk do iron standby
 desk watch <device> [<name>...] --count 10 --json   # one JSON line per reading (see below)
 desk get <device>:<channel> --json                  # one channel of a multi-channel device
+desk set <device> [<setting>] --json                # what it takes (see below); changes nothing
+desk do <device> [<action>] --json                  # the same for actions and their arguments
 ```
 
 There's one entry per device: `data.results[]` for `power on|off|toggle`, `data.devices[]` for
@@ -98,6 +100,10 @@ the first failure only.
 - Report `data.values` (and `data.channels` for multi-channel devices) and `data.warnings`. A name
   that's absent isn't reported by the device.
 - When in doubt, `--dry-run` first: it checks ranges and limits and shows what would be sent.
+- To find out what a setting or action takes, leave the value or action out: `desk set <device>
+  <setting> --json` gives its choices or unit, range and `limit` in `data`, and its current `value`
+  if it could be read (else `value_error`). It changes nothing and still answers `ok: false` with
+  `error.code` `usage`, because nothing was set. Read `data`; don't report that as a failure.
 
 ## Power supplies
 

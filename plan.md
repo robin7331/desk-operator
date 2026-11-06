@@ -819,6 +819,11 @@ the `check` hook, events, captures.
 - **Open capabilities instead of a fixed list (2026-11-05):** desk should cover basically any
   device. Definitions declare values, settings and actions; the core enforces generic rules
   (units, ranges, limits, verify, dry-run, timeouts). Well-known capabilities keep stricter rules.
+- **Left-out arguments list what's possible, as a usage error (2026-11-06, issue #1):** `desk set
+  <device> [<setting>]` and `desk do <device> [<action>]` describe the choices, unit, range and
+  limit, read the current value if they can, and change nothing. They still exit 2 with `ok: false`
+  and the listing in `data`: `desk set psu voltage $EMPTY && desk set psu output on` must stop
+  there. Mains is never switched for it; a device that can't answer just has no current value.
 - **One command set for every device (2026-11-05):** `desk get|set|do|watch <device> <name> …`,
   command before device. `desk source` is dropped; PSU rules apply through the generic commands.
   `desk power` stays its own group (mains is shared by every device).

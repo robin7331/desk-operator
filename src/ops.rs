@@ -166,7 +166,55 @@ impl Catalog {
             .find_map(|e| e.decls.readable_decl(name))
     }
 
-    fn check_channel(&self, entry: usize, channel: Option<&str>, need: bool) -> Result<()> {
+    /// Find a setting: the entry's index, the bare name and its declaration.
+    pub fn setting(&self, query: &str) -> Result<(usize, String, &Decl)> {
+        let (i, name) = self.resolve(query)?;
+        let e = &self.entries[i];
+        match e.decls.settings.get(&name) {
+            Some(decl) => Ok((i, name, decl)),
+            None => Err(DeskError::Usage(if e.decls.actions.contains_key(&name) {
+                format!("`{name}` is an action: `desk do {} {name}`", self.device)
+            } else {
+                format!("`{name}` is a value the device reports; it can't be set")
+            })),
+        }
+    }
+
+    /// Find an action: the entry's index, the bare name and its declaration.
+    pub fn action(&self, query: &str) -> Result<(usize, String, &Action)> {
+        let (i, name) = self.resolve(query)?;
+        let e = &self.entries[i];
+        match e.decls.actions.get(&name) {
+            Some(action) => Ok((i, name, action)),
+            None => Err(DeskError::Usage(format!(
+                "`{name}` is not an action (actions: {}); values and settings use `desk get` / `desk set`",
+                names_or_none(e.decls.actions.keys())
+            ))),
+        }
+    }
+
+    /// Whether any capability has this channel; if not, an error that says what's wrong.
+    pub fn check_any_channel(&self, channel: &str) -> Result<()> {
+        let any = self.entries.iter().any(|e| {
+            e.decls
+                .channels
+                .as_ref()
+                .is_some_and(|c| c.iter().any(|x| x == channel))
+        });
+        if any {
+            return Ok(());
+        }
+        // Name the problem precisely (no channels at all, or not this one).
+        for i in 0..self.entries.len() {
+            self.check_channel(i, Some(channel), false)?;
+        }
+        Err(DeskError::Usage(format!(
+            "device `{}` has no channels",
+            self.device
+        )))
+    }
+
+    pub fn check_channel(&self, entry: usize, channel: Option<&str>, need: bool) -> Result<()> {
         let e = &self.entries[entry];
         match (&e.decls.channels, channel) {
             (None, None) => Ok(()),
@@ -391,22 +439,7 @@ pub fn plan_get(
     names: &[String],
 ) -> Result<(Op, Option<Vec<String>>)> {
     if let Some(ch) = channel {
-        let any = cat.entries.iter().any(|e| {
-            e.decls
-                .channels
-                .as_ref()
-                .is_some_and(|c| c.iter().any(|x| x == ch))
-        });
-        if !any {
-            // Name the problem precisely (no channels at all, or not this one).
-            for (i, _) in cat.entries.iter().enumerate() {
-                cat.check_channel(i, Some(ch), false)?;
-            }
-            return Err(DeskError::Usage(format!(
-                "device `{}` has no channels",
-                cat.device
-            )));
-        }
+        cat.check_any_channel(ch)?;
     }
     let filter = if names.is_empty() {
         None
@@ -449,15 +482,8 @@ pub fn plan_set(
     let mut parts: Vec<SetPart> = Vec::new();
     for pair in pairs.chunks(2) {
         let (query, input) = (&pair[0], &pair[1]);
-        let (i, name) = cat.resolve(query)?;
+        let (i, name, decl) = cat.setting(query)?;
         let e = &cat.entries[i];
-        let Some(decl) = e.decls.settings.get(&name) else {
-            return Err(DeskError::Usage(if e.decls.actions.contains_key(&name) {
-                format!("`{name}` is an action: `desk do {} {name}`", cat.device)
-            } else {
-                format!("`{name}` is a value the device reports; it can't be set")
-            }));
-        };
         cat.check_channel(i, channel, true)?;
         let val = declared::parse_input(&name, decl, input)?;
         if let Kind::Declared = e.kind {
@@ -516,14 +542,7 @@ pub fn plan_do(
     raw_args: &[String],
     dry_run: bool,
 ) -> Result<Op> {
-    let (i, name) = cat.resolve(query)?;
-    let e = &cat.entries[i];
-    let Some(action) = e.decls.actions.get(&name) else {
-        return Err(DeskError::Usage(format!(
-            "`{name}` is not an action (actions: {}); values and settings use `desk get` / `desk set`",
-            names_or_none(e.decls.actions.keys())
-        )));
-    };
+    let (i, name, action) = cat.action(query)?;
     cat.check_channel(i, channel, true)?;
     let args = parse_args(&name, action, raw_args)?;
     Ok(Op::Do {

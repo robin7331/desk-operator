@@ -190,6 +190,12 @@ fn watch_streams_readings_while_other_commands_run() {
     assert_eq!(refused.code, 8);
     assert_eq!(refused.json()["error"]["code"], "limit_exceeded");
 
+    // A left-out value is read through the session too.
+    let listing = b.run(&["--json", "set", "psu", "voltage"]);
+    assert_eq!(listing.code, 2, "{}", listing.stdout);
+    assert_eq!(listing.json()["error"]["code"], "usage");
+    assert_eq!(listing.json()["data"]["value"], 3.0);
+
     let mut saw = false;
     for _ in 0..40 {
         if w.line()["data"]["values"]["voltage"] == 3.0 {

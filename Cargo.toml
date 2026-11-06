@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1.92"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 directories = "6.0.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 humantime = "2.4.0"

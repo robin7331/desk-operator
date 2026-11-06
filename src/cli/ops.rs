@@ -2,9 +2,11 @@
 
 use serde::Serialize;
 
+use super::device::{self, ActionView, NameView, Names};
 use crate::bench::Bench;
-use crate::declared::Val;
-use crate::error::Result;
+use crate::config::Device;
+use crate::declared::{Type, Val};
+use crate::error::{DeskError, ErrorJson, Result};
 use crate::ops::{self, Catalog, DeviceReadings, Op, split_channel};
 use crate::output::Report;
 
@@ -34,6 +36,13 @@ pub async fn set(
     let (query, channel) = split_channel(target);
     let device = bench.config.resolve_device(query)?;
     let cat = Catalog::of(device)?;
+    if pairs.is_empty() {
+        return list_settings(device, &cat, target, channel);
+    }
+    if let (true, Some(last)) = (!pairs.len().is_multiple_of(2), pairs.last()) {
+        let given = &pairs[..pairs.len() - 1];
+        return describe_setting(bench, device, &cat, target, channel, given, last).await;
+    }
     let op = ops::plan_set(&cat, device, channel, pairs, clear_protection, dry_run)?;
     finish(bench, device, &cat, op, None).await
 }
@@ -41,15 +50,276 @@ pub async fn set(
 pub async fn act(
     bench: &Bench,
     target: &str,
-    action: &str,
+    action: Option<&str>,
     args: &[String],
     dry_run: bool,
 ) -> Result<Report> {
     let (query, channel) = split_channel(target);
     let device = bench.config.resolve_device(query)?;
     let cat = Catalog::of(device)?;
+    let Some(action) = action else {
+        return list_actions(device, &cat, target, channel);
+    };
+    if args.is_empty() && !cat.action(action)?.2.args.is_empty() {
+        return describe_action(device, &cat, target, channel, action);
+    }
     let op = ops::plan_do(&cat, channel, action, args, dry_run)?;
     finish(bench, device, &cat, op, None).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Left-out arguments: say what's possible. Still a usage error, with nothing changed: a script's
+// `desk set psu voltage $EMPTY && desk set psu output on` must not carry on as if it had worked.
+
+/// A listing in place of a command: `data` and the text, plus the usage error that ends it.
+fn listing(data: &impl Serialize, human: String, message: String) -> Report {
+    let error = DeskError::Usage(message);
+    let human = format!("{human}{error}\n");
+    Report::new(data, human).with_failure(Some((error.to_json(), error.exit_code())))
+}
+
+/// How to address the device in a suggested command: `iron`, `relays:<channel>`.
+fn address(target: &str, channel: Option<&str>, has_channels: bool) -> String {
+    if has_channels && channel.is_none() {
+        format!("{target}:<channel>")
+    } else {
+        target.to_string()
+    }
+}
+
+fn channels_text(names: &Names) -> String {
+    names
+        .channels
+        .iter()
+        .map(|(cap, chs)| device::labelled(&format!("channels of {cap}"), &chs.join(", ")))
+        .collect()
+}
+
+#[derive(Serialize)]
+struct SettingsList<'a> {
+    device: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<&'a str>,
+    settings: &'a indexmap::IndexMap<String, NameView>,
+    #[serde(skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    channels: &'a indexmap::IndexMap<String, Vec<String>>,
+}
+
+/// `desk set <device>`: every setting and what it takes.
+fn list_settings(
+    device: &Device,
+    cat: &Catalog,
+    target: &str,
+    channel: Option<&str>,
+) -> Result<Report> {
+    if let Some(ch) = channel {
+        cat.check_any_channel(ch)?;
+    }
+    let names = Names::of(device, cat, channel);
+    if names.settings.is_empty() {
+        return Err(DeskError::Usage(format!(
+            "device `{}` has no settings (`desk device show {}` shows what it has)",
+            device.id, device.id
+        )));
+    }
+    let human = device::name_blocks(&names.settings, "") + &channels_text(&names);
+    let has_channels = names
+        .settings
+        .values()
+        .any(|v| names.channels.contains_key(&v.capability));
+    let message = format!(
+        "name a setting and its value (nothing was set): desk set {} <setting> <value>",
+        address(target, channel, has_channels)
+    );
+    let data = SettingsList {
+        device: &device.id,
+        channel,
+        settings: &names.settings,
+        channels: &names.channels,
+    };
+    Ok(listing(&data, human, message))
+}
+
+#[derive(Serialize)]
+struct SettingHelp<'a> {
+    device: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<&'a str>,
+    setting: &'a str,
+    #[serde(flatten)]
+    view: NameView,
+    /// The current value, if it could be read (a read changes nothing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<Val>,
+    /// Why it couldn't: the device is off or unreachable, say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value_error: Option<ErrorJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channels: Option<&'a [String]>,
+}
+
+/// `desk set <device> <setting>`: what it takes and, if the device can tell, what it's set to.
+async fn describe_setting(
+    bench: &Bench,
+    device: &Device,
+    cat: &Catalog,
+    target: &str,
+    channel: Option<&str>,
+    given: &[String],
+    query: &str,
+) -> Result<Report> {
+    let (i, name, decl) = cat.setting(query)?;
+    cat.check_channel(i, channel, false)?;
+    let e = &cat.entries[i];
+    let channels = e.decls.channels.as_deref();
+    let view = NameView {
+        capability: e.key.clone(),
+        decl: decl.clone(),
+        limit: device.limits.get(&e.key, &name, channel),
+    };
+    // Which channel's value? Without one there's no single answer.
+    let read = match (channels, channel) {
+        (Some(_), None) => None,
+        _ => Some(read_setting(bench, device, cat, channel, &name).await),
+    };
+    let current = match &read {
+        None => "address a channel to read it".to_string(),
+        Some(Ok(Some(v))) => format!("{} (current)", v.display(Some(decl))),
+        Some(Ok(None)) => "the device doesn't report it".to_string(),
+        Some(Err(e)) => format!("not read ({e})"),
+    };
+    let mut human = format!("{name}: {current}\n");
+    match decl.kind {
+        Type::Choice => human.push_str(&device::labelled("choices", &decl.choices.join(", "))),
+        Type::Boolean => human.push_str("choices: on, off\n"),
+        Type::String => human.push_str("type: text\n"),
+        Type::Number => {
+            if let Some(u) = &decl.unit {
+                human.push_str(&format!("unit: {u}\n"));
+            }
+            if let Some(r) = device::range_text(decl) {
+                human.push_str(&format!("range: {r}\n"));
+            }
+            if let Some(l) = view.limit {
+                human.push_str(&format!("bench limit: {}\n", device::limit_text(l)));
+            }
+        }
+    }
+    if let Some(doc) = &decl.doc {
+        human.push_str(&device::labelled("about", doc));
+    }
+    if let Some(chs) = channels {
+        human.push_str(&device::labelled("channels", &chs.join(", ")));
+    }
+    let command: Vec<&str> = given
+        .iter()
+        .map(String::as_str)
+        .chain([query, "<value>"])
+        .collect();
+    let message = format!(
+        "`{name}` needs a value (nothing was set): desk set {} {}",
+        address(target, channel, channels.is_some()),
+        command.join(" ")
+    );
+    let (value, value_error) = match read {
+        Some(Ok(v)) => (v, None),
+        Some(Err(e)) => (None, Some(e.to_json())),
+        None => (None, None),
+    };
+    let data = SettingHelp {
+        device: &device.id,
+        channel,
+        setting: &name,
+        view,
+        value,
+        value_error,
+        channels,
+    };
+    Ok(listing(&data, human, message))
+}
+
+async fn read_setting(
+    bench: &Bench,
+    device: &Device,
+    cat: &Catalog,
+    channel: Option<&str>,
+    name: &str,
+) -> Result<Option<Val>> {
+    let (op, _) = ops::plan_get(cat, channel, &[])?;
+    let report = bench.run(device, cat, op).await.result?;
+    Ok(report.outcome.readings.values.get(name).cloned())
+}
+
+#[derive(Serialize)]
+struct ActionsList<'a> {
+    device: &'a str,
+    actions: &'a indexmap::IndexMap<String, ActionView>,
+}
+
+/// `desk do <device>`: every action and its arguments.
+fn list_actions(
+    device: &Device,
+    cat: &Catalog,
+    target: &str,
+    channel: Option<&str>,
+) -> Result<Report> {
+    if let Some(ch) = channel {
+        cat.check_any_channel(ch)?;
+    }
+    let names = Names::of(device, cat, channel);
+    if names.actions.is_empty() {
+        return Err(DeskError::Usage(format!(
+            "device `{}` has no actions (`desk device show {}` shows what it has)",
+            device.id, device.id
+        )));
+    }
+    let human = device::action_blocks(&names.actions, "") + &channels_text(&names);
+    let has_channels = names
+        .actions
+        .values()
+        .any(|a| names.channels.contains_key(&a.capability));
+    let message = format!(
+        "name an action (nothing was done): desk do {} <action> [<arg>=<value>...]",
+        address(target, channel, has_channels)
+    );
+    let data = ActionsList {
+        device: &device.id,
+        actions: &names.actions,
+    };
+    Ok(listing(&data, human, message))
+}
+
+/// `desk do <device> <action>` when the action needs arguments: what they take.
+fn describe_action(
+    device: &Device,
+    cat: &Catalog,
+    target: &str,
+    channel: Option<&str>,
+    query: &str,
+) -> Result<Report> {
+    let (i, name, action) = cat.action(query)?;
+    cat.check_channel(i, channel, false)?;
+    let e = &cat.entries[i];
+    let view = ActionView {
+        capability: e.key.clone(),
+        action: action.clone(),
+    };
+    let mut one = indexmap::IndexMap::new();
+    one.insert(name.clone(), view);
+    let human = device::action_blocks(&one, "");
+    let needs: Vec<String> = action.args.keys().map(|k| format!("`{k}=…`")).collect();
+    let args: Vec<String> = action.args.keys().map(|k| format!("{k}=<value>")).collect();
+    let message = format!(
+        "`{name}` needs {} (nothing was done): desk do {} {query} {}",
+        needs.join(", "),
+        address(target, channel, e.decls.channels.is_some()),
+        args.join(" ")
+    );
+    let data = ActionsList {
+        device: &device.id,
+        actions: &one,
+    };
+    Ok(listing(&data, human, message))
 }
 
 async fn finish(

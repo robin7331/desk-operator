@@ -103,7 +103,8 @@ default.
 ## Tech stack
 
 - Rust (stable, 2024 edition), single binary named `desk` (crate `desk-operator`).
-- `clap` (derive), `tokio`, `reqwest` (rustls, json), `serde`, `toml` (+ `toml_edit` when the CLI
+- `clap` (derive), `clap_complete` (feature `unstable-dynamic`: review the shell scripts when
+  upgrading it), `tokio`, `reqwest` (rustls, json), `serde`, `toml` (+ `toml_edit` when the CLI
   edits config), `anyhow` at the CLI edge, `thiserror` in core modules, `directories` for config
   paths, `inquire` for TTY pickers.
 - `mlua` with features `lua54`, `vendored`, `async`, `serialize`. Host functions are async and use
@@ -133,7 +134,10 @@ src/
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
   daemon/              `desk serve`: local socket (ipc.rs), JSON-lines protocol, CLI forwarding,
                        `watch` streams; session.rs = live device sessions + per-device port lock
-  cli/ops.rs           `desk get`, `desk set`, `desk do` (rendering included)
+  cli/ops.rs           `desk get`, `desk set`, `desk do` (rendering included); left-out arguments
+                       list what's possible and end as a usage error
+  cli/complete.rs      `desk completions <shell>` and the candidates behind Tab (config and
+                       definitions only, never a device)
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
 docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
