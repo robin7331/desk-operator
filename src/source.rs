@@ -352,6 +352,13 @@ pub async fn apply(
     })
 }
 
+/// Read the device (one query: no `info()`), with the warning for a tripped protection.
+pub async fn read(src: &dyn VoltageSource, warnings: &mut Vec<String>) -> Result<Reading> {
+    let reading = src.read().await?;
+    protection_warning(&reading, warnings);
+    Ok(reading)
+}
+
 fn protection_warning(reading: &Reading, warnings: &mut Vec<String>) {
     if let Some(p) = reading.protection.filter(|p| p.tripped()) {
         warnings.push(format!(

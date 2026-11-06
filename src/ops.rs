@@ -715,19 +715,9 @@ async fn read_one(
     warnings: &mut Vec<String>,
 ) -> Result<Readings> {
     match (drv, e.kind) {
-        (CapDriver::Source(s), Kind::Source(ratings)) => {
+        (CapDriver::Source(s), Kind::Source(_)) => {
             s.select_channel(channel)?;
-            // An empty request reads (with the protection warning).
-            let r = source::apply(
-                s.as_ref(),
-                Request::default(),
-                Limits::default(),
-                ratings,
-                false,
-            )
-            .await?;
-            warnings.extend(r.warnings);
-            Ok(source_readings(&r.reading))
+            Ok(source_readings(&source::read(s.as_ref(), warnings).await?))
         }
         (CapDriver::Declared(d), Kind::Declared) => {
             declared::read(d.as_ref(), &e.decls, channel).await
