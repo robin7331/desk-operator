@@ -1,0 +1,33 @@
+# Device definition: true for every OWON XDM1041, nothing about any particular bench.
+
+[device]
+id       = "owon/xdm1041"
+name     = "OWON XDM1041"
+requires = "desk-operator >= 0.1"
+status   = "community"
+sources  = [
+  "https://static.eleshop.nl/mage/media/downloads/XDM1000_Digital_Multimeter_Programming_Manual.pdf",
+  "https://github.com/TheHWcave/OWON-XDM1041",
+  "https://github.com/markusdd/rusty_meter",
+  "https://github.com/icrnjavic/owon-xdm1041_py-util",
+  "https://github.com/Elektroarzt/owon-xdm-remote",
+]
+
+[meter]
+script  = "driver.lua"
+# 1a86:7523 is a generic CH340 adapter without a serial number, shared by unrelated gadgets: the
+# driver checks *IDN? before anything else. With several of them, bind by `path` (/dev/serial/by-path).
+port    = { usb_vid = 0x1a86, usb_pid = 0x7523 }
+timeout = "15s"   # the meter can stall about 3 s in K-type temperature mode (see ../README.md)
+
+[meter.values]
+reading      = { type = "number", units = ["V", "A", "Ω", "F", "Hz", "s", "°C", "K", "°F"], doc = "main display. A current function on the wrong input socket reads 0 although current flows" }
+overload     = { type = "boolean", doc = "no valid reading: over range or open input; there is no reading then" }
+active_range = { type = "string", doc = "the range in use, also while auto-ranging" }
+firmware     = { type = "string", doc = "firmware version reported by the meter" }
+
+# Applied in this order: selecting a function resets the range to auto.
+[meter.settings]
+function = { type = "choice", choices = ["dc_voltage", "ac_voltage", "dc_current", "ac_current", "resistance", "capacitance", "frequency", "period", "diode", "continuity", "temperature_kits90", "temperature_pt100"], doc = "what the meter measures. Resistance, capacitance, diode and continuity drive a test current through the probes" }
+range    = { type = "choice", choices = ["auto", "50mV", "500mV", "5V", "50V", "500V", "750V", "1000V", "500uA", "5mA", "50mA", "500mA", "5A", "10A", "500ohm", "5kohm", "50kohm", "500kohm", "5Mohm", "50Mohm", "50nF", "500nF", "5uF", "50uF", "500uF", "5mF", "50mF"], doc = "auto, or a manual range of the current function" }
+rate     = { type = "choice", choices = ["slow", "medium", "fast"], switches = false, doc = "measuring speed" }

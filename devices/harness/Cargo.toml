@@ -1,0 +1,13 @@
+[package]
+name = "harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Tests of the device definitions against fake devices, run with the installed desk"
+
+[dependencies]
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+
+[dev-dependencies]
+serialport = "4.10.1"
+tempfile = "3.27.0"
