@@ -47,3 +47,20 @@ fn desk_uses_this_checkout() {
         );
     }
 }
+
+#[test]
+fn the_dps150_driver_declares_its_params() {
+    let out = harness::run(&["--json", "library", "show", "fnirsi/ips3608"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let d = out.data();
+    let names: Vec<&str> = d["driver_params"]["source"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    for n in ["name", "status", "settle_ms", "boot_ms"] {
+        assert!(names.contains(&n), "{n} in {names:?}");
+    }
+    assert_eq!(d["definition"]["status"], "tested");
+}
