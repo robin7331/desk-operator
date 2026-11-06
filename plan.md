@@ -304,16 +304,16 @@ Modbus registers (Riden RD60xx).
 |---|---|---|
 | What | `psu` on *one* bench | "FNIRSI IPS3608": what's true for every unit of a model |
 | Contains | name, aliases, the user's power path (HA, Shelly, …), bench `limits`, which unit (serial number) | driver(s), USB ids, device maximums, docs, tests, tested firmware |
-| Lives in | the user's `~/.config/desk-operator/desk.toml` (never in a repo) | the device library (desk-operator-devices): `<vendor>/<model>/` |
+| Lives in | the user's `~/.config/desk-operator/desk.toml` (never in a repo) | the device library: `devices/<vendor>/<model>/` |
 
 A definition never contains anything about how a particular user switches mains or names things.
 
-**Own repository since 2026-11-06:** the library is
-[desk-operator-devices](https://github.com/robin7331/desk-operator-devices), checked out here as the
-submodule `devices/` and bundled by `build.rs` (vendor folders only). Its definition tests are a
-Rust crate in its `harness/` that runs the installed `desk` (or `$DESK_BIN`) with the checkout's
-files. The core's tests don't depend on which definitions are bundled. (Before: a monorepo folder
-until the driver contract settled; moved early so contributing works like it will for real users.)
+**In this repository:** the library is `devices/`, bundled by `build.rs` (vendor folders only). Its
+fake-device tests are `tests/device_*.rs`, run against this checkout's `desk`. The core's tests don't
+depend on which definitions are bundled. (It had its own repository, desk-operator-devices, for one
+day on 2026-11-06. A merged device still needed a submodule update to reach anyone, so it moved back
+with its history for a lean start. It can be split out again when device updates need to outpace
+desk builds.)
 
 ## M5 — Device library ✓
 
@@ -344,7 +344,7 @@ until the driver contract settled; moved early so contributing works like it wil
       different USB device on that path
 - [x] `devices/README.md` as contributor guide; skill uses `model =`
 - [x] Real bench switched to `model = "fnirsi/ips3608"` + its serial number; read verified on hardware
-- Decision: definition tests stay in Rust, now in the library's `harness/` (2026-11-06); a Lua
+- Decision: definition tests stay in Rust, in `tests/device_*.rs` (2026-11-06); a Lua
   fake-device format (`desk library test`, no Rust needed) is a later option for contributors.
 
 ## M5.1 — A defined definition format ✓
@@ -420,7 +420,7 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
 - **Probe tool in desk:** yes, minimal: `desk port probe` (hex or `--text` sends, timestamped hex
   replies). It's raw (no limits), so the skills restrict it to documented read-only queries and
   forbid it for operating devices. Diffing snapshots stays the agent's job.
-- **Fake-device tests:** Rust, in the library clone's `harness/tests/`; without a clone or Rust the
+- **Fake-device tests:** Rust, in a clone's `tests/device_*.rs`; without a clone or Rust the
   skill says there's no fake test and relies on probing + smoke test.
 - **Publishing:** skill-guided, consent on the exact file list first. `gh` if available; else git
   branch + push/compare-URL steps or `git format-patch`; without a checkout a tarball of the
@@ -503,17 +503,15 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
    `desk skill install --global`), add the multimeter in a fresh session with only the installed
    skills (it's read-only, so the safest first device for an agent).
 5. **Public:** license, release CI for Linux/macOS/Windows (also builds the Windows named-pipe code
-   for the first time), `curl | sh` installer that offers `desk skill install`, then make both
-   repos public.
-   - [x] Two private GitHub repos (2026-11-06): `robin7331/desk-operator` and
-     `robin7331/desk-operator-devices`; the library is a submodule, bundled at build time; its
-     tests live in its `harness/`; `AGENTS.md` (+ `CLAUDE.md` = `@AGENTS.md`) in both point to
-     each other; the `desk-add-device` skill clones the library, branches and opens pull
-     requests there, and sends gaps in desk to desk-operator as issues or pull requests.
+   for the first time), `curl | sh` installer that offers `desk skill install`, then make the
+   repo public.
+   - [x] One private GitHub repo, `robin7331/desk-operator` (2026-11-06): the library is
+     `devices/`, bundled at build time, its tests are in `tests/`; the `desk-add-device` skill
+     clones the repo, branches and opens pull requests there.
    - [ ] **Before making desk-operator public: clean its git history.** Early commits contain the
      user's PSU serial number (docs examples, M5) and a Home Assistant entity (a unit test).
-     desk-operator-devices started clean.
-   - [ ] CI in desk-operator-devices: run `harness/` against a desk build.
+     The library's merged history started clean.
+   - [ ] CI: run `cargo test`, which includes the fake-device tests.
 
 ## M7 — Open capabilities (design, 2026-11-05; to be reviewed before building)
 
@@ -799,7 +797,7 @@ the `check` hook, events, captures.
 5. **Palette + tray** (Tauri v2), with `desk palette` for Wayland compositor binds
 6. ~~Daemon~~: moved to roadmap step 2 (streaming)
 7. **MCP server** (`desk mcp`), then natural language with your own API key, always as a previewed plan
-8. ~~Split `devices/` into `desk-operator-devices`~~ (done, roadmap step 5); Shelly-direct provider
+8. Shelly-direct provider
 
 ## Decisions log
 

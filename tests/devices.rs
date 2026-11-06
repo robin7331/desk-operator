@@ -1,5 +1,8 @@
-//! Every definition in this library passes `desk library check` (format, ratings, declarations,
+//! Every definition in `devices/` passes `desk library check` (format, ratings, declarations,
 //! driver loads in the sandbox with its required functions), and desk uses this checkout's copy.
+
+#[path = "support/devices.rs"]
+mod harness;
 
 use harness::{definitions, root, run};
 
@@ -67,7 +70,7 @@ fn the_dps150_driver_declares_its_params() {
 
 /// The rows of the *Supported devices* table in the README: (device name, status).
 fn supported_devices() -> Vec<(String, String)> {
-    let readme = std::fs::read_to_string(root().join("README.md")).unwrap();
+    let readme = std::fs::read_to_string(root().join("../README.md")).unwrap();
     readme
         .lines()
         .skip_while(|l| *l != "## Supported devices")

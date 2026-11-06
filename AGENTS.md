@@ -22,14 +22,12 @@ commands keep working (`docs/streaming.md`). **M7, open capabilities, in progres
 connection type, then the real test (roadmap step 4).
 Keep it lean: build only what the current milestone needs.
 
-**Two repositories** (both private until going public, roadmap step 5 in `plan.md`):
-- **desk-operator** (this one): the core. It never names a vendor or model.
-- **[desk-operator-devices](https://github.com/robin7331/desk-operator-devices)**: the device
-  library, checked out here as the git submodule `devices/` and bundled into the binary by
-  `build.rs`. Definitions, drivers and their fake-device tests (`harness/`) live there; its
-  `AGENTS.md` sends core gaps (a new connection type, a host API function) back here as issues
-  or pull requests. A change to the definition format or host API that breaks definitions needs
-  a matching change there.
+**One repository** (private until going public, roadmap step 5 in `plan.md`), two parts:
+- **The core** (`src/`): it never names a vendor or model.
+- **The device library** (`devices/`): definitions and drivers, bundled into the binary by
+  `build.rs`, with their fake-device tests in `tests/device_*.rs`. `devices/README.md` is the
+  contributor guide. A change to the definition format or host API that breaks definitions needs a
+  matching change there, in the same commit.
 
 **Working agreements:**
 - Develop and verify the generic tool with mocks and fakes. Real hardware is at most a short
@@ -44,7 +42,7 @@ Keep it lean: build only what the current milestone needs.
 | Term | Meaning |
 |---|---|
 | **Device** | Something on *one user's* bench, such as `psu` or `iron`, in their `desk.toml`. It has an id, a name, aliases, capabilities, and the user's own bindings (e.g. their power path) and `limits`. |
-| **Device definition** | What's true for *every unit* of a model ("FNIRSI IPS3608"): driver, USB ids, maximums, docs, tests. Lives in the device library (desk-operator-devices, here `devices/<vendor>/<model>/`). Never contains anything user-specific (no Home Assistant entities, no bench limits). |
+| **Device definition** | What's true for *every unit* of a model ("FNIRSI IPS3608"): driver, USB ids, maximums, docs, tests. Lives in the device library (`devices/<vendor>/<model>/`). Never contains anything user-specific (no Home Assistant entities, no bench limits). |
 | **Capability** | A named group of what a device can do, with one driver binding. **Well-known** ones have names and stricter rules fixed by the core: `power` (power_switch, mains) and `source` (voltage_source, bench power supplies). Any other name (`heater`, `meter`, …) is **declared**: the definition lists its values, settings and actions, and the core applies its generic rules. |
 | **Value / setting / action** | What a capability declares: a **value** is reported (`temperature`), a **setting** is reported and changeable (`setpoint`), an **action** is done on request (`standby`). Typed (`number` with a unit, `boolean`, `choice`, `string`), with ranges; `switches` marks a physical effect. |
 | **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which is the `output` setting of `source`. Never mix "power" and "output". |
@@ -155,25 +153,25 @@ tests/daemon.rs        watch + daemon: streaming, commands during a watch, endin
 tests/declared.rs      declared capabilities: units, ranges, limits, verify, channels, Lua drivers
 tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
 tests/library.rs       model = "…", merging, search path, desk library list|show|check
+tests/devices.rs       every definition passes the check, and the README lists it with its status
+tests/device_*.rs      one file per protocol family: a driver against a fake device on a pty
+tests/support/devices.rs  helpers for those: this checkout's desk with the library in devices/
 build.rs               bundles devices/<vendor>/… into the binary (`bundled:<path>`)
-devices/               git submodule: desk-operator-devices (definitions, drivers, their tests in harness/)
+devices/               the device library: definitions, drivers, vendor READMEs (devices/README.md)
 ```
 
 ## Development
 
 ```sh
-git submodule update --init      # once: the device library in devices/ (clone with --recursive)
 cargo build
 cargo test                       # must pass without hardware or network (mock provider)
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 cargo run -- --config examples/desk.toml power status
-(cd devices/harness && DESK_BIN=../../target/debug/desk cargo test)   # the library against this build
 ```
 
 The core's own tests never depend on which definitions the library has (`tests/library.rs` picks
-whatever is bundled). To bundle a newer library: `git -C devices pull`, then commit the submodule
-pointer.
+whatever is bundled). A new device adds its row to *Supported devices* in `README.md`.
 
 Testing without hardware: the `mock` provider stores state in `$DESK_MOCK_STATE` (tests point it
 at a temp dir). Endpoint prefixes simulate failures: `fail_` (unavailable), `stuck_` (verify fails),

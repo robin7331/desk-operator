@@ -1,6 +1,9 @@
-//! The FNIRSI DPS-150-family driver (`fnirsi/shared/dps150_protocol.lua`) against a fake device
-//! that speaks the protocol over a pseudo-terminal, run with the installed desk (see harness/src).
+//! The FNIRSI DPS-150-family driver (`devices/fnirsi/shared/dps150_protocol.lua`) against a fake
+//! device that speaks the protocol over a pseudo-terminal.
 #![cfg(unix)]
+
+#[path = "support/devices.rs"]
+mod harness;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

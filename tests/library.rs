@@ -169,8 +169,8 @@ fn unknown_models_are_config_errors() {
     );
 }
 
-/// The definitions bundled into desk (from the library submodule; the core's tests don't depend
-/// on which ones it has).
+/// The definitions bundled into desk (from `devices/`; the core's tests don't depend on which ones
+/// it has).
 fn bundled(b: &Bench) -> Vec<Value> {
     let j = b.run(&["--json", "library", "list"]).json();
     let all: Vec<Value> = j["data"]["definitions"]
@@ -180,10 +180,7 @@ fn bundled(b: &Bench) -> Vec<Value> {
         .filter(|d| d["origin"] == "bundled")
         .cloned()
         .collect();
-    assert!(
-        !all.is_empty(),
-        "no bundled definitions: run `git submodule update --init`"
-    );
+    assert!(!all.is_empty(), "no bundled definitions");
     all
 }
 
@@ -622,10 +619,7 @@ fn json_schema_agrees_with_the_definitions() {
             }
         }
     }
-    assert!(
-        checked >= 1,
-        "no definitions in devices/: run `git submodule update --init`"
-    );
+    assert!(checked >= 1, "no definitions in devices/");
     let declared = format!(
         "{DEFINITION}\n[heater]\nscript = \"h.lua\"\nchannels = 2\n[heater.values]\nt = {{ type = \"number\", unit = \"°C\" }}\nr = {{ type = \"number\", units = [\"V\", \"Ω\"] }}\n[heater.settings]\nsp = {{ type = \"number\", unit = \"°C\", min = 50, max = 450 }}\n[heater.actions]\ngo = {{ switches = true, args = {{ s = {{ type = \"number\", unit = \"s\" }} }} }}\n"
     );

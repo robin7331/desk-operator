@@ -779,9 +779,8 @@ fn all_is_a_reserved_device_name() {
 
 #[test]
 fn core_never_references_specific_devices() {
-    // The core knows capabilities, not models. Device definitions live in their own repository
-    // (`devices/`, a submodule), so nothing in `src/` may name a vendor or model, or read the
-    // repository's library folder directly (build.rs bundles it).
+    // The core knows capabilities, not models. Device definitions live in `devices/`, so nothing
+    // in `src/` may name a vendor or model, or read that folder directly (build.rs bundles it).
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in std::fs::read_dir(dir).unwrap().flatten() {
             let p = e.path();
@@ -803,12 +802,9 @@ fn core_never_references_specific_devices() {
             .flatten()
             .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().to_lowercase())
-            .filter(|n| !n.starts_with('.') && n != "harness" && n != "target")
+            .filter(|n| !n.starts_with('.'))
             .collect();
-    assert!(
-        !vendors.is_empty(),
-        "devices/ is empty: run `git submodule update --init`"
-    );
+    assert!(!vendors.is_empty(), "devices/ is empty");
     for f in files {
         let text = std::fs::read_to_string(&f).unwrap().to_lowercase();
         // Bundling the library is build.rs's job; src/ never reaches into the repo's folders.
