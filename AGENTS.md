@@ -11,15 +11,15 @@ first if the device is off.
 
 **Status:** M0–M5.1 done: mains power via Home Assistant or Lua scripts, the `voltage_source`
 capability (bench power supplies) with Lua drivers and serial ports, a set of models with a
-specified format, agent-ready CLI (`--json`, `schema`, `skill`). One real device is
-supported and smoke-tested (`fnirsi/ips3608`). **M6, AI skills, in progress** (see `plan.md`,
-"M6"): `desk skill list|install`, `desk port probe` and the `desk-add-device` skill are built;
-an end-to-end run on a second real device is still open. Streaming is done: a daemon
+specified format, agent-ready CLI (`--json`, `schema`, `skill`). Two real devices so far:
+`fnirsi/ips3608` (smoke-tested) and `owon/xdm1041` (`community`: tried with open leads only).
+**M6, AI skills, done**: `desk skill list|install`, `desk port probe` and the `desk-add-device`
+skill, validated when a fresh session added the XDM1041. Streaming is done: a daemon
 (`desk serve`, started on demand) holds device sessions so `desk watch` streams while other
-commands keep working (`docs/streaming.md`). **M7, open capabilities, in progress** (`plan.md`,
+commands keep working (`docs/streaming.md`). **M7, open capabilities, done** (`plan.md`,
 "M7"): models declare values, settings and actions; one command set for every device
-(`desk get|set|do|watch`; `desk source` is gone); channels. Still open: the multimeter's
-connection type, then the real test (roadmap step 4).
+(`desk get|set|do|watch`; `desk source` is gone); channels. **Next: going public** (roadmap
+step 5 in `plan.md`).
 Keep it lean: build only what the current milestone needs.
 
 **One repository** (private until going public, roadmap step 5 in `plan.md`), two parts:

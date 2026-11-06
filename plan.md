@@ -371,7 +371,7 @@ device-wide (ambiguous once a device has two capabilities), no scaffold.
       `desk model show` lists the driver's params
 - [x] **Spec** `docs/model-format.md` + JSON Schema for editors
 
-## M6 — AI skills (in progress)
+## M6 — AI skills ✓
 
 A suite of agent skills shipped with desk, building on the M5.1 format. The existing
 `skills/desk-operator/SKILL.md` (operate the bench, printed by `desk skill`) is the first.
@@ -442,7 +442,9 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
       publishing with and without `gh`
 - [x] `desk schema` lists groups that take their own arguments (`desk skill [name]`); a test checks
       every skill mentions only real commands and error codes
-- [ ] Validate the add-device skill end to end on a second real device (with the user)
+- [x] Validate the add-device skill end to end on a second real device (with the user): a fresh
+      session with only the installed skills added the OWON XDM1041 and opened its pull request
+      (2026-11-06)
 
 ## Roadmap to going public (agreed 2026-11-05)
 
@@ -502,10 +504,12 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
      per sample through Lua or JSON; probably sigrok for analyzers, desk orchestrating.
 3. **Open capabilities** (decided 2026-11-05, design in "M7" below): any device declares its own
    values, settings and actions; the core enforces generic safety. Replaces "fixed capabilities
-   first". Includes the first new connection type (whatever the multimeter needs) and channels.
+   first". Includes channels. **Step 3 done.** The multimeter turned out to need no new connection
+   type (USB serial), so the first one waits for a device that needs it.
 4. **Dogfood as a user (before going public):** install the local build (`cargo install --path .`,
    `desk skill install --global`), add the multimeter in a fresh session with only the installed
-   skills (it's read-only, so the safest first device for an agent).
+   skills (it's read-only, so the safest first device for an agent). **Step 4 done (2026-11-06):**
+   the fresh session added the OWON XDM1041; status `community`, tried with open leads only.
 5. **Public:** license, release CI for Linux/macOS/Windows (also builds the Windows named-pipe code
    for the first time), `curl | sh` installer that offers `desk skill install`, then make the
    repo public.
@@ -517,7 +521,7 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
      The library's merged history started clean.
    - [ ] CI: run `cargo test`, which includes the fake-device tests.
 
-## M7 — Open capabilities (design, 2026-11-05; to be reviewed before building)
+## M7 — Open capabilities ✓ (designed 2026-11-05)
 
 **Why:** desk should work with basically any device, not only the kinds its core knows. So far a
 new kind of device (multimeter, DC load, soldering iron) meant new Rust code in desk itself, which
@@ -750,7 +754,7 @@ that's `port = { … }` (serial). New connection types become binding keys of th
 | `http = { base_url }` | HTTP APIs | WLAN devices, Shelly-style gadgets |
 | `ble = { address \| name }` | Bluetooth LE | some meters and irons |
 
-Build only the one the first new device needs (the multimeter), each with a fake-device test
+Build only the one the first new device needs (the multimeter needed none), each with a fake-device test
 like `tests/serial.rs`. Host and address come from the user's config (definitions give ports and
 USB ids only).
 
@@ -781,7 +785,7 @@ USB ids only).
 5. [x] Skills: desk-operator uses the generic commands; desk-add-device declares capabilities and
    only stops for a missing connection type.
 6. [x] Channels (declared and `source`), per-channel limits.
-7. [ ] The multimeter's connection type (needs its model and interface).
+7. [x] The multimeter's connection type: none needed, the OWON XDM1041 is SCPI over USB serial.
 8. [x] CLAUDE.md (core concepts: capability, value, setting, action).
 
 Not built yet (in the design, no device needs it so far): extra values, settings and actions on
@@ -790,7 +794,7 @@ the `check` hook, events, captures.
 
 ### Open questions (for the user)
 
-- Multimeter and DC load: exact models and how they connect.
+- DC load: exact model and how it connects.
 
 ## After M6 (rough order, re-evaluate each time)
 
