@@ -160,12 +160,11 @@ mod tests {
     #[test]
     fn middle_ellipsis_keeps_the_end() {
         assert_eq!(middle_ellipsis("short", 10), "short");
-        let s =
-            "ha (entity=switch.desk_outlet_1)";
+        let s = "ha (entity=switch.workbench_power_strip_with_a_long_name_outlet_2)";
         let m = middle_ellipsis(s, 48);
         assert_eq!(m.chars().count(), 48);
         assert!(m.starts_with("ha (entity="));
-        assert!(m.ends_with("desk_outlet_1)"));
+        assert!(m.ends_with("outlet_2)"));
     }
 
     #[test]

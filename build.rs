@@ -1,5 +1,7 @@
-//! Bundles the device library (`devices/`) into the binary, so installed copies of desk have the
-//! definitions without a checkout. Generates `$OUT_DIR/bundled_devices.rs`:
+//! Bundles the device library (`devices/`, a git submodule of desk-operator-devices) into the
+//! binary, so installed copies of desk have the definitions without a checkout. Only the vendor
+//! folders are bundled (`<vendor>/…`), not the library's own files (`harness/`, hidden folders).
+//! Generates `$OUT_DIR/bundled_devices.rs`:
 //! `pub static BUNDLED: &[(&str, &str)] = &[("acme/psu-3000/device.toml", "<contents>"), …];`
 //!
 //! Only packaging lives here: the core (`src/`) never refers to any specific definition.
@@ -37,8 +39,26 @@ fn main() {
     let root =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir")).join("devices");
 
+    /// Folders of the library that aren't vendors.
+    const NOT_VENDORS: &[&str] = &["harness", "target"];
+    println!("cargo:rerun-if-changed={}", root.display());
     let mut files = Vec::new();
-    collect(&root, &root, &mut files);
+    let mut vendors: Vec<PathBuf> = std::fs::read_dir(&root)
+        .map(|r| r.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    vendors.sort();
+    for dir in vendors.iter().filter(|p| p.is_dir()) {
+        let name = dir.file_name().unwrap_or_default().to_string_lossy();
+        if !name.starts_with('.') && !NOT_VENDORS.contains(&name.as_ref()) {
+            collect(dir, &root, &mut files);
+        }
+    }
+    if files.is_empty() {
+        println!(
+            "cargo:warning=no device definitions bundled: devices/ is empty \
+             (run `git submodule update --init`)"
+        );
+    }
     let mut code = String::from("pub static BUNDLED: &[(&str, &str)] = &[\n");
     for (rel, path) in &files {
         println!("cargo:rerun-if-changed={}", path.display());

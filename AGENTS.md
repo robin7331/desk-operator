@@ -1,0 +1,184 @@
+# desk-operator
+
+A cross-platform (Linux, macOS, Windows) background tool, written in Rust, that gives you **one
+interface for the equipment on an electronics bench**: power supplies, DC loads, multimeters,
+soldering irons, scopes, and switched mains outlets. It is free and open source, and contributors
+can add support for their own gear.
+
+The goal is to type something like `psu 5v on, iron 330c` (CLI first, later a hotkey command
+palette, later natural language) and have it happen. That includes switching the mains outlet
+first if the device is off.
+
+**Status:** M0–M5.1 done: mains power via Home Assistant or Lua scripts, the `voltage_source`
+capability (bench power supplies) with Lua drivers and serial ports, a device library with a
+specified definition format, agent-ready CLI (`--json`, `schema`, `skill`). One real device is
+supported and smoke-tested (`fnirsi/ips3608`). **M6, AI skills, in progress** (see `plan.md`,
+"M6"): `desk skill list|install`, `desk port probe` and the `desk-add-device` skill are built;
+an end-to-end run on a second real device is still open. Streaming is done: a daemon
+(`desk serve`, started on demand) holds device sessions so `desk watch` streams while other
+commands keep working (`docs/streaming.md`). **M7, open capabilities, in progress** (`plan.md`,
+"M7"): definitions declare values, settings and actions; one command set for every device
+(`desk get|set|do|watch`; `desk source` is gone); channels. Still open: the multimeter's
+connection type, then the real test (roadmap step 4).
+Keep it lean: build only what the current milestone needs.
+
+**Two repositories** (both private until going public, roadmap step 5 in `plan.md`):
+- **desk-operator** (this one): the core. It never names a vendor or model.
+- **[desk-operator-devices](https://github.com/robin7331/desk-operator-devices)**: the device
+  library, checked out here as the git submodule `devices/` and bundled into the binary by
+  `build.rs`. Definitions, drivers and their fake-device tests (`harness/`) live there; its
+  `AGENTS.md` sends core gaps (a new connection type, a host API function) back here as issues
+  or pull requests. A change to the definition format or host API that breaks definitions needs
+  a matching change there.
+
+**Working agreements:**
+- Develop and verify the generic tool with mocks and fakes. Real hardware is at most a short
+  smoke test, and only with the user's explicit go-ahead for each step that switches something.
+- Commit only when the user asks (they usually say so at the end of a milestone).
+- Never put anything bench-specific (Home Assistant entities, serial numbers, the user's limits)
+  into the repo: that lives in the user's `~/.config/desk-operator/desk.toml`.
+- Don't guess facts about devices (ratings, URLs, protocol details): leave them out or verify.
+
+## Core concepts (use these terms consistently)
+
+| Term | Meaning |
+|---|---|
+| **Device** | Something on *one user's* bench, such as `psu` or `iron`, in their `desk.toml`. It has an id, a name, aliases, capabilities, and the user's own bindings (e.g. their power path) and `limits`. |
+| **Device definition** | What's true for *every unit* of a model ("FNIRSI IPS3608"): driver, USB ids, maximums, docs, tests. Lives in the device library (desk-operator-devices, here `devices/<vendor>/<model>/`). Never contains anything user-specific (no Home Assistant entities, no bench limits). |
+| **Capability** | A named group of what a device can do, with one driver binding. **Well-known** ones have names and stricter rules fixed by the core: `power` (power_switch, mains) and `source` (voltage_source, bench power supplies). Any other name (`heater`, `meter`, …) is **declared**: the definition lists its values, settings and actions, and the core applies its generic rules. |
+| **Value / setting / action** | What a capability declares: a **value** is reported (`temperature`), a **setting** is reported and changeable (`setpoint`), an **action** is done on request (`standby`). Typed (`number` with a unit, `boolean`, `choice`, `string`), with ranges; `switches` marks a physical effect. |
+| **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which is the `output` setting of `source`. Never mix "power" and "output". |
+| **Capability binding** | One config key per capability: `power`, `source`, or the declared capability's name. Each is a native provider binding or a Lua script. |
+| **Control path** | How a device is commanded (serial, USBTMC, LAN, …). Post-MVP. |
+| **Provider** | A configured connection to something that can switch or control many things, such as Home Assistant, a Shelly, a USB relay board, or an RF dongle. You configure it once. |
+| **Endpoint** | One thing a provider can list and control, such as an HA entity `switch.desk_outlet_1`. Providers can list their endpoints, which is what makes pickers possible. |
+| **Binding** | A device's power path. It is either **native** (`{ provider = "ha", entity = "…" }`) or **script** (`{ script = "x.lua" }`). |
+| **Host API** | The Rust functions exposed to Lua scripts (providers, `sleep`, `log`, later serial/USB). This is the real plugin contract, so keep it small and stable. |
+
+### Power bindings
+
+```toml
+[devices.psu.power]               # native: the core calls the provider directly
+provider = "ha"
+entity   = "switch.desk_outlet_1"
+
+[devices.lamp.power]              # script: the core runs Lua on(ctx) / off(ctx) / state(ctx)
+script  = "scripts/lamp.lua"      # relative to the config dir
+timeout = "15s"
+params  = { entity = "switch.desk_outlet_2" }   # passed to the script as ctx.params
+```
+
+A script operation succeeds when the function returns. It fails if it raises `error(...)` or hits
+its timeout. The CLI waits for the result. Scripts are optional: a native binding is the simple
+default.
+
+## Architecture principles
+
+- **One command set for every device.** `desk get|set|do|watch <device>[:<channel>] …` work on
+  any capability; only mains has its own group (`desk power`). Never add commands per kind of
+  device.
+- **CLI first, agent-operable.** Everything the UI will do is a CLI command. Every command supports
+  `--json`, with a stable `{ "ok": true, "data": … }` / `{ "ok": false, "error": { "code", "message" } }`
+  envelope. Commands return serializable structs, and the human output is just a rendering of them.
+- **Interactive only on a TTY.** When arguments are missing and stdin is a TTY, offer pickers. When
+  it isn't, fail with a message that names the command that lists valid values.
+- **Honest state.** A power state is `on | off | unknown`, with a confidence of `real` (read back)
+  or `assumed` (send-only providers). Report partial failures (for example "mains on, verify
+  failed"); never pretend something succeeded.
+- **Timeouts on all I/O.** A missing device must never hang the CLI.
+- **Safety lives in the core**, below every frontend and script. It is never only in the UI or the
+  agent skill.
+- **The core owns hardware.** Scripts get handles from the host API. They never open arbitrary
+  ports or network connections themselves (the Lua stdlib is sandboxed: no `io`, `os`, `package`
+  or `debug`).
+- **Secrets are never in the config file.** Tokens come from an env var or a separate `token_file`
+  (keyring later), and are never printed or logged.
+- **The core never knows a specific model.** Nothing in `src/` names a vendor or model or reads the
+  repo's `devices/` folder (`build.rs` bundles it; a test enforces both). A driver that needs
+  something the API can't do reveals a gap in the API; fix it generically.
+- **Cross-platform.** No platform-specific code without `cfg`-gated alternatives. Note: global
+  hotkeys don't work on Wayland. The UI will expose a `desk palette` command for compositor
+  keybinds.
+
+## Tech stack
+
+- Rust (stable, 2024 edition), single binary named `desk` (crate `desk-operator`).
+- `clap` (derive), `tokio`, `reqwest` (rustls, json), `serde`, `toml` (+ `toml_edit` when the CLI
+  edits config), `anyhow` at the CLI edge, `thiserror` in core modules, `directories` for config
+  paths, `inquire` for TTY pickers.
+- `mlua` with features `lua54`, `vendored`, `async`, `serialize`. Host functions are async and use
+  tokio (`sleep` must be `tokio::time::sleep`, never a thread sleep).
+
+## Layout (MVP: one crate, split into a workspace only when the daemon/UI arrives)
+
+```
+src/
+  main.rs              entry: clap parse, tokio runtime, exit code
+  cli/                 clap definitions (mod.rs) + one handler module per command group;
+                       schema.rs generates `desk schema` from the clap tree
+  output.rs            Report, --json envelope, human tables
+  error.rs             DeskError: stable `code()` + `exit_code()` + `hint()` (part of the CLI contract)
+  config.rs            load/validate desk.toml, Device, PowerBinding, device resolution
+  model.rs             Capability, Power, PowerState, PowerFeatures
+  power.rs             PowerSwitch trait + switch semantics (idempotent, read-back verification)
+  source.rs            VoltageSource trait + PSU semantics (limits, setpoints before output, protections)
+  declared.rs          declarations (values/settings/actions), typed values, generic rules, Driver trait
+  units.rs             the unit table: parsing `330c`, `250mA`, `1.5kΩ`; formatting
+  ops.rs               a device's catalog of names, get/set/do ops (resolved + checked), running them
+  bench.rs             Config + provider Registry; resolves bindings, applies timeouts
+  serial.rs            PortSpec matching, `desk port list`, async Port handle (exclusive opens);
+                       `desk port probe` (raw hex in/out) lives in cli/port.rs
+  library.rs           device definitions: search path, `device.toml` parsing, merge, bundled files
+  providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
+  script/              mlua engine, sandbox, host API (`ctx`), timeout hook
+  daemon/              `desk serve`: local socket (ipc.rs), JSON-lines protocol, CLI forwarding,
+                       `watch` streams; session.rs = live device sessions + per-device port lock
+  cli/ops.rs           `desk get`, `desk set`, `desk do` (rendering included)
+examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
+docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
+docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
+docs/definition-format.md  device definition format (spec); schemas/ has its JSON Schema (tested
+                       against every definition in tests/library.rs)
+skills/<name>/         SKILL.md per agent skill (desk-operator, desk-add-device), embedded via
+                       include_str! in src/cli/skill.rs (`desk skill list|<name>|install`); update
+                       them when commands, error codes or semantics change (tests/cli.rs checks
+                       commands and codes, and that every skills/ folder is registered)
+tests/cli.rs           end-to-end tests of the binary against the mock provider
+tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
+tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
+tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
+tests/daemon.rs        watch + daemon: streaming, commands during a watch, endings, the socket
+tests/declared.rs      declared capabilities: units, ranges, limits, verify, channels, Lua drivers
+tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
+tests/library.rs       model = "…", merging, search path, desk library list|show|check
+build.rs               bundles devices/<vendor>/… into the binary (`bundled:<path>`)
+devices/               git submodule: desk-operator-devices (definitions, drivers, their tests in harness/)
+```
+
+## Development
+
+```sh
+git submodule update --init      # once: the device library in devices/ (clone with --recursive)
+cargo build
+cargo test                       # must pass without hardware or network (mock provider)
+cargo clippy --all-targets -- -D warnings
+cargo fmt
+cargo run -- --config examples/desk.toml power status
+(cd devices/harness && DESK_BIN=../../target/debug/desk cargo test)   # the library against this build
+```
+
+The core's own tests never depend on which definitions the library has (`tests/library.rs` picks
+whatever is bundled). To bundle a newer library: `git -C devices pull`, then commit the submodule
+pointer.
+
+Testing without hardware: the `mock` provider stores state in `$DESK_MOCK_STATE` (tests point it
+at a temp dir). Endpoint prefixes simulate failures: `fail_` (unavailable), `stuck_` (verify fails),
+`blind_` (no readback); `latency = "…"` on the provider simulates slow I/O.
+
+Conventions:
+- No `unwrap()`/`expect()` outside tests.
+- Every new provider or host-API function gets a test (mock or `wiremock`).
+- Don't add dependencies or abstractions that the current milestone doesn't need.
+- Update `plan.md` checkboxes when you finish a milestone item.
+- New error variants need an `ERROR_CODES` entry (`src/error.rs`, enforced by a test) and a row in
+  SKILL.md's failure table.

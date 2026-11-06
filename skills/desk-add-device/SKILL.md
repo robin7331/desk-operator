@@ -1,15 +1,15 @@
 ---
 name: desk-add-device
-description: Add a bench device that the `desk` CLI doesn't support yet, or improve an existing definition: research the protocol, write and test the definition, smoke-test it with the user, configure it, optionally publish it. Use when desk should control a new instrument or more of one.
+description: Add a bench device that the `desk` CLI doesn't support yet, or improve an existing definition: clone the device library, research the protocol, write and test the definition, smoke-test it with the user, configure it, and open a pull request. Use when desk should control a new instrument or more of one.
 ---
 
 # Adding a device to `desk`
 
 Two different things come out of this, and they never mix:
 
-- A **device definition** (`devices/<vendor>/<model>/device.toml` + a Lua driver) holds what's true
-  for **every unit** of the model: driver, USB ids, ratings, what it can do, sources. It may be
-  published.
+- A **device definition** (`<vendor>/<model>/device.toml` + a Lua driver) holds what's true for
+  **every unit** of the model: driver, USB ids, ratings, what it can do, sources. It belongs in the
+  device library, the repository **desk-operator-devices**, and may be contributed there.
 - The **device** in the user's `desk.toml` holds **their bench**: name, aliases, how it gets mains
   power, which unit it is (serial number), and their `limits`. It is never published.
 
@@ -38,17 +38,37 @@ For operating the bench (`desk power`, `desk get`, `desk set`, `desk do`, `desk 
    says "not confirmed").
 7. **Never copy bench things into a definition** (entity ids, serial numbers, limits, paths).
 
-## Where to work
+## Where to work: a clone of the device library
 
-A **checkout of the desk-operator repository** is strongly recommended: it has the format spec
-(`docs/definition-format.md`), the host API (`docs/scripting.md`), reference drivers
-(`devices/*/shared/*.lua`), the fake-device test harness (`tests/device_*.rs`) and is needed for
-publishing. Point desk at it with `DESK_DEVICES=<checkout>/devices` so `desk library` and the
-user's config find the new definition.
+Two repositories (on GitHub):
 
-Without a checkout (only an installed `desk`), a definition can still live in `devices/` next to
-the user's `desk.toml` (the default of `desk library new`). Then there's no fake-device test: say
-so, and rely on the read-only probing and the smoke test.
+- **`robin7331/desk-operator-devices`**: the device library. Every definition, its driver, the
+  vendor `README.md` and its fake-device test (`harness/tests/<vendor>_<family>.rs`). Work here.
+  Its `AGENTS.md` and `README.md` are the contributor guide; read them first.
+- **`robin7331/desk-operator`**: desk itself (the core): the definition format
+  (`docs/definition-format.md`), the Lua host API (`docs/scripting.md`), this skill. Only touched
+  for a gap in desk (see *When desk itself is missing something*).
+
+Before anything else, get a clone of the library (ask the user where, if they have a preference):
+
+1. **Find an existing one:** `desk library list --json` shows where definitions come from
+   (`origin`); a folder origin that is a git checkout of desk-operator-devices
+   (`git -C <dir> remote -v`) is it. Bring it up to date (`git -C <dir> pull`).
+2. **Otherwise clone it.** With write access (the user owns it or is a collaborator), clone
+   directly; otherwise fork first (`gh repo fork robin7331/desk-operator-devices --clone`). The best
+   place is `devices/` next to the user's `desk.toml` (path: `data.config.path` of
+   `desk schema --json`): desk finds definitions there without any setup. If that folder already
+   exists and isn't the library, clone anywhere and pass `DESK_DEVICES=<clone>` to every desk
+   command (tell the user to set it in their shell too).
+3. **Branch:** `git -C <clone> switch -c device/<vendor>-<model>`.
+
+Check with `desk library list --json` that the clone's definitions are used (`origin` is the
+clone, not `bundled`).
+
+**No git or no network:** a definition can still live in a plain `devices/` folder next to the
+user's `desk.toml` (the default of `desk library new`). Then there's no harness for a fake-device
+test: say so, rely on read-only probing and the smoke test, and pack the folder for the user at
+the end (step 11).
 
 ## Workflow
 
@@ -65,7 +85,7 @@ so, and rely on the read-only probing and the smoke test.
   (`desk provider endpoints <id> --search …` finds the entity).
 - **How it connects:** USB (CDC-ACM serial, USB-serial adapter, HID, USBTMC), RS-232, LAN,
   Bluetooth. desk drivers talk serial today (`ctx.serial`, `port = { … }`). Any other connection
-  is a gap in the host API, a change to desk's core: stop and tell the user.
+  is a gap in desk itself: see *When desk itself is missing something*.
 
 ### 2. Check the library first
 
@@ -90,8 +110,8 @@ you used (URLs) for the definition's `sources` and the vendor README. Note what'
 
 ```sh
 desk library new <vendor>/<model> --capability voltage_source --name "<Vendor Model>" \
-    --max-voltage <V> --max-current <A> [--driver ../shared/<family>.lua] [--dir <checkout>/devices]
-desk library new <vendor>/<model> --capability <name> --name "<Vendor Model>"   # e.g. meter, heater
+    --max-voltage <V> --max-current <A> [--driver ../shared/<family>.lua] [--dir <clone>]
+desk library new <vendor>/<model> --capability <name> --name "<Vendor Model>" --dir <clone>   # meter, heater, …
 desk library check <vendor>/<model> --json
 ```
 
@@ -100,15 +120,18 @@ a vendor `README.md`. Fill in `sources`, `port = { usb_vid, usb_pid }` (when kno
 declarations (declared capabilities), and implement the driver (see *Driver essentials*). Rerun
 `check` until it passes.
 
-### 5. Fake-device test (in a checkout)
+### 5. Fake-device test (in the clone's harness)
 
 Before touching hardware, run the driver against a fake device over a pseudo-terminal, like
-`tests/device_fnirsi_dps150.rs`: a thread plays the device on the pty master side, `desk` opens the
-slave as its port. Cover what the sources say: replies, missing echoes, pushed telemetry, garbage
-before a frame, a silent device, a wrong model. Then:
+`harness/tests/fnirsi_dps150.rs`: a thread plays the device on the pty master side, `desk` opens
+the slave as its port. Cover what the sources say: replies, missing echoes, pushed telemetry,
+garbage before a frame, a silent device, a wrong model. The harness runs the installed `desk` with
+the clone's files (`harness::desk()`, `harness::root()`). It needs Rust (`cargo`); without it, say
+so and skip to step 6. Then:
 
 ```sh
-cargo test --test device_<vendor>_<family>
+cd <clone>/harness
+cargo test                                   # every definition's check + all fake-device tests
 cargo clippy --all-targets -- -D warnings && cargo fmt
 ```
 
@@ -143,8 +166,9 @@ found when no documentation had them. Note anything else you learn (boot time, l
 
 ### 8. Configure (with test limits)
 
-Add the device to the user's `desk.toml` (path: `data.config.path` of `desk schema --json`); with a
-checkout, the user's shell needs `DESK_DEVICES=<checkout>/devices` until the definition is bundled.
+Add the device to the user's `desk.toml` (path: `data.config.path` of `desk schema --json`). With
+the clone in `devices/` next to it, `model = …` works right away; a clone elsewhere needs
+`DESK_DEVICES=<clone>` in the user's shell until the definition is bundled into desk.
 Ask the user for the id, name, power path, and **conservative test limits**:
 
 ```toml
@@ -187,32 +211,55 @@ Fix the driver (and its fake-device test) for anything that differs, then repeat
   power-up state, ramps, echoes).
 - `desk library check --json` passes.
 - Ask the user for their real bench `limits` and replace the test limits.
-- In a checkout: `cargo test` and clippy pass.
+- In the clone's `harness/`: `cargo test` and clippy pass.
 
-### 11. Publish (optional, only with consent)
+### 11. Pull request (only with consent)
 
-Ask whether the user wants to contribute the definition. Show exactly what would be published:
-`devices/<vendor>/…` (definition, driver, README) and its `tests/device_*.rs`, **never** their
-`desk.toml` or anything from it. Check the files for their serial number, entity ids and paths
-before committing. Nothing leaves the machine before the user agreed to this file list.
+Ask whether the user wants to contribute the definition to desk-operator-devices. Show exactly
+what would go in: `<vendor>/…` (definition, driver, README) and `harness/tests/<vendor>_<family>.rs`,
+**never** their `desk.toml` or anything from it. Check the diff (`git -C <clone> diff main`) for
+their serial number, entity ids and paths. Nothing leaves the machine before the user agreed to
+this file list. Then, on the branch from *Where to work*:
 
-The upstream repository is the one the checkout came from (`git remote -v`); if that's unclear,
-ask the user. Then, depending on what's available:
-
-- **`gh` installed and logged in** (`gh auth status`): branch (`device/<vendor>-<model>`), commit,
-  `gh repo fork --remote`, push, `gh pr create` with what the definition supports, the tested
-  versions, what the smoke test verified, the sources, and the known gaps.
-- **git but no `gh`:** commit on a branch, then give the user the steps: fork on the web,
-  `git remote add fork <their fork URL>`, `git push -u fork <branch>`, and open the compare page
-  the push prints. Or create a patch with `git format-patch -1 -o <dir>` for them to send.
-- **No checkout:** pack the vendor folder
+- **`gh` installed and logged in** (`gh auth status`): commit, push (`git push -u origin <branch>`;
+  from a fork, `origin` is the fork), and `gh pr create -R robin7331/desk-operator-devices` with
+  what the definition supports, the tested versions, what the smoke test verified, the sources,
+  and the known gaps.
+- **git but no `gh`:** commit, push to their fork, and give the user the compare link the push
+  prints. Or create a patch with `git format-patch main -o <dir>` for them to send.
+- **No clone:** pack the vendor folder
   (`tar czf <vendor>-<model>.tar.gz -C <devices dir> <vendor>`) and tell the user to attach it to
-  an issue or upload it in the web UI.
+  an issue on desk-operator-devices.
+
+Until the pull request is merged and the user's desk is rebuilt, their bench uses the clone; that
+keeps working afterwards (`git pull` on `main`).
+
+## When desk itself is missing something
+
+Some devices need more than a definition: a connection desk can't open yet (HID, USBTMC, LAN,
+Bluetooth), a host API function, a kind of declaration desk doesn't have, extra settings or
+actions on `source`. **Never work around it in the driver** (no side channels in `params`, no
+abusing another capability). Instead:
+
+1. Stop and tell the user what's missing, why the device needs it, and what it would take
+   generically (for every device that connects this way, not just this model).
+2. Check whether it's known: `gh issue list -R robin7331/desk-operator --search "<keywords>"`.
+3. With the user's OK, open an issue there (`gh issue create -R robin7331/desk-operator`):
+   the gap, the device that needs it, what the protocol looks like, sources. Generic only: no
+   bench details (no serial numbers, entity ids, limits).
+4. If the user wants it built now: that's work in a clone of desk-operator, following its
+   `AGENTS.md` (mocks and fakes first, tests, its own pull request). Finish the definition after
+   desk can do what it needs, against a build of that branch (`DESK_BIN=… cargo test` in the
+   harness).
+
+Until then, the definition can still cover what desk can do already (for example the values over
+serial), with the gap noted in the vendor `README.md`.
 
 ## Improving an existing definition
 
 Same workflow, starting from `desk library show <vendor/model>` instead of `desk library new`:
-research, probe, update the driver and its fake-device test, smoke-test, update the vendor README.
+research, probe, update the driver and its fake-device test, smoke-test, update the vendor README,
+then a pull request (step 11), all in the clone of the library.
 
 - **`community` → `tested`:** someone with the device runs the smoke test (step 9); then set
   `status` and `tested`.
@@ -221,7 +268,7 @@ research, probe, update the driver and its fake-device test, smoke-test, update 
 - **More of what the device reports or can do:** for a declared capability, declare it (a new
   value, setting or action) and implement it in the driver. For `source`, check the fixed names
   first (`desk schema --json`, `capabilities.voltage_source`); extra declarations on `source` aren't
-  supported yet: stop and tell the user. Probe which fields the device really has. Re-check old
+  supported yet: a gap in desk (see *When desk itself is missing something*). Probe which fields the device really has. Re-check old
   findings while you're at it: research on the IPS3608 showed that a field once read as "rail
   voltage" is the temperature, and "maximums" are the user's protection thresholds.
 - **Another model of a known family:** a new definition with only data (`params`).
@@ -294,7 +341,7 @@ function action(ctx, name, args) ... end      -- if there are actions (args alre
 - Some devices drop a write that's followed too quickly by the next frame: keep a quiet gap
   after writes (the FNIRSI driver's `gap_ms`).
 - **Prefer data over code:** if models differ only in numbers (offsets, timings, names), share one
-  driver in `devices/<vendor>/shared/` and put the numbers in each definition's `params`.
+  driver in `<vendor>/shared/` and put the numbers in each definition's `params`.
 - desk does the rest for every driver: one session per command, units, ranges and limits before
   anything is sent, the order of settings, read-back verification, timeouts, `watch`.
 

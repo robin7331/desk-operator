@@ -169,27 +169,61 @@ fn unknown_models_are_config_errors() {
     );
 }
 
-#[test]
-fn local_definitions_shadow_bundled_ones() {
-    let b = Bench::new("[devices.psu]\nmodel = \"fnirsi/ips3608\"\n");
-    b.write(
-        "devices/fnirsi/ips3608/device.toml",
-        &DEFINITION
-            .replace("acme/psu-3000", "fnirsi/ips3608")
-            .replace("../shared/sim.lua", "../../acme/shared/sim.lua"),
-    );
+/// The definitions bundled into desk (from the library submodule; the core's tests don't depend
+/// on which ones it has).
+fn bundled(b: &Bench) -> Vec<Value> {
     let j = b.run(&["--json", "library", "list"]).json();
-    let ips: Vec<&Value> = j["data"]["definitions"]
+    let all: Vec<Value> = j["data"]["definitions"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|d| d["id"] == "fnirsi/ips3608")
+        .filter(|d| d["origin"] == "bundled")
+        .cloned()
         .collect();
-    assert_eq!(ips.len(), 2, "{ips:?}");
-    assert!(ips[0]["origin"].as_str().unwrap().starts_with("local"));
-    assert_eq!(ips[0]["shadowed"], false);
-    assert_eq!(ips[1]["origin"], "bundled");
-    assert_eq!(ips[1]["shadowed"], true);
+    assert!(
+        !all.is_empty(),
+        "no bundled definitions: run `git submodule update --init`"
+    );
+    all
+}
+
+/// A bundled definition with a `source` binding, its id and `library show` data.
+fn bundled_source(b: &Bench) -> (String, Value) {
+    bundled(b)
+        .iter()
+        .map(|d| d["id"].as_str().unwrap().to_string())
+        .find_map(|id| {
+            let d = b.run(&["--json", "library", "show", &id]).json()["data"].clone();
+            d["definition"]["bindings"]["source"]
+                .is_object()
+                .then_some((id, d))
+        })
+        .expect("a bundled power supply definition")
+}
+
+#[test]
+fn local_definitions_shadow_bundled_ones() {
+    let probe = Bench::new("");
+    let (id, _) = bundled_source(&probe);
+    let b = Bench::new(&format!("[devices.psu]\nmodel = \"{id}\"\n"));
+    b.write(
+        &format!("devices/{id}/device.toml"),
+        &DEFINITION
+            .replace("acme/psu-3000", &id)
+            .replace("../shared/sim.lua", "../../acme/shared/sim.lua"),
+    );
+    let j = b.run(&["--json", "library", "list"]).json();
+    let same: Vec<&Value> = j["data"]["definitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["id"] == id.as_str())
+        .collect();
+    assert_eq!(same.len(), 2, "{same:?}");
+    assert!(same[0]["origin"].as_str().unwrap().starts_with("local"));
+    assert_eq!(same[0]["shadowed"], false);
+    assert_eq!(same[1]["origin"], "bundled");
+    assert_eq!(same[1]["shadowed"], true);
 
     // The device uses the local one (a simulated PSU: no hardware needed).
     let out = b.run(&["--json", "get", "psu"]);
@@ -258,13 +292,19 @@ fn check_loads_every_driver() {
     let out = b.run(&["--json", "library", "check"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     let results = out.json()["data"]["results"].as_array().unwrap().clone();
-    for id in ["acme/psu-3000", "fnirsi/ips3608", "fnirsi/dps-150"] {
+    let r = results
+        .iter()
+        .find(|r| r["target"] == "acme/psu-3000")
+        .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["capabilities"][0], "voltage_source");
+    // Every bundled definition loads, whatever the library has.
+    for d in bundled(&b) {
         let r = results
             .iter()
-            .find(|r| r["target"] == id)
-            .unwrap_or_else(|| panic!("{id}"));
+            .find(|r| r["target"] == d["id"])
+            .unwrap_or_else(|| panic!("{} not checked", d["id"]));
         assert_eq!(r["ok"], true, "{r}");
-        assert_eq!(r["capabilities"][0], "voltage_source");
     }
 
     // A driver without set_output fails the check, by id and by path.
@@ -315,31 +355,30 @@ fn desk_devices_adds_a_library_path() {
 
 #[test]
 fn bundled_definitions_work_with_your_own_port() {
-    // The bundled FNIRSI driver loads from the binary; the device adds its own port.
-    let b = Bench::new(
-        "[devices.psu]\nmodel = \"fnirsi/ips3608\"\nsource = { port = { path = \"/dev/desk-test-missing\" }, params = { wait = \"0s\", boot_ms = 0 } }\n",
-    );
+    // A bundled driver loads from the binary; the device adds its own port, the rest of the
+    // definition's port stays.
+    let probe = Bench::new("");
+    let (id, def) = bundled_source(&probe);
+    let defined = &def["definition"]["bindings"]["source"];
+    let b = Bench::new(&format!(
+        "[devices.psu]\nmodel = \"{id}\"\nsource = {{ port = {{ path = \"/dev/desk-test-missing\" }} }}\n"
+    ));
     let d = b.run(&["--json", "device", "show", "psu"]).json();
     let source = &d["data"]["device"]["source"];
-    assert_eq!(
-        source["script"],
-        "bundled:fnirsi/shared/dps150_protocol.lua"
+    assert_eq!(source["script"], defined["script"]);
+    assert!(
+        source["script"].as_str().unwrap().starts_with("bundled:"),
+        "{source}"
     );
-    assert_eq!(
-        source["port"]["usb_vid"], 0x2e3c,
-        "kept from the definition"
-    );
+    if let Some(port) = defined["port"].as_object() {
+        for (k, v) in port {
+            assert_eq!(&source["port"][k], v, "`{k}` kept from the definition");
+        }
+    }
     assert_eq!(
         source["port"]["path"], "/dev/desk-test-missing",
         "added by the device"
     );
-    let out = b.run(&["--json", "get", "psu"]);
-    assert_eq!(
-        out.code, 4,
-        "a missing port keeps its own error code: {}",
-        out.stdout
-    );
-    assert_eq!(out.json()["error"]["code"], "endpoint_unavailable");
 }
 
 #[test]
@@ -349,8 +388,8 @@ fn library_show() {
     assert_eq!(out.code, 0);
     assert!(out.stdout.contains("[source.ratings]"), "{}", out.stdout);
     assert!(out.stdout.contains("model = \"acme/psu-3000\""));
-    let out = b.run(&["--json", "library", "show", "fnirsi/ips3608"]);
-    assert_eq!(out.json()["data"]["definition"]["status"], "tested");
+    let out = b.run(&["--json", "library", "show", "acme/psu-3000"]);
+    assert_eq!(out.json()["data"]["definition"]["status"], "community");
 }
 
 /// A local definition `acme/<model>` with the given [device] fields and [source] body.
@@ -544,14 +583,11 @@ fn show_lists_ratings_sources_and_driver_params() {
     assert!(out.stdout.contains("flavor"), "{}", out.stdout);
 
     let j = b
-        .run(&["--json", "library", "show", "fnirsi/ips3608"])
+        .run(&["--json", "library", "show", "acme/psu-3000"])
         .json();
     let params = j["data"]["driver_params"]["source"].as_array().unwrap();
     let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
-    for n in ["name", "status", "settle_ms", "boot_ms"] {
-        assert!(names.contains(&n), "{n} in {names:?}");
-    }
-    assert_eq!(j["data"]["definition"]["status"], "tested");
+    assert!(names.contains(&"flavor"), "{names:?}");
 }
 
 /// The JSON Schema for editors must agree with desk: accept every real definition, reject what
@@ -586,7 +622,10 @@ fn json_schema_agrees_with_the_definitions() {
             }
         }
     }
-    assert!(checked >= 2);
+    assert!(
+        checked >= 1,
+        "no definitions in devices/: run `git submodule update --init`"
+    );
     let declared = format!(
         "{DEFINITION}\n[heater]\nscript = \"h.lua\"\nchannels = 2\n[heater.values]\nt = {{ type = \"number\", unit = \"°C\" }}\nr = {{ type = \"number\", units = [\"V\", \"Ω\"] }}\n[heater.settings]\nsp = {{ type = \"number\", unit = \"°C\", min = 50, max = 450 }}\n[heater.actions]\ngo = {{ switches = true, args = {{ s = {{ type = \"number\", unit = \"s\" }} }} }}\n"
     );
