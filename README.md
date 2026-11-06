@@ -9,6 +9,17 @@ desk bundles this library at build time (it is a git submodule of desk-operator)
 desk already knows these models: `desk library list`. A definition added here reaches everyone
 with the next desk build; until then, use your clone (see *Working on definitions*).
 
+## Supported devices
+
+| Device | Type | Status |
+|---|---|---|
+| [FNIRSI DPS-150](fnirsi/README.md) | Power supply | community |
+| [FNIRSI IPS3608](fnirsi/README.md) | Power supply | tested |
+| [OWON XDM1041](owon/README.md) | Multimeter | community |
+
+`tested`: smoke-tested on real hardware. `community`: not fully verified on hardware, see the vendor
+README.
+
 ## Using a definition
 
 ```toml
@@ -100,5 +111,6 @@ skill (research, probing, fake-device test, smoke test, pull request). By hand:
 4. Fill in ratings, declarations, params and sources; `desk library check`; a harness test.
 5. Smoke-test on real hardware with nothing connected to the outputs, at low values. Record what
    you observed (boot time, ramps, quirks) in the vendor `README.md`, and set `status`/`tested`.
-6. Open a pull request: what the definition supports, tested versions, what the smoke test
+6. Add the device to *Supported devices* above, sorted by vendor and model (a harness test checks it).
+7. Open a pull request: what the definition supports, tested versions, what the smoke test
    verified, sources, known gaps.
