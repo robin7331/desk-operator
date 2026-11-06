@@ -21,7 +21,7 @@ cd desk-operator
 cargo install --path .
 ```
 
-Device definitions are compiled into `desk`, so a new device arrives with the next build.
+Models are compiled into `desk`, so a new device arrives with the next build.
 
 ## Set up your bench
 
@@ -47,20 +47,20 @@ power = { provider = "ha", entity = "switch.desk_outlet_1" }   # optional: how i
 
 | Device | Type | Status |
 |---|---|---|
-| [FNIRSI DPS-150](devices/fnirsi/README.md) | Power supply | community |
-| [FNIRSI IPS3608](devices/fnirsi/README.md) | Power supply | tested |
-| [OWON XDM1041](devices/owon/README.md) | Multimeter | community |
+| [FNIRSI DPS-150](models/fnirsi/README.md) | Power supply | community |
+| [FNIRSI IPS3608](models/fnirsi/README.md) | Power supply | tested |
+| [OWON XDM1041](models/owon/README.md) | Multimeter | community |
 
 `tested`: smoke-tested on real hardware. `community`: not fully verified on hardware, see the vendor
-README. `desk library list` shows what your build includes.
+README. `desk model list` shows what your build includes.
 
 ## Add a device
 
 ```sh
-desk library new acme/psu-3000 --capability voltage_source --name "ACME PSU 3000" \
+desk model new acme/psu-3000 --capability voltage_source --name "ACME PSU 3000" \
     --max-voltage 30 --max-current 5
 ```
 
 This creates a working folder next to your `desk.toml`, and desk uses it right away. To contribute
-it, see [`devices/README.md`](devices/README.md). An agent can walk you through all of it:
+it, see [`models/README.md`](models/README.md). An agent can walk you through all of it:
 `desk skill install` installs the `desk-add-device` skill.

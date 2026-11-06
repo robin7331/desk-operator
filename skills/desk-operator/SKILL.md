@@ -50,8 +50,8 @@ desk device list|show <device> --json
 desk provider list|test <id> --json
 desk provider endpoints <id> --search <text> --json # e.g. Home Assistant entities
 desk port list --json                               # USB serial ports (for a binding's port = {…})
-desk library list --json                            # device definitions (models desk knows)
-desk library show <vendor/model> --json
+desk model list --json                              # the kinds of device desk knows
+desk model show <vendor/model> --json
 
 desk get <device> [<name>...] --json                # values and settings (all, or named)
 desk set <device> <setting> <value> [...] --json    # e.g. voltage 5v current 1a output on
@@ -135,12 +135,12 @@ asking.
 
 ## Configuration (only when asked)
 
-The config path is `data.config.path` in `desk schema --json`. If `desk library list` has a
-definition for the model, use it instead of writing driver bindings by hand:
+The config path is `data.config.path` in `desk schema --json`. If `desk model list` has a
+model for the model, use it instead of writing driver bindings by hand:
 
 ```toml
 [devices.psu]
-model   = "vendor/model"                                        # from `desk library list`
+model   = "vendor/model"                                        # from `desk model list`
 aliases = ["supply"]
 power   = { provider = "ha", entity = "switch.desk_outlet_1" }  # from `desk provider endpoints`
 source  = { port = { serial_number = "…" } }                    # which unit, from `desk port list`
@@ -148,12 +148,12 @@ limits  = { source = { voltage = 12, current = 2 } }            # ask the user f
 # other capabilities the same way: heater = { … }, limits = { heater = { setpoint = 380 } }
 ```
 
-Values in the device merge into the definition's bindings. Never copy bench-specific things
-(entities, limits, serial numbers) into a definition.
+Values in the device merge into the model's bindings. Never copy bench-specific things
+(entities, limits, serial numbers) into a model.
 
 After editing it, check with `desk device list --json`. Lua power scripts are documented in the
 project's `docs/scripting.md`.
 
-**A model `desk library list` doesn't know** needs a new definition: follow the `desk-add-device`
+**A model `desk model list` doesn't know** needs a new model: follow the `desk-add-device`
 skill (`desk skill desk-add-device`). Its `desk port probe` sends raw bytes without any limit
 checks; never use it to operate devices.

@@ -1,7 +1,7 @@
 //! End-to-end tests of open capabilities: devices that declare their own values, settings and
 //! actions, driven by the simulated device (mock provider) or by Lua drivers. The core's generic
 //! rules: units, ranges, limits before anything is sent, declaration order, verification, dry runs,
-//! channels, `watch`, and the definition format.
+//! channels, `watch`, and the model format.
 
 use std::path::Path;
 use std::process::Command;
@@ -112,7 +112,7 @@ impl Bench {
 fn run(dir: &Path, args: &[&str]) -> Out {
     let out = Command::new(env!("CARGO_BIN_EXE_desk"))
         .env_remove("DESK_CONFIG")
-        .env_remove("DESK_DEVICES")
+        .env_remove("DESK_MODELS")
         .env("DESK_MOCK_STATE", dir.join("mock-state.json"))
         .env("DESK_RUNTIME_DIR", dir.join("run"))
         .env("DESK_DAEMON_IDLE", "1s")
@@ -881,10 +881,10 @@ fn config_errors_name_the_problem() {
     }
 }
 
-// ---- definitions ------------------------------------------------------------------------------
+// ---- models ------------------------------------------------------------------------------
 
 #[test]
-fn definitions_declare_capabilities_and_devices_use_them() {
+fn models_declare_capabilities_and_devices_use_them() {
     let b = Bench::with(
         r#"
 [devices.dmm]
@@ -894,9 +894,9 @@ limits = { meter = { range = 100 } }
 "#,
     );
     b.file(
-        "devices/acme/dmm-1/device.toml",
+        "models/acme/dmm-1/model.toml",
         r#"
-[device]
+[model]
 id = "acme/dmm-1"
 name = "ACME DMM 1"
 requires = "desk-operator >= 0.1"
@@ -918,13 +918,13 @@ hold = { switches = false, args = { mode = { type = "choice", choices = ["on", "
 "#,
     );
     b.file(
-        "devices/acme/dmm-1/meter.lua",
+        "models/acme/dmm-1/meter.lua",
         &METER_DRIVER.replace(
             "PARAMS = {}",
             "PARAMS = { range_default = { type = \"number\", doc = \"x\" } }",
         ),
     );
-    let out = b.run(&["--json", "library", "check", "acme/dmm-1"]);
+    let out = b.run(&["--json", "model", "check", "acme/dmm-1"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     let out = b.run(&["--json", "get", "dmm"]);
     assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
@@ -934,7 +934,7 @@ hold = { switches = false, args = { mode = { type = "choice", choices = ["on", "
         "limit_exceeded",
         "the device's limit applies"
     );
-    let out = b.run(&["--json", "library", "show", "acme/dmm-1"]);
+    let out = b.run(&["--json", "model", "show", "acme/dmm-1"]);
     assert!(
         out.data()["driver_params"]["meter"].is_array(),
         "{}",
@@ -943,11 +943,11 @@ hold = { switches = false, args = { mode = { type = "choice", choices = ["on", "
 }
 
 #[test]
-fn library_new_scaffolds_a_declared_capability() {
+fn models_new_scaffolds_a_declared_capability() {
     let b = Bench::with("");
     let out = b.run(&[
         "--json",
-        "library",
+        "model",
         "new",
         "acme/iron-9",
         "--capability",
@@ -957,18 +957,17 @@ fn library_new_scaffolds_a_declared_capability() {
     ]);
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert_eq!(out.data()["check"]["ok"], true, "{}", out.stdout);
-    let toml =
-        std::fs::read_to_string(b.dir.path().join("devices/acme/iron-9/device.toml")).unwrap();
+    let toml = std::fs::read_to_string(b.dir.path().join("models/acme/iron-9/model.toml")).unwrap();
     assert!(
         toml.contains("[heater]") && toml.contains("[heater.values]"),
         "{toml}"
     );
-    let lua = std::fs::read_to_string(b.dir.path().join("devices/acme/iron-9/driver.lua")).unwrap();
+    let lua = std::fs::read_to_string(b.dir.path().join("models/acme/iron-9/driver.lua")).unwrap();
     assert!(lua.contains("function read(ctx)"), "{lua}");
 
     let out = b.run(&[
         "--json",
-        "library",
+        "model",
         "new",
         "acme/x",
         "--capability",
@@ -977,7 +976,7 @@ fn library_new_scaffolds_a_declared_capability() {
     assert_eq!(out.code_str(), "usage");
     let out = b.run(&[
         "--json",
-        "library",
+        "model",
         "new",
         "acme/y",
         "--capability",
@@ -1011,7 +1010,7 @@ fn complete(b: &Bench, shell: &str, words: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn completions_come_from_the_config_and_definitions() {
+fn completions_come_from_the_config_and_models() {
     let b = Bench::with(RELAYS);
     b.file("relays.lua", RELAYS_DRIVER);
     let b2 = iron();

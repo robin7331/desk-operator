@@ -1,4 +1,4 @@
-//! Open capabilities: what a definition declares a device can do (values, settings, actions), and
+//! Open capabilities: what a model declares a device can do (values, settings, actions), and
 //! the rules the core applies to every declared capability, whatever kind of device it is.
 //!
 //! * **value**: something the device reports (`temperature`)

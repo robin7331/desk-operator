@@ -129,7 +129,7 @@ pub fn list() -> Result<Vec<PortInfo>> {
 /// Find the one port matching `spec`.
 ///
 /// With a `path`, that port is used (symlinks such as `/dev/serial/by-id/…` are followed). If it's
-/// a known USB port, its ids must agree with the spec's: a definition's `usb_vid`/`usb_pid` then
+/// a known USB port, its ids must agree with the spec's: a model's `usb_vid`/`usb_pid` then
 /// guard against the wrong device on that path. Ports without USB info (e.g. ptys in tests) are
 /// used as given. Without a `path`, exactly one port must match the USB ids.
 fn resolve(spec: &PortSpec) -> Result<String> {

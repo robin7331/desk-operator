@@ -1,7 +1,7 @@
-//! Helpers for testing the definitions in `devices/` against this checkout's `desk` binary.
+//! Helpers for testing the models in `models/` against this checkout's `desk` binary.
 //!
-//! desk finds the definitions through `$DESK_DEVICES`, so a test sees the files as they are now,
-//! and the user's own config and `devices/` folder stay out of the way.
+//! desk finds the models through `$DESK_MODELS`, so a test sees the files as they are now,
+//! and the user's own config and `models/` folder stay out of the way.
 #![allow(dead_code)] // every test file uses only some of these
 
 use std::path::{Path, PathBuf};
@@ -9,23 +9,23 @@ use std::process::Command;
 
 use serde_json::Value;
 
-/// The device library (vendor folders live here).
+/// The models (vendor folders live here).
 pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("devices")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("models")
 }
 
-/// This checkout's `desk`, with its library on the definition search path and no user config.
+/// This checkout's `desk`, with its models on the model search path and no user config.
 pub fn desk() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_desk"));
-    // A config path that doesn't exist: no `devices/` next to it can shadow the library.
+    // A config path that doesn't exist: no `models/` next to it can shadow the models.
     let config = std::env::temp_dir().join(format!("desk-no-config-{}", std::process::id()));
     c.env("DESK_CONFIG", config.join("desk.toml"))
-        .env("DESK_DEVICES", root());
+        .env("DESK_MODELS", root());
     c
 }
 
-/// Every `device.toml` in this library (`<vendor>/<model>/device.toml`).
-pub fn definitions() -> Vec<PathBuf> {
+/// Every `model.toml` in this models (`<vendor>/<model>/model.toml`).
+pub fn models() -> Vec<PathBuf> {
     let dirs = |p: &Path| -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = std::fs::read_dir(p)
             .map(|r| {
@@ -41,7 +41,7 @@ pub fn definitions() -> Vec<PathBuf> {
     dirs(&root())
         .iter()
         .flat_map(|vendor| dirs(vendor))
-        .map(|model| model.join("device.toml"))
+        .map(|model| model.join("model.toml"))
         .filter(|p| p.is_file())
         .collect()
 }

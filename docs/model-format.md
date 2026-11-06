@@ -1,18 +1,18 @@
-# Device definition format
+# Model format
 
-A **device definition** describes what's true for every unit of a model. It lives at
-`<vendor>/<model>/device.toml` in a device library and is used by devices with
+A **model** describes what's true for every unit of a product. It lives at
+`<vendor>/<model>/model.toml` in a `models/` folder and is used by devices with
 `model = "<vendor>/<model>"`. A **device** (in the user's `desk.toml`) adds what's specific to one
 bench: how it gets mains power, names, bench limits, which unit.
 
-Machine-readable: [`schemas/device-definition.schema.json`](../schemas/device-definition.schema.json)
-(for editors: `#:schema ../../../schemas/device-definition.schema.json` as the first line). desk
-validates more than the schema can express: `desk library check`.
+Machine-readable: [`schemas/model.schema.json`](../schemas/model.schema.json)
+(for editors: `#:schema ../../../schemas/model.schema.json` as the first line). desk
+validates more than the schema can express: `desk model check`.
 
 ## Example
 
 ```toml
-[device]
+[model]
 id       = "fnirsi/ips3608"
 name     = "FNIRSI IPS3608"
 requires = "desk-operator >= 0.1"
@@ -31,7 +31,7 @@ settle_ms = 1000
 status    = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, output = 107 }
 ```
 
-## `[device]`
+## `[model]`
 
 | Field | Required | Type | Meaning |
 |---|---|---|---|
@@ -46,8 +46,8 @@ No other fields. What kind of device it is follows from its capabilities.
 
 ## Capabilities
 
-Every top-level table other than `[device]` is a capability; the table's name is its key. Each is
-a **script binding**: definitions never use `provider = …` (providers such as Home Assistant are set
+Every top-level table other than `[model]` is a capability; the table's name is its key. Each is
+a **script binding**: models never use `provider = …` (providers such as Home Assistant are set
 up per bench).
 
 | Table | Capability | Driver functions (see [`docs/scripting.md`](scripting.md)) | Required |
@@ -56,7 +56,7 @@ up per bench).
 | `[source]` | `voltage_source` (a bench power supply), well-known | `set_voltage`, `set_current`, `set_output`, `read`; optional `open`, `close`, `info` | `ratings` with `max_voltage`, `max_current` |
 | any other name (`[meter]`, `[heater]`, …) | a **declared** capability | `read`, `set`, `action` as its declarations need; optional `open`, `close` | at least one of `values`, `settings`, `actions` |
 
-Names: lowercase letters, digits, `_`; not `device` or `mains`. A table without declarations
+Names: lowercase letters, digits, `_`; not `model` or `mains`. A table without declarations
 (e.g. a typo like `[sorce]`) is an error, not a new capability.
 
 The well-known capabilities have names fixed by the core, so every power supply looks the same:
@@ -105,7 +105,7 @@ write `<capability>.<name>` (`heater.setpoint`).
 
 ### Units
 
-Definitions use these symbols (`desk library check` rejects `"C"` for `"°C"`); users may type the
+Models use these symbols (`desk model check` rejects `"C"` for `"°C"`); users may type the
 spellings in the middle column, with SI prefixes where allowed. Prefixes are case-sensitive (`m`
 milli, `M` mega), unit letters are not.
 
@@ -146,7 +146,7 @@ know: leave `max_power` out rather than guess.
 
 ### Driver params (`PARAMS`)
 
-Every library driver declares what it accepts (may be empty):
+Every driver in `models/` declares what it accepts (may be empty):
 
 ```lua
 PARAMS = {
@@ -158,7 +158,7 @@ PARAMS = {
 
 `type`: `string`, `number`, `integer`, `boolean`, `table`, `array`. desk rejects unknown params
 (typos), wrong types and missing required ones, and fills in defaults, so drivers can rely on
-`ctx.params.settle_ms` being set. `desk library show <id>` lists a definition's driver params.
+`ctx.params.settle_ms` being set. `desk model show <id>` lists a model's driver params.
 
 ## On the user's side
 
@@ -179,19 +179,19 @@ limits = { heater = { setpoint = 380, ch2 = { setpoint = 300 } } }   # a number 
 Limits are per capability and setting: a number is the maximum, `{ min = …, max = … }` both. A
 table named like a channel overrides them for that channel. `source` limits are maximums.
 
-The device's tables **merge** into the definition's key by key (tables merge, values replace). A
-device table with its own `script` or `provider` replaces the definition's binding entirely.
+The device's tables **merge** into the model's key by key (tables merge, values replace). A
+device table with its own `script` or `provider` replaces the model's binding entirely.
 
 ## Tooling
 
 ```sh
-desk library new vendor/model --capability voltage_source --name "Vendor Model" \
+desk model new vendor/model --capability voltage_source --name "Vendor Model" \
     --max-voltage 30 --max-current 5 [--driver ../shared/x.lua] [--dir ./devices]
-desk library new vendor/model --capability heater --name "Vendor Model"   # a declared capability
-desk library check [vendor/model | path/to/device.toml]
-desk library show vendor/model
+desk model new vendor/model --capability heater --name "Vendor Model"   # a declared capability
+desk model check [vendor/model | path/to/model.toml]
+desk model show vendor/model
 ```
 
-`new` creates `device.toml`, a driver skeleton with every required function and an empty `PARAMS`,
+`new` creates `model.toml`, a driver skeleton with every required function and an empty `PARAMS`,
 and a vendor `README.md` if there's none. It then runs `check`, which names whatever is still
 missing (e.g. ratings left at `0.0`).

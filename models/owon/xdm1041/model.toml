@@ -1,6 +1,6 @@
-# Device definition: true for every OWON XDM1041, nothing about any particular bench.
+# Model: true for every OWON XDM1041, nothing about any particular bench.
 
-[device]
+[model]
 id       = "owon/xdm1041"
 name     = "OWON XDM1041"
 requires = "desk-operator >= 0.1"

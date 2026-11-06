@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "desk-operator device definition (device.toml)",
-  "description": "What's true for every unit of a model. Nothing bench-specific (no providers, entities, bench limits, serial numbers). Spec: docs/definition-format.md. desk itself validates more than this schema can express (`desk library check`).",
+  "title": "desk-operator model (model.toml)",
+  "description": "What's true for every unit of a model. Nothing bench-specific (no providers, entities, bench limits, serial numbers). Spec: docs/model-format.md. desk itself validates more than this schema can express (`desk model check`).",
   "type": "object",
   "required": [
-    "device"
+    "model"
   ],
   "additionalProperties": false,
   "properties": {
-    "device": {
+    "model": {
       "type": "object",
       "required": [
         "id",
@@ -21,7 +21,7 @@
         "id": {
           "type": "string",
           "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+$",
-          "description": "vendor/model; must match the folder <vendor>/<model>/device.toml"
+          "description": "vendor/model; must match the folder <vendor>/<model>/model.toml"
         },
         "name": {
           "type": "string",
@@ -52,7 +52,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Manuals, protocol documentation, community work the definition is based on"
+          "description": "Manuals, protocol documentation, community work the model is based on"
         }
       }
     },
@@ -143,7 +143,7 @@
         },
         "params": {
           "type": "object",
-          "description": "Data for the driver, validated against the driver's PARAMS declaration (see `desk library show`)"
+          "description": "Data for the driver, validated against the driver's PARAMS declaration (see `desk model show`)"
         },
         "values": {
           "type": "object",
@@ -351,8 +351,8 @@
     }
   },
   "patternProperties": {
-    "^(?!(device|power|source|mains)$)[a-z][a-z0-9_]*$": {
-      "description": "A declared capability (any name but device/power/source/mains): a Lua driver with read(ctx), set(ctx, name, value), action(ctx, name, args) as needed by its declarations. desk requires at least one of values, settings, actions.",
+    "^(?!(model|power|source|mains)$)[a-z][a-z0-9_]*$": {
+      "description": "A declared capability (any name but model/power/source/mains): a Lua driver with read(ctx), set(ctx, name, value), action(ctx, name, args) as needed by its declarations. desk requires at least one of values, settings, actions.",
       "$ref": "#/$defs/binding"
     }
   }

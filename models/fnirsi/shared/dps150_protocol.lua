@@ -12,7 +12,7 @@
 --         0xC3 telemetry pushed by the device: Vout, Iout, Pout as float32 LE
 --         0xDE query: model name (ASCII), 0xFF query: full status (139 bytes)
 --
--- Device maximums are the definition's `ratings` (enforced by desk); everything the driver needs
+-- Device maximums are the model's `ratings` (enforced by desk); everything the driver needs
 -- beyond that is declared here and validated by desk (unknown or mistyped params are errors).
 PARAMS = {
   name = { type = "string", doc = "expected model name (query 0xDE); refuse other devices, since the USB id is a generic Artery AT32 one" },
@@ -136,7 +136,7 @@ local function query(ctx, cmd, accept)
   return wait_for(ctx, cmd, ctx.params.status_ms, accept)
 end
 
--- Connect, and check the model name if the definition gives one. Returns nil when the device
+-- Connect, and check the model name if the model gives one. Returns nil when the device
 -- doesn't answer (yet), raises when it's the wrong device.
 local function connect(ctx)
   port = ctx.serial.open({ baud = 115200, wait = ctx.params.wait })
@@ -215,7 +215,7 @@ function set_output(ctx, on)
   end
 end
 
--- Everything from the full status, using the definition's byte offsets.
+-- Everything from the full status, using the model's byte offsets.
 local function read_status(ctx, layout)
   -- Let the device settle after our last command, then ask.
   local settle_until = last_command + ctx.params.settle_ms

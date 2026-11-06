@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::declared::{self, Declarations, Limit};
 use crate::error::{DeskError, Result};
-use crate::library::{self, Library};
+use crate::models::{self, Models};
 use crate::providers;
 use crate::serial::PortSpec;
 use crate::source::Limits;
@@ -36,12 +36,12 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub aliases: Vec<String>,
-    /// The device definition it's based on, if any (e.g. `acme/psu-3000`).
+    /// The model it's based on, if any (e.g. `acme/psu-3000`).
     pub model: Option<String>,
     /// Mains (`power_switch`).
     pub power: Option<Binding>,
     /// Every other capability, in config order: `source` (voltage_source, well-known) or one the
-    /// definition declares.
+    /// model declares.
     pub caps: IndexMap<String, Cap>,
     /// Bench safety limits per capability, enforced by the core for every driver.
     pub limits: DeviceLimits,
@@ -234,10 +234,10 @@ struct RawConfig {
 }
 
 /// A device table: the known keys, and every other table as a capability (raw: it may be a
-/// partial override of a definition's capability).
+/// partial override of a model's capability).
 struct RawDevice {
     name: Option<String>,
-    /// A device definition from the library, e.g. `acme/psu-3000`.
+    /// A model from the models, e.g. `acme/psu-3000`.
     model: Option<String>,
     aliases: Vec<String>,
     limits: Option<toml::Table>,
@@ -447,30 +447,30 @@ fn build_cap(
     Ok((table, decls))
 }
 
-/// Capability names: lowercase letters, digits, `_`; not a device key, not `mains`/`device`.
+/// Capability names: lowercase letters, digits, `_`; not a device key, not `mains`/`model`.
 pub fn valid_cap_name(k: &str) -> bool {
     !k.is_empty()
         && k.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         && !DEVICE_KEYS.contains(&k)
         && k != "mains"
-        && k != "device"
+        && k != "model"
 }
 
-/// Build one capability binding from the device's own table and its definition's (if any).
+/// Build one capability binding from the device's own table and its model's (if any).
 fn build_binding(
     device: &str,
     key: &str,
     own: Option<&toml::Table>,
-    definition: Option<&toml::Table>,
+    model_def: Option<&toml::Table>,
     config_path: &Path,
 ) -> Result<Option<Cap>> {
     let bad = |e: String| DeskError::ConfigInvalid(format!("device `{device}`: `{key}`: {e}"));
-    let (table, own_binding) = match (own, definition) {
+    let (table, own_binding) = match (own, model_def) {
         (None, None) => return Ok(None),
         (None, Some(def)) => (def.clone(), false),
         (Some(own), Some(def)) if !own.contains_key("script") && !own.contains_key("provider") => {
-            (library::merge(def, own), false)
+            (models::merge(def, own), false)
         }
         // The device's own binding (paths relative to the config file).
         (Some(own), _) => (own.clone(), true),
@@ -531,19 +531,19 @@ impl Config {
         let raw: RawConfig = toml::from_str(text)
             .map_err(|e| DeskError::ConfigInvalid(format!("{}: {e}", path.display())))?;
 
-        let library = Library::for_config(&path);
+        let models = Models::for_config(&path);
         let mut devices = Vec::new();
         for (id, d) in raw.devices {
             let d = RawDevice::parse(&id, d)?;
-            let definition =
+            let model_def =
                 match &d.model {
-                    Some(model) => Some(library.find(model).map_err(|e| {
+                    Some(model) => Some(models.find(model).map_err(|e| {
                         DeskError::ConfigInvalid(format!("device `{id}`: model: {e}"))
                     })?),
                     None => None,
                 };
-            // Capabilities: the definition's, then the device's own new ones, in order.
-            let mut keys: Vec<String> = definition
+            // Capabilities: the model's, then the device's own new ones, in order.
+            let mut keys: Vec<String> = model_def
                 .as_ref()
                 .map(|def| def.bindings.keys().cloned().collect())
                 .unwrap_or_default();
@@ -558,14 +558,14 @@ impl Config {
                 if !valid_cap_name(&key) {
                     return Err(DeskError::ConfigInvalid(format!(
                         "device `{id}`: `{key}` can't be a capability name (lowercase letters, \
-                         digits, `_`; not `mains` or `device`)"
+                         digits, `_`; not `mains` or `model`)"
                     )));
                 }
                 let Some(cap) = build_binding(
                     &id,
                     &key,
                     d.caps.get(&key),
-                    definition.as_ref().and_then(|def| def.bindings.get(&key)),
+                    model_def.as_ref().and_then(|def| def.bindings.get(&key)),
                     &path,
                 )?
                 else {
@@ -582,7 +582,7 @@ impl Config {
                 name: d
                     .name
                     .clone()
-                    .or_else(|| definition.as_ref().map(|def| def.name.clone()))
+                    .or_else(|| model_def.as_ref().map(|def| def.name.clone()))
                     .unwrap_or_else(|| id.clone()),
                 model: d.model.clone(),
                 aliases: d.aliases.clone(),
@@ -718,7 +718,7 @@ fn resolve_script_path(binding: Binding, config_path: &Path) -> Binding {
             timeout,
             port,
             ratings,
-        } if script.is_relative() && !library::is_bundled(&script) => Binding::Script {
+        } if script.is_relative() && !models::is_bundled(&script) => Binding::Script {
             script: config_path.parent().unwrap_or(Path::new(".")).join(script),
             params,
             timeout,

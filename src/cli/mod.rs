@@ -3,7 +3,7 @@
 
 pub mod complete;
 mod device;
-mod library;
+mod models;
 mod ops;
 mod port;
 mod power;
@@ -133,10 +133,10 @@ pub enum Command {
         #[command(subcommand)]
         action: DeviceCmd,
     },
-    /// Device definitions: models desk knows (bundled, local, or from $DESK_DEVICES)
-    Library {
+    /// Models: the kinds of device desk knows (bundled, local, or from $DESK_MODELS)
+    Model {
         #[command(subcommand)]
-        action: LibraryCmd,
+        action: ModelCmd,
     },
     /// Serial ports and their USB ids (to fill in a binding's `port = { ... }`)
     Port {
@@ -250,24 +250,24 @@ pub struct Targets {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum LibraryCmd {
-    /// List available device definitions and where they come from
+pub enum ModelCmd {
+    /// List available models and where they come from
     List,
-    /// Show one definition: bindings, status, and how to use it
+    /// Show one model: bindings, status, and how to use it
     Show {
-        /// Definition id, e.g. vendor/model
+        /// Model id, e.g. vendor/model
         #[arg(add = ArgValueCompleter::new(complete::candidates))]
         id: String,
     },
-    /// Validate definitions and load their drivers (no hardware is touched)
+    /// Validate models and load their drivers (no hardware is touched)
     Check {
-        /// Definition ids or paths to device.toml files [default: all]
+        /// Model ids or paths to model.toml files [default: all]
         #[arg(add = ArgValueCompleter::new(complete::candidates))]
         targets: Vec<String>,
     },
-    /// Create a new definition: device.toml, a driver skeleton and a vendor README
+    /// Create a new model: model.toml, a driver skeleton and a vendor README
     New {
-        /// Definition id: vendor/model (lowercase, digits, `-`, `_`)
+        /// Model id: vendor/model (lowercase, digits, `-`, `_`)
         id: String,
         /// The capability: `voltage_source` (a power supply), `power_switch` (mains), or any
         /// other name for a declared capability (e.g. `heater`, `meter`)
@@ -276,7 +276,7 @@ pub enum LibraryCmd {
         /// Human-readable model name, e.g. "ACME PSU 9000"
         #[arg(long)]
         name: Option<String>,
-        /// Use an existing driver (path relative to the new device.toml, e.g. ../shared/x.lua)
+        /// Use an existing driver (path relative to the new model.toml, e.g. ../shared/x.lua)
         #[arg(long)]
         driver: Option<String>,
         /// The device's maximum voltage (voltage_source)
@@ -285,7 +285,7 @@ pub enum LibraryCmd {
         /// The device's maximum current (voltage_source)
         #[arg(long)]
         max_current: Option<f64>,
-        /// Library folder to create it in [default: devices/ next to the config]
+        /// Models folder to create it in [default: models/ next to the config]
         #[arg(long)]
         dir: Option<PathBuf>,
     },
@@ -412,7 +412,7 @@ pub async fn run(cli: Cli) -> Result<Report> {
                 PortCmd::Probe(args) => port::probe(args).await,
             };
         }
-        Command::Library { action } => return library::run(cli.config.as_deref(), action),
+        Command::Model { action } => return models::run(cli.config.as_deref(), action),
         Command::Skill(SkillArgs { name, action }) => return skill::run(name, action, cli.json),
         Command::Completions { ref shell } => return complete::script(shell),
         _ => {}
@@ -457,7 +457,7 @@ pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
         | Command::Skill(_)
         | Command::Completions { .. }
         | Command::Port { .. }
-        | Command::Library { .. }
+        | Command::Model { .. }
         | Command::Serve { .. } => Err(DeskError::Usage(
             "this command doesn't need the bench; run it directly".into(),
         )),

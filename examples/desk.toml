@@ -47,7 +47,7 @@ power   = { provider = "sim", endpoint = "outlet4", timeout = "5s" }
 limits  = { heater = { setpoint = 380 } }
 
 # A declared capability: anything that isn't mains or a power supply says what it can do. Usually
-# that comes from a device definition (`model = "vendor/model"`); here it's simulated inline (the
+# that comes from a model (`model = "vendor/model"`); here it's simulated inline (the
 # simulated tip temperature simply follows the setpoint).
 [devices.iron.heater]
 provider = "sim"

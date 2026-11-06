@@ -1,7 +1,7 @@
 //! The OWON XDM1041 driver against a fake meter speaking SCPI text over a pseudo-terminal.
 #![cfg(unix)]
 
-#[path = "support/devices.rs"]
+#[path = "support/models.rs"]
 mod harness;
 
 use std::io::{Read, Write};
@@ -15,7 +15,7 @@ use serde_json::Value;
 use serialport::{SerialPort, TTYPort};
 use tempfile::TempDir;
 
-/// See tests/device_fnirsi_dps150.rs: pty creation and process spawning must not overlap.
+/// See tests/model_fnirsi_dps150.rs: pty creation and process spawning must not overlap.
 static FORK_LOCK: Mutex<()> = Mutex::new(());
 
 /// What firmware V4.3.0 sends for Ω; older firmware sends A6 B8.

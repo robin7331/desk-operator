@@ -83,7 +83,7 @@ pub fn run(bench: Result<Bench>) -> Report {
                 "requires": "the device's mains must be on (device_off otherwise)"
             },
             "declared": {
-                "description": "Any other capability: the device definition declares its settings, values and actions (see devices[].settings/values/actions, with types, units, ranges, limits and `switches`).",
+                "description": "Any other capability: the model declares its settings, values and actions (see devices[].settings/values/actions, with types, units, ranges, limits and `switches`).",
                 "commands": [
                     "desk get <device>[:<channel>] [<name>...]",
                     "desk set <device>[:<channel>] <setting> <value> [<setting> <value>...] [--dry-run]",

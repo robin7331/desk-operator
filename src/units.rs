@@ -5,7 +5,7 @@
 //! number is only accepted for unitless values, so a unit is never guessed. Units the table
 //! doesn't know may still be declared: they must be typed as declared (any case), without prefixes.
 
-/// A known unit: its symbol (what definitions declare and output shows), how it may be typed
+/// A known unit: its symbol (what models declare and output shows), how it may be typed
 /// (lowercase), and whether SI prefixes apply.
 struct Known {
     symbol: &'static str,

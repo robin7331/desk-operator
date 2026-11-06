@@ -1,7 +1,7 @@
-#:schema ../../../schemas/device-definition.schema.json
-# Device definition: true for every FNIRSI DPS-150, nothing about any particular bench.
+#:schema ../../../schemas/model.schema.json
+# Model: true for every FNIRSI DPS-150, nothing about any particular bench.
 
-[device]
+[model]
 id       = "fnirsi/dps-150"
 name     = "FNIRSI DPS-150"
 requires = "desk-operator >= 0.1"

@@ -559,7 +559,7 @@ fn skills_match_the_cli() {
         "desk set",
         "desk do",
         "desk watch",
-        "desk library",
+        "desk model",
         "desk port list",
     ] {
         assert!(
@@ -779,7 +779,7 @@ fn all_is_a_reserved_device_name() {
 
 #[test]
 fn core_never_references_specific_devices() {
-    // The core knows capabilities, not models. Device definitions live in `devices/`, so nothing
+    // The core knows capabilities, not models. Models live in `models/`, so nothing
     // in `src/` may name a vendor or model, or read that folder directly (build.rs bundles it).
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in std::fs::read_dir(dir).unwrap().flatten() {
@@ -797,17 +797,17 @@ fn core_never_references_specific_devices() {
         &mut files,
     );
     let vendors: Vec<String> =
-        std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("devices"))
+        std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("models"))
             .unwrap()
             .flatten()
             .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().to_lowercase())
             .filter(|n| !n.starts_with('.'))
             .collect();
-    assert!(!vendors.is_empty(), "devices/ is empty");
+    assert!(!vendors.is_empty(), "models/ is empty");
     for f in files {
         let text = std::fs::read_to_string(&f).unwrap().to_lowercase();
-        // Bundling the library is build.rs's job; src/ never reaches into the repo's folders.
+        // Bundling the models is build.rs's job; src/ never reaches into the repo's folders.
         assert!(
             !text.contains("cargo_manifest_dir"),
             "{} reaches into the repository (bundle through build.rs)",

@@ -114,7 +114,7 @@ impl Engine {
             timeout,
             providers,
         } = spec;
-        let code = crate::library::read_text(path).map_err(|e| {
+        let code = crate::models::read_text(path).map_err(|e| {
             DeskError::ConfigInvalid(format!(
                 "device `{}`: cannot read script {}: {e}",
                 device.id,

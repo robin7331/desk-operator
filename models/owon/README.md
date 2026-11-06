@@ -1,6 +1,6 @@
 # OWON multimeters
 
-| Definition | Model | Status |
+| Model | Name | Status |
 |---|---|---|
 | `owon/xdm1041` | XDM1041 | community: functions, ranges, rate and mains behavior tried on firmware V4.3.0 with open leads; accuracy on a real signal not checked |
 

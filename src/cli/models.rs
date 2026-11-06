@@ -1,4 +1,4 @@
-//! `desk library …`: device definitions (what's true for every unit of a model).
+//! `desk model …`: models (what's true for every unit of a model).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,25 +7,25 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::Serialize;
 
-use super::LibraryCmd;
+use super::ModelCmd;
 use crate::config::{self, Binding};
 use crate::error::{DeskError, ErrorJson, Result};
-use crate::library::{self, Definition, Library};
+use crate::models::{self, Model, Models};
 use crate::output::{Report, table};
 use crate::providers::Registry;
 use crate::script::{DeviceInfo, ParamSpec, ScriptDriver, ScriptSource, ScriptSpec, ScriptSwitch};
 
-pub fn run(config_path: Option<&Path>, cmd: LibraryCmd) -> Result<Report> {
+pub fn run(config_path: Option<&Path>, cmd: ModelCmd) -> Result<Report> {
     let config_path = config_path
         .map(Path::to_path_buf)
         .or_else(config::default_path)
         .unwrap_or_else(|| PathBuf::from("desk.toml"));
-    let library = Library::for_config(&config_path);
+    let models = Models::for_config(&config_path);
     match cmd {
-        LibraryCmd::List => list(&library),
-        LibraryCmd::Show { id } => show(&library.find(&id)?),
-        LibraryCmd::Check { targets } => check(&library, &targets),
-        LibraryCmd::New {
+        ModelCmd::List => list(&models),
+        ModelCmd::Show { id } => show(&models.find(&id)?),
+        ModelCmd::Check { targets } => check(&models, &targets),
+        ModelCmd::New {
             id,
             capability,
             name,
@@ -37,8 +37,8 @@ pub fn run(config_path: Option<&Path>, cmd: LibraryCmd) -> Result<Report> {
             let root = dir.unwrap_or_else(|| {
                 config_path
                     .parent()
-                    .map(|p| p.join("devices"))
-                    .unwrap_or_else(|| PathBuf::from("devices"))
+                    .map(|p| p.join("models"))
+                    .unwrap_or_else(|| PathBuf::from("models"))
             });
             scaffold(
                 &root,
@@ -63,13 +63,13 @@ struct ListEntry<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
     capabilities: Vec<&'a str>,
-    /// Hidden by a definition with the same id earlier in the search path.
+    /// Hidden by a model with the same id earlier in the search path.
     shadowed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ErrorJson>,
 }
 
-fn capabilities(def: &Definition) -> Vec<&'static str> {
+fn capabilities(def: &Model) -> Vec<&'static str> {
     def.bindings
         .keys()
         .filter_map(|k| match k.as_str() {
@@ -80,8 +80,8 @@ fn capabilities(def: &Definition) -> Vec<&'static str> {
         .collect()
 }
 
-fn list(library: &Library) -> Result<Report> {
-    let listed = library.list();
+fn list(models: &Models) -> Result<Report> {
+    let listed = models.list();
     let caps: Vec<Vec<&str>> = listed
         .iter()
         .map(|l| l.result.as_ref().map(capabilities).unwrap_or_default())
@@ -123,23 +123,22 @@ fn list(library: &Library) -> Result<Report> {
         })
         .collect();
     let mut human = if rows.is_empty() {
-        "no device definitions found\n".to_string()
+        "no models found\n".to_string()
     } else {
-        table(
-            &["DEFINITION", "NAME", "STATUS", "CAPABILITIES", "FROM"],
-            &rows,
-        )
+        table(&["MODEL", "NAME", "STATUS", "CAPABILITIES", "FROM"], &rows)
     };
     if !rows.is_empty() {
-        human.push_str("\nuse one in a device with: model = \"<DEFINITION>\" (details: desk library show <id>)\n");
+        human.push_str(
+            "\nuse one in a device with: model = \"<MODEL>\" (details: desk model show <id>)\n",
+        );
     }
     Ok(Report::new(
-        &serde_json::json!({ "definitions": entries }),
+        &serde_json::json!({ "models": entries }),
         human,
     ))
 }
 
-fn show(def: &Definition) -> Result<Report> {
+fn show(def: &Model) -> Result<Report> {
     let mut human = format!(
         "id:           {}\nname:         {}\nstatus:       {}\ncapabilities: {}\nrequires:     {}\nfrom:         {}\nfile:         {}\n",
         def.id,
@@ -206,13 +205,13 @@ fn show(def: &Definition) -> Result<Report> {
         def.id
     ));
     Ok(Report::new(
-        &serde_json::json!({ "definition": def, "driver_params": drivers }),
+        &serde_json::json!({ "model": def, "driver_params": drivers }),
         human,
     ))
 }
 
 /// Load each script binding's driver (sandboxed, no hardware) and return its declared params.
-fn driver_params(def: &Definition) -> Vec<(String, Result<Vec<ParamSpec>>)> {
+fn driver_params(def: &Model) -> Vec<(String, Result<Vec<ParamSpec>>)> {
     let providers = Arc::new(Registry::new(IndexMap::new(), PathBuf::new()));
     def.bindings
         .iter()
@@ -246,7 +245,7 @@ fn driver_params(def: &Definition) -> Vec<(String, Result<Vec<ParamSpec>>)> {
                     };
                     declared.ok_or_else(|| {
                         DeskError::ConfigInvalid(format!(
-                            "{}: library drivers must declare `PARAMS = {{ … }}` (may be empty)",
+                            "{}: model drivers must declare `PARAMS = {{ … }}` (may be empty)",
                             script.display()
                         ))
                     })
@@ -257,7 +256,7 @@ fn driver_params(def: &Definition) -> Vec<(String, Result<Vec<ParamSpec>>)> {
 }
 
 fn spec_for<'a>(
-    def: &'a Definition,
+    def: &'a Model,
     script: &'a Path,
     params: &'a toml::Table,
     port: Option<&'a crate::serial::PortSpec>,
@@ -286,11 +285,11 @@ struct CheckResult {
     error: Option<ErrorJson>,
 }
 
-/// Check every definition (or the given ids / paths): format, and that each driver loads in the
+/// Check every model (or the given ids / paths): format, and that each driver loads in the
 /// sandbox and defines the functions its capability needs. Never touches hardware.
-fn check(library: &Library, targets: &[String]) -> Result<Report> {
-    let defs: Vec<(String, Result<Definition>)> = if targets.is_empty() {
-        library
+fn check(models: &Models, targets: &[String]) -> Result<Report> {
+    let defs: Vec<(String, Result<Model>)> = if targets.is_empty() {
+        models
             .list()
             .into_iter()
             .filter(|l| !l.shadowed)
@@ -302,9 +301,9 @@ fn check(library: &Library, targets: &[String]) -> Result<Report> {
             .map(|t| {
                 let p = Path::new(t);
                 let def = if p.exists() {
-                    library::load_file(p)
+                    models::load_file(p)
                 } else {
-                    library.find(t)
+                    models.find(t)
                 };
                 (t.clone(), def)
             })
@@ -346,7 +345,7 @@ fn check(library: &Library, targets: &[String]) -> Result<Report> {
             ]
         })
         .collect();
-    let human = table(&["DEFINITION", "CHECK"], &rows);
+    let human = table(&["MODEL", "CHECK"], &rows);
     let failed = results.iter().filter(|r| !r.ok).count();
     let failure = first_error.map(|e| {
         let mut err = e.to_json();
@@ -362,8 +361,8 @@ fn check(library: &Library, targets: &[String]) -> Result<Report> {
     Ok(Report::new(&serde_json::json!({ "results": results }), human).with_failure(failure))
 }
 
-/// Load every driver: required functions present, `PARAMS` declared, the definition's params valid.
-fn check_drivers(def: &Definition) -> Result<()> {
+/// Load every driver: required functions present, `PARAMS` declared, the model's params valid.
+fn check_drivers(def: &Model) -> Result<()> {
     for (_, result) in driver_params(def) {
         result?;
     }
@@ -374,7 +373,7 @@ const DRIVER_SOURCE: &str = r#"-- Driver for {name} (voltage_source). Contract: 
 -- desk does limits, ordering (voltage, current, output) and verification; the driver only talks
 -- to the device. Return from read() only what the device really reports.
 
--- Every param the definition may set, validated by desk (unknown or mistyped params are errors).
+-- Every param the model may set, validated by desk (unknown or mistyped params are errors).
 PARAMS = {
   -- example = { type = "number", default = 300, doc = "what it means" },
 }
@@ -442,7 +441,7 @@ end
 
 const VENDOR_README: &str = r#"# {vendor}
 
-| Definition | Model | Status |
+| Model | Name | Status |
 |---|---|---|
 | `{id}` | {model} | community, not yet tested on hardware |
 
@@ -466,14 +465,14 @@ fn scaffold(
     max_voltage: Option<f64>,
     max_current: Option<f64>,
 ) -> Result<Report> {
-    if !library::valid_definition_id(id) {
+    if !models::valid_model_id(id) {
         return Err(DeskError::Usage(format!(
-            "`{id}` is not a definition id: use vendor/model (lowercase, digits, `-`, `_`)"
+            "`{id}` is not a model id: use vendor/model (lowercase, digits, `-`, `_`)"
         )));
     }
     let (vendor, model) = id.split_once('/').unwrap_or((id, id));
     let dir = root.join(vendor).join(model);
-    let file = dir.join("device.toml");
+    let file = dir.join("model.toml");
     if file.exists() {
         return Err(DeskError::Usage(format!(
             "{} already exists",
@@ -527,7 +526,7 @@ fn scaffold(
         "power" => String::new(),
         _ => format!(
             r#"
-# What the device can do (docs/definition-format.md). At least one declaration; replace this one.
+# What the device can do (docs/model-format.md). At least one declaration; replace this one.
 [{key}.values]
 reading = {{ type = "number", unit = "V", doc = "TODO" }}
 
@@ -541,13 +540,10 @@ reading = {{ type = "number", unit = "V", doc = "TODO" }}
     };
     let version = env!("CARGO_PKG_VERSION");
     let requires = version.rsplit_once('.').map_or(version, |(mm, _)| mm);
-    // Point editors at the JSON Schema when creating inside a library checkout (schemas/ next to
-    // the library folder); elsewhere there's nothing to point at.
-    let schema = if root
-        .join("../schemas/device-definition.schema.json")
-        .is_file()
-    {
-        "#:schema ../../../schemas/device-definition.schema.json\n"
+    // Point editors at the JSON Schema when creating inside a clone of desk (schemas/ next to
+    // the models folder); elsewhere there's nothing to point at.
+    let schema = if root.join("../schemas/model.schema.json").is_file() {
+        "#:schema ../../../schemas/model.schema.json\n"
     } else {
         ""
     };
@@ -561,10 +557,10 @@ reading = {{ type = "number", unit = "V", doc = "TODO" }}
     std::fs::write(
         &file,
         format!(
-            r#"{schema}# Device definition: true for every unit of this model, nothing about any particular bench.
-# Format: docs/definition-format.md
+            r#"{schema}# Model: true for every unit of this model, nothing about any particular bench.
+# Format: docs/model-format.md
 
-[device]
+[model]
 id       = "{id}"
 name     = {name:?}{name_todo}
 requires = "desk-operator >= {requires}"
@@ -592,7 +588,7 @@ script = "{script}"
     }
 
     // Check what was created, so the next steps are concrete.
-    let check = library::load_file(&file).and_then(|d| check_drivers(&d));
+    let check = models::load_file(&file).and_then(|d| check_drivers(&d));
     let mut human: String = created
         .iter()
         .map(|p| format!("created {}\n", p.display()))
@@ -602,7 +598,7 @@ script = "{script}"
         Err(e) => human.push_str(&format!("check: {e}\n")),
     }
     human.push_str(&format!(
-        "\nnext: fill in {}, implement the driver, then `desk library check {}`\n",
+        "\nnext: fill in {}, implement the driver, then `desk model check {}`\n",
         file.display(),
         file.display()
     ));

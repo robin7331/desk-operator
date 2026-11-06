@@ -1,6 +1,6 @@
 # FNIRSI power supplies (DPS-150 protocol family)
 
-| Definition | Model | Rating | Status |
+| Model | Name | Rating | Status |
 |---|---|---|---|
 | `fnirsi/ips3608` | IPS3608 | 36 V, 8 A, 285 W | **tested** (hardware V1.1, firmware V1.2) |
 | `fnirsi/dps-150` | DPS-150 | 30 V, 5.1 A, 150 W | community (protocol verified on hardware by others, not with desk) |
@@ -94,7 +94,7 @@ Read-only probes with `desk port probe`, output switched only through desk, noth
 - **Right after mains on**, the USB port appears within about a second, but the first writes fail
   ("broken pipe") until the device has booted (under 2 s). The driver retries for `boot_ms`.
 - The output **ramps up** for several hundred ms after switching on (1.36 V of 3.3 V after 300 ms),
-  so the definition waits `settle_ms = 1000` before measuring.
+  so the model waits `settle_ms = 1000` before measuring.
 - It does **not echo** the output command; the output state comes from the full status.
 - **Watching** (`desk watch --interval 0`): about **18 readings per second** (two queries per
   reading, full status and input voltage, ~25 ms each); 200 in a row without a failure, and the
@@ -103,7 +103,7 @@ Read-only probes with `desk port probe`, output switched only through desk, noth
 ## Known gaps
 
 - **USB id `2e3c:5740` is Artery's generic AT32 id**, not FNIRSI-specific: other gadgets share it.
-  Both definitions check the model name (`DE`) before sending anything; bind by `serial_number` in
+  Both models check the model name (`DE`) before sending anything; bind by `serial_number` in
   your own config.
 - **Not exposed by desk yet:** protection thresholds, presets, metering on/off and counter reset
   (turning metering off and on resets it per the DPS-150 manual; unverified), brightness, volume.

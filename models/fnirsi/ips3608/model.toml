@@ -1,7 +1,7 @@
-#:schema ../../../schemas/device-definition.schema.json
-# Device definition: true for every FNIRSI IPS3608, nothing about any particular bench.
+#:schema ../../../schemas/model.schema.json
+# Model: true for every FNIRSI IPS3608, nothing about any particular bench.
 
-[device]
+[model]
 id       = "fnirsi/ips3608"
 name     = "FNIRSI IPS3608"
 requires = "desk-operator >= 0.1"

@@ -1,8 +1,8 @@
-//! The FNIRSI DPS-150-family driver (`devices/fnirsi/shared/dps150_protocol.lua`) against a fake
+//! The FNIRSI DPS-150-family driver (`models/fnirsi/shared/dps150_protocol.lua`) against a fake
 //! device that speaks the protocol over a pseudo-terminal.
 #![cfg(unix)]
 
-#[path = "support/devices.rs"]
+#[path = "support/models.rs"]
 mod harness;
 
 use std::io::{Read, Write};
@@ -64,7 +64,7 @@ impl Behavior {
     }
 }
 
-/// The IPS3608 full status: 139 bytes, offsets as documented in devices/fnirsi/README.md.
+/// The IPS3608 full status: 139 bytes, offsets as documented in models/fnirsi/README.md.
 fn status_blob(s: &State) -> Vec<u8> {
     let mut d = vec![0u8; 139];
     let mut put = |offset: usize, v: f32| d[offset..offset + 4].copy_from_slice(&v.to_le_bytes());
@@ -467,8 +467,8 @@ fn limits_are_enforced_before_any_setpoint_is_sent() {
 }
 
 #[test]
-fn the_library_ips3608_definition_works_as_is() {
-    // `model = "fnirsi/ips3608"`: name check, status layout and limits come from the definition
+fn the_library_ips3608_model_works_as_is() {
+    // `model = "fnirsi/ips3608"`: name check, status layout and limits come from the model
     // (bundled into the binary); the device only adds its port and faster timings for the test.
     let psu = FakePsu::start(Behavior::ips3608());
     let dir = TempDir::new().unwrap();
@@ -602,8 +602,8 @@ fn a_device_that_is_still_booting_is_retried() {
     );
 }
 
-/// This library's IPS3608 definition against a fake IPS3608, with the timings of the definition.
-fn library_ips3608(behavior: Behavior) -> (FakePsu, TempDir) {
+/// This models's IPS3608 model against a fake IPS3608, with the timings of the model.
+fn models_ips3608(behavior: Behavior) -> (FakePsu, TempDir) {
     let psu = FakePsu::start(behavior);
     let dir = TempDir::new().unwrap();
     std::fs::write(
@@ -623,7 +623,7 @@ source = {{ port = {{ path = "{}" }}, params = {{ wait = "0s", boot_ms = 1500, s
 
 #[test]
 fn ips3608_reports_everything_its_status_has() {
-    let (psu, dir) = library_ips3608(Behavior::ips3608());
+    let (psu, dir) = models_ips3608(Behavior::ips3608());
     let d = run(dir.path(), &["--json", "get", "psu"]).data();
     let r = &d["values"];
     assert_eq!(r["output"], false);
@@ -669,7 +669,7 @@ fn ips3608_reports_everything_its_status_has() {
 
 #[test]
 fn ips3608_keeps_quiet_after_every_write() {
-    let (psu, dir) = library_ips3608(Behavior::ips3608());
+    let (psu, dir) = models_ips3608(Behavior::ips3608());
     let out = run(
         dir.path(),
         &[
@@ -692,7 +692,7 @@ fn ips3608_keeps_quiet_after_every_write() {
 
 #[test]
 fn ips3608_with_a_tripped_protection_stays_off_until_cleared() {
-    let (psu, dir) = library_ips3608(Behavior {
+    let (psu, dir) = models_ips3608(Behavior {
         tripped: 2, // OCP
         ..Behavior::ips3608()
     });
@@ -727,7 +727,7 @@ fn ips3608_with_a_tripped_protection_stays_off_until_cleared() {
 fn ips3608_watch_keeps_one_session_and_commands_join_it() {
     use std::io::{BufRead, BufReader};
 
-    let (psu, dir) = library_ips3608(Behavior::ips3608());
+    let (psu, dir) = models_ips3608(Behavior::ips3608());
     let desk = |args: &[&str]| {
         let mut c = harness::desk();
         c.env("DESK_RUNTIME_DIR", dir.path().join("run"))
@@ -804,7 +804,7 @@ fn ips3608_watch_keeps_one_session_and_commands_join_it() {
 /// One lost status reply during a watch is retried, counted, and doesn't end the stream.
 #[test]
 fn ips3608_watch_survives_a_lost_reply() {
-    let (_psu, dir) = library_ips3608(Behavior {
+    let (_psu, dir) = models_ips3608(Behavior {
         skip_status: Some(4),
         ..Behavior::ips3608()
     });
@@ -846,7 +846,7 @@ fn ips3608_watch_survives_a_lost_reply() {
 /// the device means them (44.7, not 44.70000076).
 #[test]
 fn ips3608_reads_fast_and_rounds_floats() {
-    let (_psu, dir) = library_ips3608(Behavior {
+    let (_psu, dir) = models_ips3608(Behavior {
         telemetry: false,
         ..Behavior::ips3608()
     });

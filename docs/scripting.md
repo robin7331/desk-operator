@@ -100,8 +100,8 @@ Ports are opened **exclusively**: while one command uses a port, nothing else ca
 
 ## Drivers of declared capabilities
 
-Any capability other than `power` and `source` is declared: the binding (or the device definition)
-lists its `values`, `settings` and `actions` (format: [`definition-format.md`](definition-format.md)),
+Any capability other than `power` and `source` is declared: the binding (or the model)
+lists its `values`, `settings` and `actions` (format: [`model-format.md`](model-format.md)),
 and the driver implements what they need:
 
 ```toml
@@ -186,8 +186,8 @@ PARAMS = {
 ```
 
 Types: `string`, `number`, `integer`, `boolean`, `table`, `array`. Without `PARAMS`, params are
-passed through unchecked (fine for your own quick scripts; library drivers must declare it, see
-[`definition-format.md`](definition-format.md)).
+passed through unchecked (fine for your own quick scripts; drivers in `models/` must declare it, see
+[`model-format.md`](model-format.md)).
 
 Drivers only implement primitives. Everything users rely on is done by desk itself, the same for
 every driver:

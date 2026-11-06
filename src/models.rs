@@ -1,12 +1,12 @@
-//! The device library: device **definitions** (what's true for every unit of a model), found in
-//! several places, first match wins:
+//! Models: what's true for every unit of a product, such as "ACME PSU 3000". Found in several
+//! places, first match wins:
 //!
-//! 1. `devices/` next to the config file (your own or unpublished definitions)
-//! 2. every directory in `$DESK_DEVICES` (e.g. a checkout of the library)
-//! 3. the definitions bundled into this binary at build time
+//! 1. `models/` next to the config file (your own or unpublished models)
+//! 2. every directory in `$DESK_MODELS` (e.g. `models/` in a clone of desk)
+//! 3. the models bundled into this binary at build time
 //!
-//! A definition is `<vendor>/<model>/device.toml`. It may only contain *script* bindings: how a
-//! particular user's device gets mains (their Home Assistant, …) never belongs in a definition.
+//! A model is `<vendor>/<model>/model.toml`. It may only contain *script* bindings: how a
+//! particular user's device gets mains (their Home Assistant, …) never belongs in a model.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{DeskError, Result};
 
 mod bundled {
-    include!(concat!(env!("OUT_DIR"), "/bundled_devices.rs"));
+    include!(concat!(env!("OUT_DIR"), "/bundled_models.rs"));
 }
 
 /// Paths of bundled files look like `bundled:acme/shared/x.lua`.
@@ -28,9 +28,9 @@ pub const BINDING_KEYS: &[&str] = &["power", "source"];
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase", tag = "kind", content = "path")]
 pub enum Origin {
-    /// `devices/` next to the config file.
+    /// `models/` next to the config file.
     Local(PathBuf),
-    /// A directory from `$DESK_DEVICES`.
+    /// A directory from `$DESK_MODELS`.
     Path(PathBuf),
     /// Built into this binary.
     Bundled,
@@ -46,7 +46,7 @@ impl std::fmt::Display for Origin {
     }
 }
 
-/// How far a definition has been verified.
+/// How far a model has been verified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -66,17 +66,17 @@ impl std::fmt::Display for Status {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Definition {
+pub struct Model {
     pub id: String,
     pub name: String,
     pub status: Status,
     /// Hardware/firmware versions it was tested with.
     pub tested: Vec<String>,
-    /// Manuals, protocol documentation, community work the definition is based on.
+    /// Manuals, protocol documentation, community work the model is based on.
     pub sources: Vec<String>,
     pub requires: String,
     pub origin: Origin,
-    /// Where `device.toml` is (a real path, or `bundled:<id>/device.toml`).
+    /// Where `model.toml` is (a real path, or `bundled:<id>/model.toml`).
     pub file: PathBuf,
     /// Capability key → binding table, with script paths already resolved.
     pub bindings: IndexMap<String, toml::Table>,
@@ -100,54 +100,54 @@ enum Root {
     Bundled,
 }
 
-pub struct Library {
+pub struct Models {
     roots: Vec<Root>,
 }
 
-impl Library {
+impl Models {
     /// The search path for a config file at `config_path`.
     pub fn for_config(config_path: &Path) -> Self {
         let mut roots = Vec::new();
         if let Some(dir) = config_path.parent() {
-            let local = dir.join("devices");
+            let local = dir.join("models");
             roots.push(Root::Dir(local.clone(), Origin::Local(local)));
         }
-        if let Some(paths) = std::env::var_os("DESK_DEVICES") {
+        if let Some(paths) = std::env::var_os("DESK_MODELS") {
             for p in std::env::split_paths(&paths) {
                 roots.push(Root::Dir(p.clone(), Origin::Path(p)));
             }
         }
         roots.push(Root::Bundled);
-        Library { roots }
+        Models { roots }
     }
 
-    /// The first definition with this id along the search path.
-    pub fn find(&self, id: &str) -> Result<Definition> {
-        if !valid_definition_id(id) {
+    /// The first model with this id along the search path.
+    pub fn find(&self, id: &str) -> Result<Model> {
+        if !valid_model_id(id) {
             return Err(DeskError::ConfigInvalid(format!(
-                "`{id}` is not a definition id (expected `<vendor>/<model>`, e.g. `acme/psu-3000`)"
+                "`{id}` is not a model id (expected `<vendor>/<model>`, e.g. `acme/psu-3000`)"
             )));
         }
         for root in &self.roots {
-            if let Some((text, file, origin)) = root.read_definition(id) {
-                return parse_definition(id, &text, file, origin);
+            if let Some((text, file, origin)) = root.read_model(id) {
+                return parse_model(id, &text, file, origin);
             }
         }
         Err(DeskError::ConfigInvalid(format!(
-            "no device definition `{id}` (see `desk library list`)"
+            "no model `{id}` (see `desk model list`)"
         )))
     }
 
-    /// Every definition, in search order. `shadowed` ones are hidden by an earlier root.
+    /// Every model, in search order. `shadowed` ones are hidden by an earlier root.
     pub fn list(&self) -> Vec<Listed> {
         let mut out: Vec<Listed> = Vec::new();
         for root in &self.roots {
             for id in root.ids() {
                 let shadowed = out.iter().any(|l| l.id == id);
                 let result = root
-                    .read_definition(&id)
+                    .read_model(&id)
                     .ok_or_else(|| DeskError::Internal(format!("{id} vanished")))
-                    .and_then(|(text, file, origin)| parse_definition(&id, &text, file, origin));
+                    .and_then(|(text, file, origin)| parse_model(&id, &text, file, origin));
                 out.push(Listed {
                     id,
                     shadowed,
@@ -159,11 +159,11 @@ impl Library {
     }
 }
 
-/// Load a definition from a file outside the search path (`desk library check path/to/device.toml`).
-/// Its id comes from the last two directories: `<vendor>/<model>/device.toml`.
-pub fn load_file(path: &Path) -> Result<Definition> {
+/// Load a model from a file outside the search path (`desk model check path/to/model.toml`).
+/// Its id comes from the last two directories: `<vendor>/<model>/model.toml`.
+pub fn load_file(path: &Path) -> Result<Model> {
     let file = if path.is_dir() {
-        path.join("device.toml")
+        path.join("model.toml")
     } else {
         path.to_path_buf()
     };
@@ -180,31 +180,31 @@ pub fn load_file(path: &Path) -> Result<Definition> {
         [model, vendor] => format!("{vendor}/{model}"),
         _ => {
             return Err(DeskError::ConfigInvalid(format!(
-                "{}: expected <vendor>/<model>/device.toml",
+                "{}: expected <vendor>/<model>/model.toml",
                 file.display()
             )));
         }
     };
     let origin = Origin::Path(file.parent().map(Path::to_path_buf).unwrap_or_default());
-    parse_definition(&id, &text, file, origin)
+    parse_model(&id, &text, file, origin)
 }
 
 pub struct Listed {
     pub id: String,
     pub shadowed: bool,
-    pub result: Result<Definition>,
+    pub result: Result<Model>,
 }
 
 impl Root {
-    fn read_definition(&self, id: &str) -> Option<(String, PathBuf, Origin)> {
+    fn read_model(&self, id: &str) -> Option<(String, PathBuf, Origin)> {
         match self {
             Root::Dir(dir, origin) => {
-                let file = dir.join(id).join("device.toml");
+                let file = dir.join(id).join("model.toml");
                 let text = std::fs::read_to_string(&file).ok()?;
                 Some((text, file, origin.clone()))
             }
             Root::Bundled => {
-                let rel = format!("{id}/device.toml");
+                let rel = format!("{id}/model.toml");
                 let text = bundled_file(&rel)?;
                 Some((
                     text.to_string(),
@@ -215,14 +215,14 @@ impl Root {
         }
     }
 
-    /// Ids of all definitions in this root (`<vendor>/<model>` with a `device.toml`).
+    /// Ids of all models in this root (`<vendor>/<model>` with a `model.toml`).
     fn ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
         match self {
             Root::Dir(dir, _) => {
                 for vendor in read_dirs(dir) {
                     for model in read_dirs(&vendor) {
-                        if model.join("device.toml").is_file() {
+                        if model.join("model.toml").is_file() {
                             let name = |p: &Path| {
                                 p.file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
@@ -235,7 +235,7 @@ impl Root {
             }
             Root::Bundled => {
                 for (path, _) in bundled::BUNDLED {
-                    if let Some(id) = path.strip_suffix("/device.toml")
+                    if let Some(id) = path.strip_suffix("/model.toml")
                         && id.matches('/').count() == 1
                     {
                         ids.push(id.to_string());
@@ -268,7 +268,7 @@ fn bundled_file(rel: &str) -> Option<&'static str> {
         .map(|(_, text)| *text)
 }
 
-pub fn valid_definition_id(id: &str) -> bool {
+pub fn valid_model_id(id: &str) -> bool {
     let mut parts = id.split('/');
     let ok = |s: Option<&str>| {
         s.is_some_and(|s| {
@@ -328,19 +328,18 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Result<Definition> {
-    let bad =
-        |msg: String| DeskError::ConfigInvalid(format!("definition {}: {msg}", file.display()));
+fn parse_model(id: &str, text: &str, file: PathBuf, origin: Origin) -> Result<Model> {
+    let bad = |msg: String| DeskError::ConfigInvalid(format!("model {}: {msg}", file.display()));
     let mut table: toml::Table = toml::from_str(text).map_err(|e| bad(e.to_string()))?;
 
     let header: RawHeader = table
-        .remove("device")
-        .ok_or_else(|| bad("missing [device]".into()))?
+        .remove("model")
+        .ok_or_else(|| bad("missing [model]".into()))?
         .try_into()
-        .map_err(|e: toml::de::Error| bad(format!("[device]: {}", e.message())))?;
+        .map_err(|e: toml::de::Error| bad(format!("[model]: {}", e.message())))?;
     if header.id != id {
         return Err(bad(format!(
-            "[device] id is `{}`, but the file is at `{id}`",
+            "[model] id is `{}`, but the file is at `{id}`",
             header.id
         )));
     }
@@ -361,7 +360,7 @@ fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Resu
         let toml::Value::Table(mut binding) = value else {
             return Err(bad(format!("`{key}` must be a table")));
         };
-        // Declarations are checked here too, so `library check` reports them.
+        // Declarations are checked here too, so `models check` reports them.
         let mut rest = binding.clone();
         let decls = crate::declared::Declarations::take(&mut rest)
             .map_err(|e| bad(format!("`{key}`: {e}")))?;
@@ -373,7 +372,7 @@ fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Resu
         }
         if binding.contains_key("provider") {
             return Err(bad(format!(
-                "`{key}` uses a provider; definitions may only use scripts (providers such as \
+                "`{key}` uses a provider; models may only use scripts (providers such as \
                  Home Assistant are set up per bench, in the user's own config)"
             )));
         }
@@ -389,7 +388,7 @@ fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Resu
         bindings.insert(key, binding);
     }
 
-    Ok(Definition {
+    Ok(Model {
         id: header.id,
         name: header.name,
         status: header.status,
@@ -402,7 +401,7 @@ fn parse_definition(id: &str, text: &str, file: PathBuf, origin: Origin) -> Resu
     })
 }
 
-/// Ratings every definition must declare per capability (the device's maximums), so the core can
+/// Ratings every model must declare per capability (the device's maximums), so the core can
 /// enforce them without trusting a driver.
 pub const REQUIRED_RATINGS: &[(&str, &[&str])] = &[("source", &["max_voltage", "max_current"])];
 
@@ -457,14 +456,14 @@ fn check_requires(req: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Merge a device's own binding table over a definition's: tables merge key by key (e.g. adding
+/// Merge a device's own binding table over a model's: tables merge key by key (e.g. adding
 /// `port.serial_number`), other values are replaced. A device table with its own `script` or
-/// `provider` replaces the definition's binding entirely.
-pub fn merge(definition: &toml::Table, device: &toml::Table) -> toml::Table {
+/// `provider` replaces the model's binding entirely.
+pub fn merge(model: &toml::Table, device: &toml::Table) -> toml::Table {
     if device.contains_key("script") || device.contains_key("provider") {
         return device.clone();
     }
-    deep_merge(definition, device)
+    deep_merge(model, device)
 }
 
 fn deep_merge(base: &toml::Table, over: &toml::Table) -> toml::Table {
@@ -508,20 +507,20 @@ mod tests {
         assert_eq!(m["params"]["status"]["output"].as_integer(), Some(107));
 
         let own = t(r#"script = "mine.lua""#);
-        assert_eq!(merge(&def, &own), own, "own script replaces the definition");
+        assert_eq!(merge(&def, &own), own, "own script replaces the model");
     }
 
     #[test]
     fn resolves_relative_scripts() {
         assert_eq!(
             resolve_relative(
-                Path::new("bundled:acme/psu-3000/device.toml"),
+                Path::new("bundled:acme/psu-3000/model.toml"),
                 "../shared/x.lua"
             ),
             PathBuf::from("bundled:acme/shared/x.lua")
         );
         assert_eq!(
-            resolve_relative(Path::new("/lib/acme/psu/device.toml"), "../shared/x.lua"),
+            resolve_relative(Path::new("/lib/acme/psu/model.toml"), "../shared/x.lua"),
             PathBuf::from("/lib/acme/shared/x.lua")
         );
     }
@@ -539,11 +538,11 @@ mod tests {
 
     #[test]
     fn ids() {
-        assert!(valid_definition_id("acme/psu-3000"));
-        assert!(valid_definition_id("acme/psu-150"));
-        assert!(!valid_definition_id("acme"));
-        assert!(!valid_definition_id("a/b/c"));
-        assert!(!valid_definition_id("Acme/PSU"));
-        assert!(!valid_definition_id("../x"));
+        assert!(valid_model_id("acme/psu-3000"));
+        assert!(valid_model_id("acme/psu-150"));
+        assert!(!valid_model_id("acme"));
+        assert!(!valid_model_id("a/b/c"));
+        assert!(!valid_model_id("Acme/PSU"));
+        assert!(!valid_model_id("../x"));
     }
 }

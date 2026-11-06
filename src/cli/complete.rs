@@ -1,5 +1,5 @@
 //! Shell completion. `desk completions <shell>` prints a script that calls `desk` back on every
-//! Tab; the candidates come from the config and definitions, so they follow the bench. Nothing here
+//! Tab; the candidates come from the config and models, so they follow the bench. Nothing here
 //! opens a device or a provider connection.
 
 use std::ffi::OsStr;
@@ -13,7 +13,7 @@ use super::skill::SKILLS;
 use crate::config::{Config, Device};
 use crate::declared::Type;
 use crate::error::{DeskError, Result};
-use crate::library::Library;
+use crate::models::Models;
 use crate::ops::{Catalog, split_channel};
 use crate::output::Report;
 
@@ -204,8 +204,8 @@ fn next(config: Option<&Config>, words: &[&str], typed: &str) -> Vec<Candidate> 
         ["provider", "test" | "endpoints"] => config.map_or(Vec::new(), |c| {
             c.providers.keys().map(|p| (p.clone(), None)).collect()
         }),
-        ["library", "show"] => definitions(config),
-        ["library", "check", given @ ..] => unused(definitions(config), given),
+        ["model", "show"] => models(config),
+        ["model", "check", given @ ..] => unused(models(config), given),
         ["skill"] => SKILLS.iter().map(|(n, _)| (n.to_string(), None)).collect(),
         _ => Vec::new(),
     }
@@ -304,11 +304,11 @@ fn action_args(cat: &Catalog, action: &str, given: &[&str], typed: &str) -> Vec<
         .collect()
 }
 
-fn definitions(config: Option<&Config>) -> Vec<Candidate> {
+fn models(config: Option<&Config>) -> Vec<Candidate> {
     let Some(config) = config else {
         return Vec::new();
     };
-    Library::for_config(&config.path)
+    Models::for_config(&config.path)
         .list()
         .into_iter()
         .filter(|l| !l.shadowed)

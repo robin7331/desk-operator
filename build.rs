@@ -1,14 +1,14 @@
-//! Bundles the device library (`devices/`) into the binary, so installed copies of desk have the
-//! definitions without a checkout. Only the vendor folders are bundled (`<vendor>/…`).
-//! Generates `$OUT_DIR/bundled_devices.rs`:
-//! `pub static BUNDLED: &[(&str, &str)] = &[("acme/psu-3000/device.toml", "<contents>"), …];`
+//! Bundles the models (`models/`) into the binary, so installed copies of desk have the
+//! models without a checkout. Only the vendor folders are bundled (`<vendor>/…`).
+//! Generates `$OUT_DIR/bundled_models.rs`:
+//! `pub static BUNDLED: &[(&str, &str)] = &[("acme/psu-3000/model.toml", "<contents>"), …];`
 //!
-//! Only packaging lives here: the core (`src/`) never refers to any specific definition.
+//! Only packaging lives here: the core (`src/`) never refers to any specific model.
 
 use std::path::{Path, PathBuf};
 
 fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
-    // Watch every directory, so newly added definitions trigger a rebuild too.
+    // Watch every directory, so newly added models trigger a rebuild too.
     println!("cargo:rerun-if-changed={}", dir.display());
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -36,7 +36,7 @@ fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
 
 fn main() {
     let root =
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir")).join("devices");
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir")).join("models");
 
     println!("cargo:rerun-if-changed={}", root.display());
     let mut files = Vec::new();
@@ -51,7 +51,7 @@ fn main() {
         }
     }
     if files.is_empty() {
-        println!("cargo:warning=no device definitions bundled: devices/ is empty");
+        println!("cargo:warning=no models bundled: models/ is empty");
     }
     let mut code = String::from("pub static BUNDLED: &[(&str, &str)] = &[\n");
     for (rel, path) in &files {
@@ -63,6 +63,6 @@ fn main() {
     }
     code.push_str("];\n");
 
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("out dir")).join("bundled_devices.rs");
-    std::fs::write(out, code).expect("write bundled_devices.rs");
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("out dir")).join("bundled_models.rs");
+    std::fs::write(out, code).expect("write bundled_models.rs");
 }

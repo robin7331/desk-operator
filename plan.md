@@ -269,12 +269,12 @@ desk source read psu                            # output, setpoints, measured V/
 - [x] **M4.3** Serial host API: `port = { … }` in script bindings, `ctx.serial.open{…}` with
       write/read/clear/close, `wait` for ports to appear, exclusive opens, `desk port list`
       (USB only unless `--all`). Tested over pseudo-terminal pairs (Unix), stable over 30 repeated runs
-- [x] **M4.4** First device definitions: `devices/fnirsi/` with a shared DPS-150-family protocol
+- [x] **M4.4** First device definitions: `models/fnirsi/` with a shared DPS-150-family protocol
       driver and two definitions (`ips3608`, `dps-150`), tested against a fake device that speaks
       the protocol over a pty (connect/disconnect, setpoints, output echo, pushed telemetry, resync).
       API gap it revealed, fixed generically: `ctx.clock()` (the sandbox had no time source, needed
       to ignore measurements taken before a command). A test now enforces that `src/` never
-      mentions `devices/` or a vendor.
+      mentions `models/` or a vendor.
 - [x] **M4.5** Smoke test on a real IPS3608 (firmware V1.1, nothing connected to the output). Worked:
       read, set + output on, all confirmed by read-back; bench limit refusal; `device_off` with mains
       off; reading right after mains on. Found on hardware and fixed in the driver/definition, not
@@ -304,12 +304,16 @@ Modbus registers (Riden RD60xx).
 |---|---|---|
 | What | `psu` on *one* bench | "FNIRSI IPS3608": what's true for every unit of a model |
 | Contains | name, aliases, the user's power path (HA, Shelly, …), bench `limits`, which unit (serial number) | driver(s), USB ids, device maximums, docs, tests, tested firmware |
-| Lives in | the user's `~/.config/desk-operator/desk.toml` (never in a repo) | the device library: `devices/<vendor>/<model>/` |
+| Lives in | the user's `~/.config/desk-operator/desk.toml` (never in a repo) | the device library: `models/<vendor>/<model>/` |
 
 A definition never contains anything about how a particular user switches mains or names things.
 
-**In this repository:** the library is `devices/`, bundled by `build.rs` (vendor folders only). Its
-fake-device tests are `tests/device_*.rs`, run against this checkout's `desk`. The core's tests don't
+**Naming (2026-11-06):** a **device** is on your bench, a **model** is what kind of thing it is. `desk
+library`, "definition", `device.toml` and `devices/` became `desk model`, "model", `model.toml` and
+`models/`. Older sections below may still say "definition" or "library" for a model.
+
+**In this repository:** the library is `models/`, bundled by `build.rs` (vendor folders only). Its
+fake-device tests are `tests/model_*.rs`, run against this checkout's `desk`. The core's tests don't
 depend on which definitions are bundled. (It had its own repository, desk-operator-devices, for one
 day on 2026-11-06. A merged device still needed a submodule update to reach anyone, so it moved back
 with its history for a lean start. It can be split out again when device updates need to outpace
@@ -320,11 +324,11 @@ desk builds.)
 - **`model = "fnirsi/ips3608"`** in a device: the definition supplies its capability bindings
   (`source = …`, ports, params, maximums). The user's config adds what's theirs (`power`, `limits`,
   aliases) and may override per unit (e.g. `port.serial_number` when two identical units exist).
-- **Definition format** (`device.toml`): id, name, kind, `requires = "desk-operator >= x"`, bindings,
+- **Definition format** (`model.toml`): id, name, kind, `requires = "desk-operator >= x"`, bindings,
   docs and a status (`community`, `tested on hardware`, firmware versions). Shared drivers for
   protocol families (one driver, several definitions).
-- **Where definitions come from:** bundled with desk (`devices/` embedded at build time), a local
-  folder (`~/.config/desk-operator/devices/`, for your own or unpublished ones), later the remote
+- **Where definitions come from:** bundled with desk (`models/` embedded at build time), a local
+  folder (`~/.config/desk-operator/models/`, for your own or unpublished ones), later the remote
   library repo.
 - **CLI:** `desk devices list|show|check` (validate a definition: format, driver functions, tests).
 - **Definition tests that travel with the definition** (a fake device described next to the
@@ -335,17 +339,17 @@ desk builds.)
 **Done:**
 - [x] `model = "vendor/model"` with key-by-key merging (own `script`/`provider` replaces);
       device name defaults to the definition's
-- [x] `device.toml` format: `[device]` (id must match the folder, `requires` checked, status,
+- [x] `model.toml` format: `[device]` (id must match the folder, `requires` checked, status,
       tested) + capability tables; **script bindings only** (providers are rejected)
-- [x] Search path: `devices/` next to the config → `$DESK_DEVICES` → bundled (embedded by
+- [x] Search path: `models/` next to the config → `$DESK_MODELS` → bundled (embedded by
       `build.rs` as `bundled:<path>`; `src/` still never names a vendor or reads the repo folder)
-- [x] `desk library list|show|check` (`check` loads every driver in the sandbox, no hardware)
+- [x] `desk model list|show|check` (`check` loads every driver in the sandbox, no hardware)
 - [x] Port matching with `path` + USB ids follows symlinks (`/dev/serial/by-id/…`) and refuses a
       different USB device on that path
-- [x] `devices/README.md` as contributor guide; skill uses `model =`
+- [x] `models/README.md` as contributor guide; skill uses `model =`
 - [x] Real bench switched to `model = "fnirsi/ips3608"` + its serial number; read verified on hardware
-- Decision: definition tests stay in Rust, in `tests/device_*.rs` (2026-11-06); a Lua
-  fake-device format (`desk library test`, no Rust needed) is a later option for contributors.
+- Decision: definition tests stay in Rust, in `tests/model_*.rs` (2026-11-06); a Lua
+  fake-device format (`desk model test`, no Rust needed) is a later option for contributors.
 
 ## M5.1 — A defined definition format ✓
 
@@ -363,9 +367,9 @@ device-wide (ambiguous once a device has two capabilities), no scaffold.
       Required for library drivers
 - [x] **Format v1:** `status` = `community` | `tested`, `kind` dropped (capabilities say it),
       optional `sources = [urls]`
-- [x] **`desk library new vendor/model --capability voltage_source`** scaffold;
-      `desk library show` lists the driver's params
-- [x] **Spec** `docs/definition-format.md` + JSON Schema for editors
+- [x] **`desk model new vendor/model --capability voltage_source`** scaffold;
+      `desk model show` lists the driver's params
+- [x] **Spec** `docs/model-format.md` + JSON Schema for editors
 
 ## M6 — AI skills (in progress)
 
@@ -381,14 +385,14 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
 1. **Ask:** exact model, what it is (capability), how it connects (USB, LAN, …), whether the user
    wants it controlled by desk or only switched on/off (then it's just a `power` binding, no
    definition needed).
-2. **Check the library first:** `desk library list` / `show`; an existing family driver may fit
+2. **Check the library first:** `desk model list` / `show`; an existing family driver may fit
    (e.g. the DPS-150 driver covered the IPS3608 with only data in the definition).
 3. **Research:** vendor docs, community reverse engineering, existing open-source tools. Weigh
    sources (a working tool's source code beats a blog post; in M4.4 a blog turned out to be
    templated content). Record sources in `sources`.
-4. **Scaffold:** `desk library new vendor/model --capability … --name … --max-voltage … --max-current …`
-   (or `--driver ../shared/x.lua`), then implement/fill in, `desk library check`.
-5. **Fake-device test** (like `tests/device_fnirsi_dps150.rs`) before touching hardware.
+4. **Scaffold:** `desk model new vendor/model --capability … --name … --max-voltage … --max-current …`
+   (or `--driver ../shared/x.lua`), then implement/fill in, `desk model check`.
+5. **Fake-device test** (like `tests/model_fnirsi_dps150.rs`) before touching hardware.
 6. **Find the device:** `desk port list` before/after plugging in or powering on (VID:PID, serial).
    Generic VIDs (e.g. Artery `2e3c:5740`) mean the driver must identify the model first.
 7. **Probe read-only first:** a small diagnostic script (a `power` script binding with `port` and
@@ -403,7 +407,7 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
    each switching step confirmed by the user. Also mains off/on (boot behavior, output state
    after power-up). Record observed behavior in the vendor README; set `status = "tested"` with
    versions; replace the test limits with the user's real ones.
-10. **Publish (optional, with consent):** a PR adding only `devices/<vendor>/…`.
+10. **Publish (optional, with consent):** a PR adding only `models/<vendor>/…`.
 
 ### Decisions
 
@@ -420,7 +424,7 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
 - **Probe tool in desk:** yes, minimal: `desk port probe` (hex or `--text` sends, timestamped hex
   replies). It's raw (no limits), so the skills restrict it to documented read-only queries and
   forbid it for operating devices. Diffing snapshots stays the agent's job.
-- **Fake-device tests:** Rust, in a clone's `tests/device_*.rs`; without a clone or Rust the
+- **Fake-device tests:** Rust, in a clone's `tests/model_*.rs`; without a clone or Rust the
   skill says there's no fake test and relies on probing + smoke test.
 - **Publishing:** skill-guided, consent on the exact file list first. `gh` if available; else git
   branch + push/compare-URL steps or `git format-patch`; without a checkout a tarball of the
@@ -506,7 +510,7 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
    for the first time), `curl | sh` installer that offers `desk skill install`, then make the
    repo public.
    - [x] One private GitHub repo, `robin7331/desk-operator` (2026-11-06): the library is
-     `devices/`, bundled at build time, its tests are in `tests/`; the `desk-add-device` skill
+     `models/`, bundled at build time, its tests are in `tests/`; the `desk-add-device` skill
      clones the repo, branches and opens pull requests there.
    - [ ] **Before making desk-operator public: clean its git history.** Early commits contain the
      user's PSU serial number (docs examples, M5) and a Home Assistant entity (a unit test).
@@ -664,7 +668,7 @@ a well-known capability or later a driver `check` hook (below).
 
 ### Units
 
-The core has one fixed table of known units. Definitions must use its symbols (`desk library check`
+The core has one fixed table of known units. Definitions must use its symbols (`desk model check`
 rejects `"C"` for `"°C"`); what you type may use the spellings in the table.
 
 | Unit | Typed as | SI prefixes |
@@ -763,13 +767,13 @@ USB ids only).
 ### Build order
 
 1. [x] Format: custom capabilities and declarations parsed and checked (config, definitions,
-   JSON schema, `desk library check`; `desk library new --capability <name>` writes a skeleton),
+   JSON schema, `desk model check`; `desk model new --capability <name>` writes a skeleton),
    merge, limits per capability/setting/channel.
 2. [x] Core: unit table (`units.rs`), declarations and generic rules (`declared.rs`), catalog and
    ops (`ops.rs`); the mock simulates declared devices (`follow`, `fixed`, `last_action`,
    `stuck_`/`blind_`/`fail_`).
 3. [x] Lua contract (`read`, `set`, `action`, `ctx.channel`); `docs/scripting.md`,
-   `docs/definition-format.md` (v2).
+   `docs/model-format.md` (v2).
 4. [x] CLI `get`, `set`, `do`, `watch` (`--changes`, names, channels); schema and `device show`
    list every name with type, unit, range, limit, `switches`; daemon routing. `voltage_source`
    runs on the generic commands with its rules intact; **`desk source` removed** (CLI, schema,

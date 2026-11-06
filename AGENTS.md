@@ -10,23 +10,23 @@ palette, later natural language) and have it happen. That includes switching the
 first if the device is off.
 
 **Status:** M0–M5.1 done: mains power via Home Assistant or Lua scripts, the `voltage_source`
-capability (bench power supplies) with Lua drivers and serial ports, a device library with a
-specified definition format, agent-ready CLI (`--json`, `schema`, `skill`). One real device is
+capability (bench power supplies) with Lua drivers and serial ports, a set of models with a
+specified format, agent-ready CLI (`--json`, `schema`, `skill`). One real device is
 supported and smoke-tested (`fnirsi/ips3608`). **M6, AI skills, in progress** (see `plan.md`,
 "M6"): `desk skill list|install`, `desk port probe` and the `desk-add-device` skill are built;
 an end-to-end run on a second real device is still open. Streaming is done: a daemon
 (`desk serve`, started on demand) holds device sessions so `desk watch` streams while other
 commands keep working (`docs/streaming.md`). **M7, open capabilities, in progress** (`plan.md`,
-"M7"): definitions declare values, settings and actions; one command set for every device
+"M7"): models declare values, settings and actions; one command set for every device
 (`desk get|set|do|watch`; `desk source` is gone); channels. Still open: the multimeter's
 connection type, then the real test (roadmap step 4).
 Keep it lean: build only what the current milestone needs.
 
 **One repository** (private until going public, roadmap step 5 in `plan.md`), two parts:
 - **The core** (`src/`): it never names a vendor or model.
-- **The device library** (`devices/`): definitions and drivers, bundled into the binary by
-  `build.rs`, with their fake-device tests in `tests/device_*.rs`. `devices/README.md` is the
-  contributor guide. A change to the definition format or host API that breaks definitions needs a
+- **The models** (`models/`): definitions of what each product can do and their drivers, bundled into the binary by
+  `build.rs`, with their fake-device tests in `tests/model_*.rs`. `models/README.md` is the
+  contributor guide. A change to the model format or host API that breaks models needs a
   matching change there, in the same commit.
 
 **Working agreements:**
@@ -42,8 +42,8 @@ Keep it lean: build only what the current milestone needs.
 | Term | Meaning |
 |---|---|
 | **Device** | Something on *one user's* bench, such as `psu` or `iron`, in their `desk.toml`. It has an id, a name, aliases, capabilities, and the user's own bindings (e.g. their power path) and `limits`. |
-| **Device definition** | What's true for *every unit* of a model ("FNIRSI IPS3608"): driver, USB ids, maximums, docs, tests. Lives in the device library (`devices/<vendor>/<model>/`). Never contains anything user-specific (no Home Assistant entities, no bench limits). |
-| **Capability** | A named group of what a device can do, with one driver binding. **Well-known** ones have names and stricter rules fixed by the core: `power` (power_switch, mains) and `source` (voltage_source, bench power supplies). Any other name (`heater`, `meter`, …) is **declared**: the definition lists its values, settings and actions, and the core applies its generic rules. |
+| **Model** | What's true for *every unit* of a product ("FNIRSI IPS3608"): driver, USB ids, maximums, docs, tests. Lives in the model library (`models/<vendor>/<model>/`). Never contains anything user-specific (no Home Assistant entities, no bench limits). |
+| **Capability** | A named group of what a device can do, with one driver binding. **Well-known** ones have names and stricter rules fixed by the core: `power` (power_switch, mains) and `source` (voltage_source, bench power supplies). Any other name (`heater`, `meter`, …) is **declared**: the model lists its values, settings and actions, and the core applies its generic rules. |
 | **Value / setting / action** | What a capability declares: a **value** is reported (`temperature`), a **setting** is reported and changeable (`setpoint`), an **action** is done on request (`standby`). Typed (`number` with a unit, `boolean`, `choice`, `string`), with ranges; `switches` marks a physical effect. |
 | **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which is the `output` setting of `source`. Never mix "power" and "output". |
 | **Capability binding** | One config key per capability: `power`, `source`, or the declared capability's name. Each is a native provider binding or a Lua script. |
@@ -92,7 +92,7 @@ default.
 - **Secrets are never in the config file.** Tokens come from an env var or a separate `token_file`
   (keyring later), and are never printed or logged.
 - **The core never knows a specific model.** Nothing in `src/` names a vendor or model or reads the
-  repo's `devices/` folder (`build.rs` bundles it; a test enforces both). A driver that needs
+  repo's `models/` folder (`build.rs` bundles it; a test enforces both). A driver that needs
   something the API can't do reveals a gap in the API; fix it generically.
 - **Cross-platform.** No platform-specific code without `cfg`-gated alternatives. Note: global
   hotkeys don't work on Wayland. The UI will expose a `desk palette` command for compositor
@@ -127,7 +127,7 @@ src/
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
   serial.rs            PortSpec matching, `desk port list`, async Port handle (exclusive opens);
                        `desk port probe` (raw hex in/out) lives in cli/port.rs
-  library.rs           device definitions: search path, `device.toml` parsing, merge, bundled files
+  models.rs           models: search path, `model.toml` parsing, merge, bundled files
   providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
   daemon/              `desk serve`: local socket (ipc.rs), JSON-lines protocol, CLI forwarding,
@@ -135,12 +135,12 @@ src/
   cli/ops.rs           `desk get`, `desk set`, `desk do` (rendering included); left-out arguments
                        list what's possible and end as a usage error
   cli/complete.rs      `desk completions <shell>` and the candidates behind Tab (config and
-                       definitions only, never a device)
+                       models only, never a device)
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
 docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
-docs/definition-format.md  device definition format (spec); schemas/ has its JSON Schema (tested
-                       against every definition in tests/library.rs)
+docs/model-format.md  model format (spec); schemas/ has its JSON Schema (tested
+                       against every model in tests/models.rs)
 skills/<name>/         SKILL.md per agent skill (desk-operator, desk-add-device), embedded via
                        include_str! in src/cli/skill.rs (`desk skill list|<name>|install`); update
                        them when commands, error codes or semantics change (tests/cli.rs checks
@@ -152,12 +152,12 @@ tests/source.rs        end-to-end tests of voltage_source against the simulated 
 tests/daemon.rs        watch + daemon: streaming, commands during a watch, endings, the socket
 tests/declared.rs      declared capabilities: units, ranges, limits, verify, channels, Lua drivers
 tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
-tests/library.rs       model = "…", merging, search path, desk library list|show|check
-tests/devices.rs       every definition passes the check, and the README lists it with its status
-tests/device_*.rs      one file per protocol family: a driver against a fake device on a pty
-tests/support/devices.rs  helpers for those: this checkout's desk with the library in devices/
-build.rs               bundles devices/<vendor>/… into the binary (`bundled:<path>`)
-devices/               the device library: definitions, drivers, vendor READMEs (devices/README.md)
+tests/models.rs       model = "…", merging, search path, desk model list|show|check
+tests/model_checks.rs       every model passes the check, and the README lists it with its status
+tests/model_*.rs      one file per protocol family: a driver against a fake device on a pty
+tests/support/models.rs  helpers for those: this checkout's desk with models/ on its search path
+build.rs               bundles models/<vendor>/… into the binary (`bundled:<path>`)
+models/                every model and its driver, vendor READMEs (models/README.md)
 ```
 
 ## Development
@@ -170,7 +170,7 @@ cargo fmt
 cargo run -- --config examples/desk.toml power status
 ```
 
-The core's own tests never depend on which definitions the library has (`tests/library.rs` picks
+The core's own tests never depend on which models exist (`tests/models.rs` picks
 whatever is bundled). A new device adds its row to *Supported devices* in `README.md`.
 
 Testing without hardware: the `mock` provider stores state in `$DESK_MOCK_STATE` (tests point it

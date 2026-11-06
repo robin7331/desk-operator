@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 /// What a provider's endpoints are listed for (`desk provider endpoints`). Only mains so far;
-/// declared capabilities are defined by device definitions, not by providers.
+/// declared capabilities are defined by models, not by providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
