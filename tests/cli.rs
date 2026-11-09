@@ -680,11 +680,14 @@ fn skill_install_scopes() {
         "nothing written"
     );
 
-    assert!(install(&["--global"]).status.success());
-    assert!(
-        home.join(".claude/skills/desk-add-device/SKILL.md")
-            .exists()
-    );
+    // Windows ignores HOME: --global would write to the real profile.
+    if cfg!(unix) {
+        assert!(install(&["--global"]).status.success());
+        assert!(
+            home.join(".claude/skills/desk-add-device/SKILL.md")
+                .exists()
+        );
+    }
     assert!(install(&["--project"]).status.success());
     assert!(
         project

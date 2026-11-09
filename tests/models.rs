@@ -130,6 +130,7 @@ fn own_values_merge_over_the_model() {
         source["script"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("acme/shared/sim.lua"),
         "{source}"
     );
@@ -679,11 +680,11 @@ fn scaffold_creates_a_checkable_model() {
     assert_eq!(out.code, 0, "{}", out.stdout);
     let d = &out.json()["data"];
     assert_eq!(d["check"]["ok"], true, "{d}");
-    let created: Vec<&str> = d["created"]
+    let created: Vec<String> = d["created"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| p.as_str().unwrap())
+        .map(|p| p.as_str().unwrap().replace('\\', "/"))
         .collect();
     assert!(
         created

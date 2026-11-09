@@ -1,0 +1,2 @@
+# LF everywhere, also on Windows: skills and models are compiled into the binary, and desk parses them.
+* text=auto eol=lf

@@ -91,6 +91,25 @@ impl Bench {
     }
 
     /// The daemon's socket, once it exists.
+    /// A daemon holds its lock file while it runs (on every platform; Windows has no socket file).
+    fn daemon_running(&self) -> bool {
+        let Ok(entries) = std::fs::read_dir(self.runtime()) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "lock"))
+            .any(|p| {
+                std::fs::File::options()
+                    .read(true)
+                    .write(true)
+                    .open(p)
+                    .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+            })
+    }
+
+    #[cfg(unix)]
     fn socket(&self) -> Option<PathBuf> {
         std::fs::read_dir(self.runtime())
             .ok()?
@@ -323,16 +342,17 @@ fn the_daemon_exits_when_idle_and_is_private() {
     let b = Bench::new();
     let w = b.spawn(&["--json", "watch", "psu", "--interval", "50ms"]);
     w.line();
-    let socket = b.socket().expect("a socket while watching");
+    assert!(b.daemon_running());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let socket = b.socket().expect("a socket while watching");
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&socket), 0o600);
         assert_eq!(mode(&b.runtime()), 0o700);
     }
     drop(w); // the watcher leaves (killed)
-    wait_until("the daemon to exit", || !socket.exists());
+    wait_until("the daemon to exit", || !b.daemon_running());
     // The next command runs in-process again.
     assert_eq!(b.run(&["get", "psu"]).code, 0);
 }
