@@ -333,7 +333,7 @@ fn without_a_daemon_commands_run_in_process() {
     let b = Bench::new();
     let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 0, "{}", out.stdout);
-    assert!(b.socket().is_none(), "a plain command started a daemon");
+    assert!(!b.daemon_running(), "a plain command started a daemon");
     assert!(!b.runtime().exists());
 }
 
