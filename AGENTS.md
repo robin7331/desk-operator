@@ -153,11 +153,11 @@ tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, erro
 tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
 tests/daemon.rs        watch + daemon: streaming, commands during a watch, endings, the socket
 tests/declared.rs      declared capabilities: units, ranges, limits, verify, channels, Lua drivers
-tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
+tests/serial.rs        ctx.serial over pseudo-terminal pairs (Linux); FORK_LOCK avoids fd inheritance
 tests/update.rs        `desk update` against a fake release (wiremock); swapping the binary on Unix
 tests/models.rs       model = "…", merging, search path, desk model list|show|check
 tests/model_checks.rs       every model passes the check, and the README lists it with its status
-tests/model_*.rs      one file per protocol family: a driver against a fake device on a pty
+tests/model_*.rs      one file per protocol family: a driver against a fake device on a pty (Linux)
 tests/support/models.rs  helpers for those: this checkout's desk with models/ on its search path
 build.rs               bundles models/<vendor>/… into the binary (`bundled:<path>`)
 install.sh, install.ps1  one-line installers: download a release, verify it, offer the skills

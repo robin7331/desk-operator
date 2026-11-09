@@ -64,7 +64,7 @@ jobs:
           "$RUNNER_TEMP/bin/desk" --version
           "$RUNNER_TEMP/bin/desk" model list
           "$RUNNER_TEMP/bin/desk" update --json | tee update.json
-          grep -q '"release_build":true' update.json
+          grep -q '"release_build": true' update.json
 
       - name: Test the installer (Windows PowerShell)
         if: runner.os == 'Windows'

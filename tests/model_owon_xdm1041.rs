@@ -1,5 +1,6 @@
 //! The OWON XDM1041 driver against a fake meter speaking SCPI text over a pseudo-terminal.
-#![cfg(unix)]
+// Linux only: on macOS the serial crate sets the speed with an ioctl that a pty refuses (ENOTTY).
+#![cfg(target_os = "linux")]
 
 #[path = "support/models.rs"]
 mod harness;

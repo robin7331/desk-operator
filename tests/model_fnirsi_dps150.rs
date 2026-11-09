@@ -1,6 +1,7 @@
 //! The FNIRSI DPS-150-family driver (`models/fnirsi/shared/dps150_protocol.lua`) against a fake
 //! device that speaks the protocol over a pseudo-terminal.
-#![cfg(unix)]
+// Linux only: on macOS the serial crate sets the speed with an ioctl that a pty refuses (ENOTTY).
+#![cfg(target_os = "linux")]
 
 #[path = "support/models.rs"]
 mod harness;

@@ -1,7 +1,7 @@
 //! `desk update` against a fake release (wiremock): a copy of the binary in a temp folder updates
 //! itself. Replacing it is tested on Unix, where a shell script can stand in for the new desk.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use serde_json::Value;
@@ -198,7 +198,7 @@ async fn a_checksum_mismatch_replaces_nothing() {
 /// A release archive whose `desk` is a shell script: `--version` reports `reports`, anything
 /// else runs the real desk (so `skill install` works).
 #[cfg(unix)]
-fn fake_release(dir: &Path, asset: &str, reports: &str) -> (Vec<u8>, String) {
+fn fake_release(dir: &std::path::Path, asset: &str, reports: &str) -> (Vec<u8>, String) {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
     let pkg = dir.join("pkg");

@@ -1,6 +1,7 @@
 //! End-to-end tests of the serial host API (`ctx.serial`) over a pseudo-terminal pair: the test
 //! plays the device on the master side, `desk` opens the slave side like a real port.
-#![cfg(unix)]
+// Linux only: on macOS the serial crate sets the speed with an ioctl that a pty refuses (ENOTTY).
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::path::Path;
