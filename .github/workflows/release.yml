@@ -12,8 +12,23 @@ permissions:
   contents: read
 
 jobs:
+  notices:
+    name: Third-party notices
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - run: cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: notices
+          path: THIRD-PARTY-LICENSES.txt
+
   build:
     name: Build (${{ matrix.target }})
+    needs: notices
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -37,12 +52,16 @@ jobs:
         env:
           DESK_RELEASE_BUILD: "1"   # `desk update` replaces only release builds
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: notices
+          path: pkg
+
       - name: Package
         shell: bash
         run: |
-          mkdir pkg dist
-          cp README.md pkg/
-          if [ -f LICENSE ]; then cp LICENSE pkg/; fi
+          mkdir dist
+          cp README.md LICENSE-MIT LICENSE-APACHE pkg/
           if [ "$RUNNER_OS" = Windows ]; then
             cp target/${{ matrix.target }}/release/desk.exe pkg/
             (cd pkg && 7z a ../dist/desk-${{ matrix.target }}.zip .)
@@ -112,6 +131,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          pattern: desk-*
           merge-multiple: true
       - run: |
           cd dist

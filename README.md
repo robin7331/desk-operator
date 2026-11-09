@@ -80,3 +80,11 @@ desk model new acme/psu-3000 --capability voltage_source --name "ACME PSU 3000" 
 This creates a working folder next to your `desk.toml`, and desk uses it right away. To contribute
 it, see [`models/README.md`](models/README.md). An agent can walk you through all of it:
 `desk skill install` installs the `desk-add-device` skill.
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
+option. You can use desk for anything, also commercially.
+
+Unless you state otherwise, any contribution you submit for inclusion in this project is licensed
+under the same two licenses, without any additional terms or conditions.

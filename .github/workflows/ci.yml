@@ -43,6 +43,11 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - name: Every dependency's license is accepted (about.toml)
+        run: cargo about generate --locked about.hbs -o /dev/null
       - run: shellcheck install.sh
       - name: Parse install.ps1
         shell: pwsh

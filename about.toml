@@ -1,0 +1,16 @@
+# What `cargo about` accepts in the notices of bundled dependencies (THIRD-PARTY-LICENSES.txt in
+# every release archive). CI fails when a new dependency brings a license that isn't listed.
+ignore-dev-dependencies = true   # build dependencies stay: lua-src compiles Lua into the binary
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]

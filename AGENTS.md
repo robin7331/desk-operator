@@ -163,6 +163,8 @@ build.rs               bundles models/<vendor>/… into the binary (`bundled:<pa
 install.sh, install.ps1  one-line installers: download a release, verify it, offer the skills
 .github/workflows/     ci.yml (fmt, clippy, tests on all three OSes); release.yml (builds, runs the
                        installers against them; a `v*` tag publishes, a manual run only tests)
+about.toml, about.hbs  `cargo about`: the accepted dependency licenses (a new one fails CI), and the
+                       THIRD-PARTY-LICENSES.txt that every release archive carries
 models/                every model and its driver, vendor READMEs (models/README.md)
 ```
 
