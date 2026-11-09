@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/robin7331/desk-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/robin7331/desk-operator/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/robin7331/desk-operator)](https://github.com/robin7331/desk-operator/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/robin7331/desk-operator/total?style=flat)](https://github.com/robin7331/desk-operator/releases)
+[![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Frobin7331%2Fdesk-operator%2Fbadges%2Fdownloads.json)](https://github.com/robin7331/desk-operator/releases)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-informational)](#install)
 [![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-orange?logo=rust)](https://rustup.rs)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
