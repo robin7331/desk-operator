@@ -50,7 +50,27 @@ cargo install --path .
 
 Models are compiled into `desk`, so a new device arrives with the next build.
 
-## Set up your bench
+## Let an agent set up your bench
+
+`desk` ships with agent skills, so your coding agent can guide you through bringing in your devices.
+Install them once (the install command above offers this too):
+
+```sh
+desk skill install --global   # Claude Code; for another agent: --dir <its skills folder>
+```
+
+Then tell your agent what's on your bench, for example:
+
+> Set up my bench with desk. I have a FNIRSI IPS3608 and a multimeter that may not be supported yet.
+> Ask me what you need.
+
+- **A supported device:** the agent adds it to your `desk.toml` and asks for your limits.
+- **A device desk doesn't know yet:** the agent researches its protocol, writes and tests a driver
+  against a fake device, smoke-tests it with you, and can open a pull request to share it.
+- **Your hardware stays in your hands:** the skills tell the agent to change things only when you
+  ask, and to wait for your OK before each step that switches something while adding a device.
+
+## Set up your bench by hand
 
 Your devices go in `desk.toml`. `desk schema --json` shows where it's expected (`data.config.path`),
 and [`examples/desk.toml`](examples/desk.toml) is a sample that runs without any hardware:
@@ -80,6 +100,13 @@ power = { provider = "ha", entity = "switch.desk_outlet_1" }   # optional: how i
 
 `tested`: smoke-tested on real hardware. `community`: not fully verified on hardware, see the vendor
 README. `desk model list` shows what your build includes.
+
+> [!WARNING]
+> **Use at your own risk.** Device models and drivers may be community-provided, and even `tested`
+> only means a smoke test on one unit. `desk` switches real mains power, outputs and heaters, so a
+> bug or a wrong setting can damage your equipment or whatever is connected to it. Set your own
+> `limits`, try new devices with nothing connected, and check the results. desk comes without any
+> warranty (see [License](#license)).
 
 ## Add a device
 
