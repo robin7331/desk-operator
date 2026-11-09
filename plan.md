@@ -521,9 +521,8 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
    - [x] One private GitHub repo, `robin7331/desk-operator` (2026-11-06): the library is
      `models/`, bundled at build time, its tests are in `tests/`; the `desk-add-device` skill
      clones the repo, branches and opens pull requests there.
-   - [ ] **Before making desk-operator public: clean its git history.** Early commits contain the
-     user's PSU serial number (docs examples, M5) and a Home Assistant entity (a unit test).
-     The library's merged history started clean.
+   - [x] Git history cleaned (2026-11-09) by recreating the private repo: the PSU's serial number, the
+     Home Assistant entity and the outlet mapping are gone from every commit.
    - [x] CI: `.github/workflows/ci.yml` runs clippy and `cargo test` on Linux, macOS and Windows
      (green 2026-11-09). The fake-device tests run on Linux only: on macOS the serial crate can't
      open a pty, and Windows has none. So serial on macOS and Windows has no test yet.
