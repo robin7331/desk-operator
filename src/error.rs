@@ -156,6 +156,9 @@ impl DeskError {
             DeskError::UpdateUnsupported(_) => Some(
                 "update your clone and run `cargo install --path .` again, or `desk update --force` to replace it with the release build",
             ),
+            DeskError::LimitExceeded { below: true, .. } => Some(
+                "use a higher value (a bench `limit` can be changed in the device's config; a device minimum can't)",
+            ),
             DeskError::LimitExceeded { .. } => Some(
                 "use a lower value (a bench `limit` can be raised in the device's config; a device maximum can't)",
             ),
@@ -268,6 +271,19 @@ pub const ERROR_CODES: &[(&str, i32, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_limit_hint_points_the_right_way() {
+        let limit = |below| DeskError::LimitExceeded {
+            what: "resistance".into(),
+            requested: "0.01 Ω".into(),
+            limit: "0.05 Ω".into(),
+            kind: "device minimum".into(),
+            below,
+        };
+        assert!(limit(true).hint().unwrap().contains("higher value"));
+        assert!(limit(false).hint().unwrap().contains("lower value"));
+    }
 
     #[test]
     fn error_table_matches_variants() {

@@ -23,7 +23,14 @@ pub fn run(config_path: Option<&Path>, cmd: ModelCmd) -> Result<Report> {
     let models = Models::for_config(&config_path);
     match cmd {
         ModelCmd::List => list(&models),
-        ModelCmd::Show { id } => show(&models.find(&id)?),
+        ModelCmd::Show { id } => {
+            let notices = notices(&models.list())
+                .into_iter()
+                .filter(|(of, _)| *of == id)
+                .map(|(_, notice)| notice)
+                .collect();
+            show(&models.find(&id)?, notices)
+        }
         ModelCmd::Check { targets } => check(&models, &targets),
         ModelCmd::New {
             id,
@@ -132,13 +139,45 @@ fn list(models: &Models) -> Result<Report> {
             "\nuse one in a device with: model = \"<MODEL>\" (details: desk model show <id>)\n",
         );
     }
+    let notices: Vec<String> = notices(&listed).into_iter().map(|(_, n)| n).collect();
+    for notice in &notices {
+        human.push_str(&format!("\nnote: {notice}\n"));
+    }
     Ok(Report::new(
-        &serde_json::json!({ "models": entries }),
+        &serde_json::json!({ "models": entries, "notices": notices }),
         human,
     ))
 }
 
-fn show(def: &Model) -> Result<Report> {
+/// A copy in `models/` next to the config keeps overriding a bundled model after a release brought
+/// that model, so an old driver can linger unnoticed. `(model id, notice)` for each such copy.
+fn notices(listed: &[models::Listed]) -> Vec<(String, String)> {
+    let bundled = |l: &models::Listed| {
+        l.shadowed
+            && l.result
+                .as_ref()
+                .is_ok_and(|m| matches!(m.origin, models::Origin::Bundled))
+    };
+    listed
+        .iter()
+        .filter(|l| !l.shadowed)
+        .filter(|l| listed.iter().any(|o| o.id == l.id && bundled(o)))
+        .filter_map(|l| match &l.result.as_ref().ok()?.origin {
+            models::Origin::Local(dir) => Some((
+                l.id.clone(),
+                format!(
+                    "`{}`: the copy in {} overrides the model bundled into desk. Delete the copy \
+                     unless it still has changes you need",
+                    l.id,
+                    dir.display()
+                ),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn show(def: &Model, notices: Vec<String>) -> Result<Report> {
     let mut human = format!(
         "id:           {}\nname:         {}\nstatus:       {}\ncapabilities: {}\nrequires:     {}\nfrom:         {}\nfile:         {}\n",
         def.id,
@@ -204,8 +243,11 @@ fn show(def: &Model) -> Result<Report> {
         "\nuse it:\n  [devices.<name>]\n  model = \"{}\"\n  # plus your own power path, limits, and e.g. port = {{ serial_number = \"…\" }}\n",
         def.id
     ));
+    for notice in &notices {
+        human.push_str(&format!("\nnote: {notice}\n"));
+    }
     Ok(Report::new(
-        &serde_json::json!({ "model": def, "driver_params": drivers }),
+        &serde_json::json!({ "model": def, "driver_params": drivers, "notices": notices }),
         human,
     ))
 }

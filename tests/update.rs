@@ -279,6 +279,49 @@ async fn a_binary_that_reports_another_version_is_not_installed() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+async fn a_local_copy_that_overrides_a_bundled_model_is_pointed_out() {
+    let asset = asset_name().await;
+    let install = Install::new();
+    let work = TempDir::new().unwrap();
+    let (bytes, sums) = fake_release(work.path(), &asset, "desk 99.0.0");
+    let server = release("99.0.0", Some((&asset, bytes, sums))).await;
+
+    let models = install
+        .run(&server, &["--json", "model", "list"])
+        .await
+        .json();
+    let id = models["data"]["models"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let args = [
+        "--json",
+        "model",
+        "new",
+        &id,
+        "--capability",
+        "voltage_source",
+        "--name",
+        "Copy",
+        "--max-voltage",
+        "5",
+        "--max-current",
+        "1",
+    ];
+    let out = install.run(&server, &args).await;
+    assert_eq!(out.code, 0, "{}", out.stdout);
+
+    let out = install.run(&server, &["--json", "update", "--force"]).await;
+    assert_eq!(out.code, 0, "the update itself is fine: {}", out.stdout);
+    let notice = out.json()["data"]["notices"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(notice.contains(&id), "{notice}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
 async fn globally_installed_skills_are_updated_too() {
     let asset = asset_name().await;
     let install = Install::new();

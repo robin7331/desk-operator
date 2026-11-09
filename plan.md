@@ -533,6 +533,11 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
    - [x] Downloads badge counts only the `desk-*` archives: `badges.yml` every 6 hours writes
      `downloads.json` to the `badges` branch. GitHub pauses schedules after 60 days without
      repo activity; re-enable it under Actions if the number freezes.
+   - [x] A model from `desk-add-device` keeps working outside the agent's session: it leaves a copy
+     in `models/` next to `desk.toml` (`DESK_MODELS` is for development only). `desk model list|show`
+     and `desk update` point out a copy that overrides a bundled model.
+   - [ ] One unresolved model shouldn't stop the whole bench: fail only that device, keep its mains
+     switching, and a better error at `src/models.rs` (changes `config_invalid` semantics).
    - [x] First release: `v0.1.0` published by the workflow (2026-11-09). The real `curl | sh` install
      works on Linux.
    - [ ] Run the real install commands on macOS and Windows; CI only ran them against a local copy.

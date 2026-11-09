@@ -132,7 +132,8 @@ Both offers are optional, and declining is fine: note it in the plan and move on
   existing model* section instead of only reporting it.
 
 Both happen in a clone, under that skill's ground rules: its go-ahead for every step that switches
-something applies here too. Note any model that changed in the plan, for step 6.
+something applies here too, and so does its step 10, which leaves the improved model in `models/`
+next to `desk.toml`. Note any model that changed in the plan, for step 6.
 
 **g. Leave it as you found it.** Offer to switch off whatever you switched on, then show the plan
 again with this device done.
@@ -147,7 +148,8 @@ Tell the user what this takes before starting: researching the protocol, writing
 against a fake device, and a smoke test together. Let them choose:
 
 - **Add it now:** follow the `desk-add-device` skill (`desk skill desk-add-device`), then come back to
-  the plan.
+  the plan. It leaves a copy of the model in `models/` next to `desk.toml`, which must be there before
+  the device goes into the config: desk stops for the whole bench when it can't find a model.
 - **Mains only for now:** if it's on a switched outlet, give it a block with just `name` and `power`.
 - **Later:** leave it on the list you hand over at the end.
 
@@ -156,6 +158,9 @@ against a fake device, and a smoke test together. Let them choose:
 ```sh
 desk status --json
 ```
+
+Run this in a shell without `DESK_MODELS`, and ask the user to run `desk status` in a new terminal of
+their own: that's how they'll use it, and a model only your shell can find breaks their whole bench.
 
 Show the result: what's set up with its limits, what was only partly set up and why, and which
 devices are still on. Point out `desk get`, `desk set`, `desk do`, `desk watch` and

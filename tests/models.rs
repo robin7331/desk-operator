@@ -220,6 +220,27 @@ fn local_models_shadow_bundled_ones() {
     assert_eq!(same[1]["origin"], "bundled");
     assert_eq!(same[1]["shadowed"], true);
 
+    // A notice, not a failure: named in `list` and `show`, in both outputs.
+    let notice = j["data"]["notices"][0].as_str().unwrap().to_string();
+    assert!(notice.contains(&id), "{notice}");
+    assert!(notice.contains("Delete"), "{notice}");
+    assert_eq!(j["ok"], true);
+    assert!(b.run(&["model", "list"]).stdout.contains(&notice));
+    let shown = b.run(&["--json", "model", "show", &id]).json();
+    assert_eq!(shown["ok"], true);
+    assert_eq!(shown["data"]["notices"][0], notice.as_str());
+    assert!(b.run(&["model", "show", &id]).stdout.contains(&notice));
+
+    // Nothing to report for a model that only exists once.
+    let other = bundled(&b)
+        .iter()
+        .map(|d| d["id"].as_str().unwrap().to_string())
+        .find(|other| *other != id);
+    if let Some(other) = other {
+        let shown = b.run(&["--json", "model", "show", &other]).json();
+        assert_eq!(shown["data"]["notices"], Value::Array(Vec::new()));
+    }
+
     // The device uses the local one (a simulated PSU: no hardware needed).
     let out = b.run(&["--json", "get", "psu"]);
     assert_eq!(out.code, 0, "{}", out.stdout);

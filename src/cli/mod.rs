@@ -429,7 +429,9 @@ pub async fn run(cli: Cli) -> Result<Report> {
         Command::Model { action } => return models::run(cli.config.as_deref(), action),
         Command::Skill(SkillArgs { name, action }) => return skill::run(name, action, cli.json),
         Command::Completions { ref shell } => return complete::script(shell),
-        Command::Update { check, force } => return update::run(check, force).await,
+        Command::Update { check, force } => {
+            return update::run(check, force, cli.config.as_deref()).await;
+        }
         _ => {}
     }
     // A running daemon may hold the device's session: then it runs the command.

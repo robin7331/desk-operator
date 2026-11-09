@@ -52,14 +52,15 @@ Before anything else, get a clone (ask the user where, if they have a preference
 2. **Otherwise clone it.** With write access (the user owns it or is a collaborator), clone
    directly; otherwise fork first (`gh repo fork robin7331/desk-operator --clone`).
 3. **Branch:** `git -C <clone> switch -c device/<vendor>-<model>`.
-4. **Use its models:** pass `DESK_MODELS=<clone>/models` to every desk command (tell the user
-   to set it in their shell too), and check with `desk model list --json` that `origin` is the
-   clone, not `bundled`.
+4. **Use its models while developing:** pass `DESK_MODELS=<clone>/models` to your own desk commands,
+   and check with `desk model list --json` that `origin` is the clone, not `bundled`. This is for
+   development only. It exists only in your shell, so never tell the user to set it; steps 8 and 10
+   leave them a copy that works without it.
 
 **No git or no network:** a model can still live in a plain `models/` folder next to the
-user's `desk.toml` (the default of `desk model new`), and desk uses it right away. Then there's no
-fake-device test: say so, rely on read-only probing and the smoke test, and pack the folder for the
-user at the end (step 11).
+user's `desk.toml` (the default of `desk model new`), and desk uses it right away. There's nothing to
+copy then, but also no fake-device test: say so, rely on read-only probing and the smoke test, and
+pack the folder for the user at the end (step 11).
 
 ## Workflow
 
@@ -170,10 +171,17 @@ found when no documentation had them. Note anything else you learn (boot time, l
 
 ### 8. Configure (with test limits)
 
-Add the device to the user's `desk.toml` (path: `data.config.path` of `desk schema --json`). `model = …`
-needs `DESK_MODELS=<clone>/models` in the user's shell until the model is bundled into their
-desk.
-Ask the user for the id, name, power path, and **conservative test limits**:
+**First copy the model next to the config,** because a `model = …` desk can't find stops every desk
+command for the whole bench, in every terminal. The folder is `models/` next to `desk.toml` (path:
+`data.config.path` of `desk schema --json`). Copy `<vendor>/<model>/` from the clone, and anything it
+refers to, like a driver in `<vendor>/shared/`. Copy only that, not the whole vendor folder, which
+would override the vendor's other models too.
+
+This copy wins over `DESK_MODELS`, so **copy again after every change** to the model or driver, or
+your tests keep running the old one.
+
+Then add the device to `desk.toml`. Ask the user for the id, name, power path, and
+**conservative test limits**:
 
 ```toml
 [devices.psu2]
@@ -218,6 +226,14 @@ Fix the driver (and its fake-device test) for anything that differs, then repeat
 - In the vendor's row of *Supported devices* in the clone's `README.md`: its status (add the row for
   a new device, sorted by vendor and model).
 - In the clone: `cargo test` and clippy pass.
+- **Leave a working install.** Copy the final model next to `desk.toml` again (step 8). Then check it
+  the way the user will run it, in a shell without `DESK_MODELS` (`env -u DESK_MODELS` on Linux and
+  macOS, `Remove-Item Env:DESK_MODELS` in PowerShell): `origin` in `desk model list --json` must start
+  with `local`, and `desk get <device> --json` must work. Also ask the user to run `desk status` in a
+  new terminal of their own.
+- **Tell the user about the copy:** where it is, that it overrides a bundled model of the same name,
+  and to delete it once a desk release includes the model. `desk model list` and `desk update` point
+  it out then.
 
 ### 11. Pull request (only with consent)
 
@@ -234,11 +250,11 @@ this file list. Then, on the branch from *Where to work*:
 - **git but no `gh`:** commit, push to their fork, and give the user the compare link the push
   prints. Or create a patch with `git format-patch main -o <dir>` for them to send.
 - **No clone:** pack the vendor folder
-  (`tar czf <vendor>-<model>.tar.gz -C <devices dir> <vendor>`) and tell the user to attach it to
+  (`tar czf <vendor>-<model>.tar.gz -C <models dir> <vendor>`) and tell the user to attach it to
   an issue on desk-operator.
 
-Until the pull request is merged and the user's desk is rebuilt, their bench uses the clone; that
-keeps working afterwards (`git pull` on `main`).
+Until a desk release includes the model, their bench uses the copy next to `desk.toml`, whatever
+happens to the clone or its branch. Merging doesn't change that: only a release does.
 
 ## When desk itself is missing something
 

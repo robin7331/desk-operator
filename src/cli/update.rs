@@ -44,9 +44,12 @@ struct Outcome {
     /// What `desk skill install --global` did with the new version (`null`: no skills there).
     #[serde(skip_serializing_if = "Option::is_none")]
     skills: Option<serde_json::Value>,
+    /// Local copies of models that override the models of the new version.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notices: Vec<String>,
 }
 
-pub async fn run(check: bool, force: bool) -> Result<Report> {
+pub async fn run(check: bool, force: bool, config: Option<&Path>) -> Result<Report> {
     let base = std::env::var("DESK_RELEASE_URL").unwrap_or_else(|_| RELEASES.to_string());
     let base = base.trim_end_matches('/');
     // The file itself, not a symlink to it (which would be replaced by a copy).
@@ -81,6 +84,7 @@ pub async fn run(check: bool, force: bool) -> Result<Report> {
         path: exe.clone(),
         release_build: RELEASE_BUILD.is_some(),
         skills: None,
+        notices: Vec::new(),
     };
     if check || !newer {
         let human = if newer {
@@ -147,7 +151,27 @@ pub async fn run(check: bool, force: bool) -> Result<Report> {
     human.push_str(
         "skills installed elsewhere (--project, --dir): run `desk skill install` there\n",
     );
+    outcome.notices = model_notices(&exe, config).await;
+    for notice in &outcome.notices {
+        human.push_str(&format!("note: {notice}\n"));
+    }
     Ok(Report::new(&outcome, human).with_failure(failure))
+}
+
+/// What the new binary says about local model copies. Only a notice: if it can't be asked, the
+/// update still succeeded.
+async fn model_notices(exe: &Path, config: Option<&Path>) -> Vec<String> {
+    let config = config.map(|p| p.to_string_lossy().into_owned());
+    let mut args = vec!["--json", "model", "list"];
+    if let Some(config) = &config {
+        args.extend(["--config", config.as_str()]);
+    }
+    run_binary(exe, &args)
+        .await
+        .ok()
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+        .and_then(|v| serde_json::from_value(v["data"]["notices"].clone()).ok())
+        .unwrap_or_default()
 }
 
 fn asset() -> String {
