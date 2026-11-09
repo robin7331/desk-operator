@@ -3,7 +3,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/robin7331/desk-operator/main/install.sh | sh
 #
 # DESK_INSTALL_DIR  where desk goes (default: ~/.local/bin)
-# DESK_BASE_URL     where the release files are (default: the latest GitHub release)
+# DESK_RELEASE_URL  where the release files are (default: the latest GitHub release)
 set -eu
 
 fail() {
@@ -50,7 +50,7 @@ main() {
     esac
 
     asset="desk-$arch-$os.tar.gz"
-    base="${DESK_BASE_URL:-https://github.com/robin7331/desk-operator/releases/latest/download}"
+    base="${DESK_RELEASE_URL:-https://github.com/robin7331/desk-operator/releases/latest/download}"
     dest="${DESK_INSTALL_DIR:-$HOME/.local/bin}"
 
     # On the same filesystem as the target, so the binary can run here and the final move is atomic.

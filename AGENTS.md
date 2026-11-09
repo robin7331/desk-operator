@@ -136,6 +136,8 @@ src/
                        list what's possible and end as a usage error
   cli/complete.rs      `desk completions <shell>` and the candidates behind Tab (config and
                        models only, never a device)
+  cli/update.rs        `desk update`: download, verify, swap the binary, refresh global skills
+                       (only release builds, marked by `DESK_RELEASE_BUILD`; else --force)
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
 docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
@@ -152,6 +154,7 @@ tests/source.rs        end-to-end tests of voltage_source against the simulated 
 tests/daemon.rs        watch + daemon: streaming, commands during a watch, endings, the socket
 tests/declared.rs      declared capabilities: units, ranges, limits, verify, channels, Lua drivers
 tests/serial.rs        ctx.serial over pseudo-terminal pairs (Unix); FORK_LOCK avoids fd inheritance
+tests/update.rs        `desk update` against a fake release (wiremock); swapping the binary on Unix
 tests/models.rs       model = "…", merging, search path, desk model list|show|check
 tests/model_checks.rs       every model passes the check, and the README lists it with its status
 tests/model_*.rs      one file per protocol family: a driver against a fake device on a pty

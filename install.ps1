@@ -2,7 +2,7 @@
 #   irm https://raw.githubusercontent.com/robin7331/desk-operator/main/install.ps1 | iex
 #
 # DESK_INSTALL_DIR  where desk goes (default: %LOCALAPPDATA%\Programs\desk)
-# DESK_BASE_URL     where the release files are (default: the latest GitHub release)
+# DESK_RELEASE_URL  where the release files are (default: the latest GitHub release)
 
 & {
     $ErrorActionPreference = 'Stop'
@@ -14,7 +14,7 @@
     }
 
     $asset = 'desk-x86_64-pc-windows-msvc.zip'
-    $base = if ($env:DESK_BASE_URL) { $env:DESK_BASE_URL } else { 'https://github.com/robin7331/desk-operator/releases/latest/download' }
+    $base = if ($env:DESK_RELEASE_URL) { $env:DESK_RELEASE_URL } else { 'https://github.com/robin7331/desk-operator/releases/latest/download' }
     $dest = if ($env:DESK_INSTALL_DIR) { $env:DESK_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\desk' }
 
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
@@ -39,7 +39,11 @@
         $version = & "$tmp\unpacked\desk.exe" --version
         if ($LASTEXITCODE -ne 0) { throw "desk install: the downloaded desk doesn't run on this system, nothing installed" }
 
-        Move-Item -Force "$tmp\unpacked\desk.exe" "$dest\desk.exe"
+        # A running desk.exe (e.g. `desk serve`) can't be overwritten, but it can be renamed.
+        $old = "$dest\desk.exe.old"
+        Remove-Item -Force -ErrorAction SilentlyContinue $old
+        if (Test-Path "$dest\desk.exe") { Move-Item -Force "$dest\desk.exe" $old }
+        Move-Item "$tmp\unpacked\desk.exe" "$dest\desk.exe"
     } finally {
         Remove-Item -Recurse -Force $tmp
     }

@@ -593,16 +593,19 @@ fn watch_streams_declared_values_and_changes() {
     assert!(out.stdout.contains("50 °C"), "{}", out.stdout);
 
     // --changes: nothing changes, so only the first reading comes within the time.
-    let out = Command::new("timeout")
-        .args(["1.5", env!("CARGO_BIN_EXE_desk")])
+    let mut watch = Command::new(env!("CARGO_BIN_EXE_desk"))
         .env("DESK_MOCK_STATE", b.dir.path().join("mock-state.json"))
         .env("DESK_RUNTIME_DIR", b.dir.path().join("run"))
         .env("DESK_DAEMON_IDLE", "1s")
         .arg("--config")
         .arg(b.dir.path().join("desk.toml"))
         .args(["--json", "watch", "iron", "--interval", "20ms", "--changes"])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    watch.kill().unwrap();
+    let out = watch.wait_with_output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(text.lines().count(), 1, "{text}");
 

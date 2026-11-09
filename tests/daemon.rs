@@ -2,7 +2,7 @@
 //! PSU: streaming, commands during a watch, several watchers, endings, the socket protocol.
 
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -327,7 +327,7 @@ fn the_daemon_exits_when_idle_and_is_private() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&socket), 0o600);
         assert_eq!(mode(&b.runtime()), 0o700);
     }

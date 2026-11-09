@@ -11,6 +11,7 @@ mod provider;
 mod schema;
 mod skill;
 mod status;
+mod update;
 
 use std::path::PathBuf;
 
@@ -167,6 +168,16 @@ Add to your shell's startup file:
         /// The shell
         #[arg(value_parser = ["bash", "zsh", "fish", "elvish", "powershell"])]
         shell: String,
+    },
+    /// Update desk to the latest release (verified before it replaces anything), and the skills
+    /// that `desk skill install --global` put in place
+    Update {
+        /// Only report whether a newer version exists
+        #[arg(long)]
+        check: bool,
+        /// Also replace a desk that was built from source (e.g. `cargo install`)
+        #[arg(long)]
+        force: bool,
     },
     /// Run the background daemon that keeps device sessions open for `desk watch`.
     /// Started automatically; while it runs, `desk power|get|set|do` go through it
@@ -415,6 +426,7 @@ pub async fn run(cli: Cli) -> Result<Report> {
         Command::Model { action } => return models::run(cli.config.as_deref(), action),
         Command::Skill(SkillArgs { name, action }) => return skill::run(name, action, cli.json),
         Command::Completions { ref shell } => return complete::script(shell),
+        Command::Update { check, force } => return update::run(check, force).await,
         _ => {}
     }
     // A running daemon may hold the device's session: then it runs the command.
@@ -458,6 +470,7 @@ pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
         | Command::Completions { .. }
         | Command::Port { .. }
         | Command::Model { .. }
+        | Command::Update { .. }
         | Command::Serve { .. } => Err(DeskError::Usage(
             "this command doesn't need the bench; run it directly".into(),
         )),

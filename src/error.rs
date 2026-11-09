@@ -75,6 +75,12 @@ pub enum DeskError {
     DaemonUnavailable(String),
 
     #[error("{0}")]
+    UpdateFailed(String),
+
+    #[error("{0}")]
+    UpdateUnsupported(String),
+
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -98,6 +104,8 @@ impl DeskError {
             DeskError::Timeout { .. } => "timeout",
             DeskError::VerifyFailed { .. } => "verify_failed",
             DeskError::DaemonUnavailable(_) => "daemon_unavailable",
+            DeskError::UpdateFailed(_) => "update_failed",
+            DeskError::UpdateUnsupported(_) => "update_unsupported",
             DeskError::Internal(_) => "internal",
         }
     }
@@ -111,13 +119,15 @@ impl DeskError {
             | DeskError::DeviceAmbiguous { .. } => 2,
             DeskError::ConfigInvalid(_)
             | DeskError::NoPowerPath(_)
-            | DeskError::CapabilityMissing { .. } => 3,
+            | DeskError::CapabilityMissing { .. }
+            | DeskError::UpdateUnsupported(_) => 3,
             DeskError::ProviderUnreachable { .. }
             | DeskError::EndpointUnavailable { .. }
             | DeskError::StateUnknown(_)
             | DeskError::DeviceOff(_)
             | DeskError::ProtectionTripped(_)
-            | DeskError::DaemonUnavailable(_) => 4,
+            | DeskError::DaemonUnavailable(_)
+            | DeskError::UpdateFailed(_) => 4,
             DeskError::ScriptFailed(_) => 5,
             DeskError::Timeout { .. } => 6,
             DeskError::VerifyFailed { .. } => 7,
@@ -139,6 +149,12 @@ impl DeskError {
             ),
             DeskError::DaemonUnavailable(_) => Some(
                 "the daemon's log (named in the message) says why; `desk serve` runs it in the foreground",
+            ),
+            DeskError::UpdateFailed(_) => {
+                Some("try again later; the install command in the README does the same steps")
+            }
+            DeskError::UpdateUnsupported(_) => Some(
+                "update your clone and run `cargo install --path .` again, or `desk update --force` to replace it with the release build",
             ),
             DeskError::LimitExceeded { .. } => Some(
                 "use a lower value (a bench `limit` can be raised in the device's config; a device maximum can't)",
@@ -237,6 +253,16 @@ pub const ERROR_CODES: &[(&str, i32, &str)] = &[
         4,
         "the background daemon (for `desk watch`) couldn't be started or reached, or stopped",
     ),
+    (
+        "update_failed",
+        4,
+        "`desk update` couldn't download, verify or install the release (the message says whether desk changed)",
+    ),
+    (
+        "update_unsupported",
+        3,
+        "this desk was built from source, so `desk update` won't replace it without --force",
+    ),
 ];
 
 #[cfg(test)]
@@ -290,6 +316,8 @@ mod tests {
                 actual: String::new(),
             },
             DeskError::DaemonUnavailable(String::new()),
+            DeskError::UpdateFailed(String::new()),
+            DeskError::UpdateUnsupported(String::new()),
         ];
         assert_eq!(all.len(), ERROR_CODES.len());
         for e in &all {

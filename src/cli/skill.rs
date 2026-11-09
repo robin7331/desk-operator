@@ -199,8 +199,16 @@ fn write(path: &Path, text: &str) -> Result<()> {
     std::fs::write(path, text).map_err(fail)
 }
 
+/// Whether `dir` holds any of desk's skills (installed by some version of desk).
+pub(super) fn installed_in(dir: &Path) -> bool {
+    SKILLS.iter().any(|(name, _)| {
+        std::fs::read_to_string(dir.join(name).join("SKILL.md"))
+            .is_ok_and(|text| frontmatter_name(&text) == Some(name))
+    })
+}
+
 /// Claude Code's personal skills folder, `~/.claude/skills`. Other agents: `--dir`.
-fn global_dir() -> Result<PathBuf> {
+pub(super) fn global_dir() -> Result<PathBuf> {
     directories::BaseDirs::new()
         .map(|b| b.home_dir().join(".claude").join("skills"))
         .ok_or_else(|| {

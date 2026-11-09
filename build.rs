@@ -35,6 +35,11 @@ fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
 }
 
 fn main() {
+    // `desk update` downloads the release asset named after the target it was built for.
+    println!(
+        "cargo:rustc-env=DESK_TARGET={}",
+        std::env::var("TARGET").expect("target")
+    );
     let root =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir")).join("models");
 

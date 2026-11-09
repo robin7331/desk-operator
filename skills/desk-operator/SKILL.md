@@ -85,6 +85,8 @@ the first failure only.
 | `limit_exceeded` | Refused, nothing was sent. Tell the user the limit; never work around it or edit `limits` unasked |
 | `protection_tripped` | A protection (OVP, OCP, …) switched the output off; nothing was sent. Tell the user which one. Use `--clear-protection` only after they found the cause and asked you to switch on again |
 | `daemon_unavailable` | The background daemon behind `watch` failed or stopped. Show the message (it names the daemon's log); don't start `desk serve` yourself unless asked |
+| `update_failed` | `desk update` didn't work; the message says whether desk changed. Report it |
+| `update_unsupported` | This desk was built from source; tell the user. Use `--force` only if they ask |
 
 ## Values, settings and actions (any device)
 

@@ -525,6 +525,23 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
      against each one (a tag publishes); `install.sh`, `install.ps1`; written, not run yet.
    - [ ] First release: tag `v0.1.0` once the repo is public (the one-liners need a public repo).
    - [ ] License.
+   - [x] Updating by running the install command again (it replaces `desk` only once the new
+     one runs, and offers the skills again); the README says so. On Windows the installer moves a
+     running `desk.exe` aside (`desk.exe.old`) instead of failing; the release run tests that
+     with `desk serve` running.
+6. **`desk update` (agreed 2026-11-09, built before going public):**
+   - [x] Downloads the latest release (`VERSION`, the asset, `SHA256SUMS`; `DESK_RELEASE_URL`
+     overrides the location, as for the installers), verifies it, checks the new binary reports
+     that version, then replaces itself (Unix: one rename; Windows: the running `.exe` moved
+     aside, removed on the next update). Updates skills in `~/.claude/skills` with the new
+     binary. `--check` only reports. Errors `update_failed`, `update_unsupported`.
+   - [x] Refuses a desk built from source (no `DESK_RELEASE_BUILD`, set by the release workflow)
+     unless `--force`, with a hint to update the clone.
+   - [x] Tests: `tests/update.rs` (fake release; replacing on Unix); the release run calls
+     `desk update` on every platform against its own build.
+   - [ ] Replacing on Windows is only covered by the installer's rename so far (`desk update`'s
+     own swap runs only when a newer release exists): check with the first real update.
+   - Later, when people ask: a Homebrew tap (updated by the release workflow), Scoop or winget.
 
 ## M7 — Open capabilities ✓ (designed 2026-11-05)
 

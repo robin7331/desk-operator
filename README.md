@@ -25,7 +25,10 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/robin7331/desk-operator/main/install.ps1 | iex
 ```
 
-Both verify the download and offer to install the agent skills. To build from source instead, you
+Both verify the download and offer to install the agent skills. To update later, run
+`desk update` (`desk update --check` only looks), or the install command again.
+
+To build from source instead, you
 need [Rust](https://rustup.rs) (stable):
 
 ```sh
