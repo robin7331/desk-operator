@@ -4,12 +4,12 @@
 
 [![CI](https://github.com/robin7331/desk-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/robin7331/desk-operator/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/robin7331/desk-operator)](https://github.com/robin7331/desk-operator/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/robin7331/desk-operator/total)](https://github.com/robin7331/desk-operator/releases)
+[![Downloads](https://img.shields.io/github/downloads/robin7331/desk-operator/total?style=flat)](https://github.com/robin7331/desk-operator/releases)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-informational)](#install)
 [![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-orange?logo=rust)](https://rustup.rs)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Last commit](https://img.shields.io/github/last-commit/robin7331/desk-operator)](https://github.com/robin7331/desk-operator/commits/main)
-[![Stars](https://img.shields.io/github/stars/robin7331/desk-operator)](https://github.com/robin7331/desk-operator/stargazers)
+[![Stars](https://img.shields.io/github/stars/robin7331/desk-operator?style=flat)](https://github.com/robin7331/desk-operator/stargazers)
 
 One interface for the equipment on an electronics bench: power supplies, multimeters, DC loads,
 soldering irons and switched mains outlets. `desk` is a single command-line tool, and every command
