@@ -137,6 +137,8 @@ asking.
 
 ## Configuration (only when asked)
 
+To set up a whole bench or several devices, follow the `desk-setup` skill (`desk skill desk-setup`).
+
 The config path is `data.config.path` in `desk schema --json`. If `desk model list` has a
 model for the model, use it instead of writing driver bindings by hand:
 

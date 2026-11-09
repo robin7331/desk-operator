@@ -143,7 +143,7 @@ docs/scripting.md      user-facing Lua host API reference: keep it in sync with 
 docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
 docs/model-format.md  model format (spec); schemas/ has its JSON Schema (tested
                        against every model in tests/models.rs)
-skills/<name>/         SKILL.md per agent skill (desk-operator, desk-add-device), embedded via
+skills/<name>/         SKILL.md per agent skill (desk-operator, desk-setup, desk-add-device), embedded via
                        include_str! in src/cli/skill.rs (`desk skill list|<name>|install`); update
                        them when commands, error codes or semantics change (tests/cli.rs checks
                        commands and codes, and that every skills/ folder is registered)

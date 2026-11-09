@@ -3,6 +3,8 @@
 //! The command list is generated from the clap definitions, so it can't drift from the real CLI.
 //! It works without a valid config, and then reports the config problem inline.
 
+use std::path::Path;
+
 use clap::{ArgAction, CommandFactory};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -30,7 +32,9 @@ struct ArgInfo {
     help: String,
 }
 
-pub fn run(bench: Result<Bench>) -> Report {
+/// `config_path`: the `--config` given, if any (a missing file is normal on a first run, so the
+/// path is reported even then).
+pub fn run(bench: Result<Bench>, config_path: Option<&Path>) -> Report {
     let (config, devices, providers) = match &bench {
         Ok(b) => (
             json!({ "ok": true, "path": b.config.path }),
@@ -45,7 +49,11 @@ pub fn run(bench: Result<Bench>) -> Report {
                 .collect::<Vec<_>>(),
         ),
         Err(e) => (
-            json!({ "ok": false, "error": e.to_json() }),
+            json!({
+                "ok": false,
+                "path": config_path.map(Path::to_path_buf).or_else(crate::config::default_path),
+                "error": e.to_json(),
+            }),
             Vec::new(),
             Vec::new(),
         ),

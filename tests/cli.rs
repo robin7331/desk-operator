@@ -651,6 +651,18 @@ fn skill_install_writes_and_updates_only_desk_skills() {
 }
 
 #[test]
+fn schema_names_the_config_path_before_the_file_exists() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("sub").join("desk.toml");
+    let out = run_with(Some(&missing), dir.path(), &["--json", "schema"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let config = out.json()["data"]["config"].clone();
+    assert_eq!(config["ok"], false);
+    assert_eq!(config["path"], missing.display().to_string());
+    assert_eq!(config["error"]["code"], "config_invalid");
+}
+
+#[test]
 fn skill_install_scopes() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");

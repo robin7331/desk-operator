@@ -52,7 +52,7 @@ Before anything else, get a clone (ask the user where, if they have a preference
 2. **Otherwise clone it.** With write access (the user owns it or is a collaborator), clone
    directly; otherwise fork first (`gh repo fork robin7331/desk-operator --clone`).
 3. **Branch:** `git -C <clone> switch -c device/<vendor>-<model>`.
-4. **Use its models:** pass `DESK_MODELS=<clone>/devices` to every desk command (tell the user
+4. **Use its models:** pass `DESK_MODELS=<clone>/models` to every desk command (tell the user
    to set it in their shell too), and check with `desk model list --json` that `origin` is the
    clone, not `bundled`.
 
@@ -80,6 +80,19 @@ user at the end (step 11).
 
 ### 2. Check the existing models first
 
+Someone may already have done this. Before writing anything, check the clone's models below, then
+whether the user's desk is out of date (`desk update --check --json`), and search open work:
+
+```sh
+gh pr list -R robin7331/desk-operator --state all --search "<vendor> <model>"
+gh issue list -R robin7331/desk-operator --state all --search "<vendor> <model>"
+```
+
+If that finds a pull request or issue for this device, show it to the user and let them choose:
+build on it, or test it on their real device and report back. Don't start a second driver for it.
+A model that already exists: continue with *Improving an existing model* instead. Without `gh`, say
+that open work couldn't be checked.
+
 ```sh
 desk model list --json
 desk model show <vendor/model> --json   # bindings, driver params, status, sources
@@ -101,8 +114,8 @@ you used (URLs) for the model's `sources` and the vendor README. Note what's unk
 
 ```sh
 desk model new <vendor>/<model> --capability voltage_source --name "<Vendor Model>" \
-    --max-voltage <V> --max-current <A> [--driver ../shared/<family>.lua] [--dir <clone>/devices]
-desk model new <vendor>/<model> --capability <name> --name "<Vendor Model>" --dir <clone>/devices   # meter, heater, …
+    --max-voltage <V> --max-current <A> [--driver ../shared/<family>.lua] [--dir <clone>/models]
+desk model new <vendor>/<model> --capability <name> --name "<Vendor Model>" --dir <clone>/models   # meter, heater, …
 desk model check <vendor>/<model> --json
 ```
 
@@ -158,7 +171,7 @@ found when no documentation had them. Note anything else you learn (boot time, l
 ### 8. Configure (with test limits)
 
 Add the device to the user's `desk.toml` (path: `data.config.path` of `desk schema --json`). `model = …`
-needs `DESK_MODELS=<clone>/devices` in the user's shell until the model is bundled into their
+needs `DESK_MODELS=<clone>/models` in the user's shell until the model is bundled into their
 desk.
 Ask the user for the id, name, power path, and **conservative test limits**:
 

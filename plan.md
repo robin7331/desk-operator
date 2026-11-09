@@ -442,6 +442,12 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
       publishing with and without `gh`
 - [x] `desk schema` lists groups that take their own arguments (`desk skill [name]`); a test checks
       every skill mentions only real commands and error codes
+- [x] `skills/desk-setup/SKILL.md` (2026-11-09): a whole bench, one device at a time; known models
+      directly, new ones through desk-add-device. Offers to verify `community` models and improve
+      what's wrong or missing, and asks about sharing each changed model at the end
+- [x] desk-add-device searches open pull requests and issues before writing a new driver
+- [ ] Validate desk-setup in a fresh session on the real bench, then let the README promise "your
+      whole bench"
 - [x] Validate the add-device skill end to end on a second real device (with the user): a fresh
       session with only the installed skills added the OWON XDM1041 and opened its pull request
       (2026-11-06)

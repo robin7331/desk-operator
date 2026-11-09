@@ -416,7 +416,10 @@ pub async fn run(cli: Cli) -> Result<Report> {
                 .await
                 .unwrap_or_else(|e| Report::streamed(Some((e.to_json(), e.exit_code())))));
         }
-        Command::Schema => return Ok(schema::run(Bench::load(cli.config.as_deref()))),
+        Command::Schema => {
+            let config = cli.config.as_deref();
+            return Ok(schema::run(Bench::load(config), config));
+        }
         Command::Port { action } => {
             return match action {
                 PortCmd::List { all } => port::list(all),

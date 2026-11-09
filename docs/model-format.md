@@ -186,7 +186,7 @@ device table with its own `script` or `provider` replaces the model's binding en
 
 ```sh
 desk model new vendor/model --capability voltage_source --name "Vendor Model" \
-    --max-voltage 30 --max-current 5 [--driver ../shared/x.lua] [--dir ./devices]
+    --max-voltage 30 --max-current 5 [--driver ../shared/x.lua] [--dir ./models]
 desk model new vendor/model --capability heater --name "Vendor Model"   # a declared capability
 desk model check [vendor/model | path/to/model.toml]
 desk model show vendor/model

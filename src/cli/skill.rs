@@ -17,6 +17,10 @@ pub const SKILLS: &[(&str, &str)] = &[
         include_str!("../../skills/desk-operator/SKILL.md"),
     ),
     (
+        "desk-setup",
+        include_str!("../../skills/desk-setup/SKILL.md"),
+    ),
+    (
         "desk-add-device",
         include_str!("../../skills/desk-add-device/SKILL.md"),
     ),
