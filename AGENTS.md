@@ -18,11 +18,13 @@ skill, validated when a fresh session added the XDM1041. Streaming is done: a da
 (`desk serve`, started on demand) holds device sessions so `desk watch` streams while other
 commands keep working (`docs/streaming.md`). **M7, open capabilities, done** (`plan.md`,
 "M7"): models declare values, settings and actions; one command set for every device
-(`desk get|set|do|watch`; `desk source` is gone); channels. **Next: going public** (roadmap
-step 5 in `plan.md`).
+(`desk get|set|do|watch`; `desk source` is gone); channels. **Public since 2026-11-09**, first
+release `v0.1.0`: CI, release builds, one-line installers and `desk update`. Still open: validating
+the `desk-setup` skill on a real bench, and real installs and serial devices on macOS and Windows
+(roadmap in `plan.md`).
 Keep it lean: build only what the current milestone needs.
 
-**One repository** (private until going public, roadmap step 5 in `plan.md`), two parts:
+**One public repository**, two parts:
 - **The core** (`src/`): it never names a vendor or model.
 - **The models** (`models/`): definitions of what each product can do and their drivers, bundled into the binary by
   `build.rs`, with their fake-device tests in `tests/model_*.rs`. `models/README.md` is the
