@@ -530,6 +530,9 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
      against each one (a tag publishes); `install.sh`, `install.ps1`. Green, publishing included
      (2026-11-09).
    - [x] Repo public (2026-11-09), still `robin7331/desk-operator`.
+   - [x] Downloads badge counts only the `desk-*` archives: `badges.yml` every 6 hours writes
+     `downloads.json` to the `badges` branch. GitHub pauses schedules after 60 days without
+     repo activity; re-enable it under Actions if the number freezes.
    - [x] First release: `v0.1.0` published by the workflow (2026-11-09). The real `curl | sh` install
      works on Linux.
    - [ ] Run the real install commands on macOS and Windows; CI only ran them against a local copy.

@@ -1,0 +1,44 @@
+# Counts downloads of the release archives only (desk-*), not SHA256SUMS or VERSION, which the
+# installers and `desk update` fetch too. The README's downloads badge reads the result from the
+# `badges` branch, which holds nothing else and is replaced on every change.
+name: Badges
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  downloads:
+    if: github.repository == 'robin7331/desk-operator'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Count the archive downloads
+        run: |
+          count=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[].assets[] | select(.name | startswith("desk-")) | .download_count' \
+            | awk '{ sum += $1 } END { print sum + 0 }')
+          echo "archive downloads: $count"
+          mkdir out
+          printf '{"schemaVersion":1,"label":"downloads","message":"%s","color":"brightgreen","cacheSeconds":3600}\n' \
+            "$count" > out/downloads.json
+
+      - name: Publish to the badges branch, if it changed
+        run: |
+          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/badges/downloads.json"
+          if curl -fsSL "$url" -o current.json && cmp -s current.json out/downloads.json; then
+            echo "unchanged"
+            exit 0
+          fi
+          cd out
+          git init -q -b badges
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add downloads.json
+          git commit -q -m "Update the downloads badge"
+          git push -q --force "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" badges
