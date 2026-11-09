@@ -13,7 +13,20 @@ desk watch dmm
 
 ## Install
 
-You need [Rust](https://rustup.rs) (stable).
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/robin7331/desk-operator/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/robin7331/desk-operator/main/install.ps1 | iex
+```
+
+Both verify the download and offer to install the agent skills. To build from source instead, you
+need [Rust](https://rustup.rs) (stable):
 
 ```sh
 git clone https://github.com/robin7331/desk-operator

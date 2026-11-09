@@ -157,6 +157,9 @@ tests/model_checks.rs       every model passes the check, and the README lists i
 tests/model_*.rs      one file per protocol family: a driver against a fake device on a pty
 tests/support/models.rs  helpers for those: this checkout's desk with models/ on its search path
 build.rs               bundles models/<vendor>/… into the binary (`bundled:<path>`)
+install.sh, install.ps1  one-line installers: download a release, verify it, offer the skills
+.github/workflows/     ci.yml (fmt, clippy, tests on all three OSes); release.yml (builds, runs the
+                       installers against them; a `v*` tag publishes, a manual run only tests)
 models/                every model and its driver, vendor READMEs (models/README.md)
 ```
 

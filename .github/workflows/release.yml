@@ -1,0 +1,106 @@
+# Builds desk for every platform and runs the real installer against each build. A pushed tag
+# (v0.1.0, matching Cargo.toml) also publishes the release; running this by hand only builds and
+# tests, so it also works before the repo is public.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu runner: the binary needs this glibc or newer.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install libudev
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir pkg dist
+          cp README.md pkg/
+          if [ -f LICENSE ]; then cp LICENSE pkg/; fi
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp target/${{ matrix.target }}/release/desk.exe pkg/
+            (cd pkg && 7z a ../dist/desk-${{ matrix.target }}.zip .)
+          else
+            cp target/${{ matrix.target }}/release/desk pkg/
+            tar -czf dist/desk-${{ matrix.target }}.tar.gz -C pkg .
+          fi
+          cd dist
+          sha256sum desk-* > SHA256SUMS || shasum -a 256 desk-* > SHA256SUMS
+
+      - name: Test the installer (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          python3 -m http.server 8765 --directory dist &
+          sleep 2
+          DESK_BASE_URL=http://127.0.0.1:8765 DESK_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/desk" --version
+          "$RUNNER_TEMP/bin/desk" model list
+
+      - name: Test the installer (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Start-Process python -ArgumentList '-m','http.server','8765','--directory','dist'
+          Start-Sleep -Seconds 2
+          $env:DESK_BASE_URL = 'http://127.0.0.1:8765'
+          $env:DESK_INSTALL_DIR = "$env:RUNNER_TEMP\bin"
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          & "$env:RUNNER_TEMP\bin\desk.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$env:RUNNER_TEMP\bin\desk.exe" model list
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desk-${{ matrix.target }}
+          path: dist/desk-*
+
+  publish:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml" >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum desk-* > SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag

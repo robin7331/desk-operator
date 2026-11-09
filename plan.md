@@ -519,7 +519,12 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
    - [ ] **Before making desk-operator public: clean its git history.** Early commits contain the
      user's PSU serial number (docs examples, M5) and a Home Assistant entity (a unit test).
      The library's merged history started clean.
-   - [ ] CI: run `cargo test`, which includes the fake-device tests.
+   - [ ] CI: `.github/workflows/ci.yml` runs clippy and `cargo test`, which includes the fake-device
+     tests, on Linux, macOS and Windows; written, not run yet.
+   - [ ] Release: `.github/workflows/release.yml` builds five targets and runs the real installer
+     against each one (a tag publishes); `install.sh`, `install.ps1`; written, not run yet.
+   - [ ] First release: tag `v0.1.0` once the repo is public (the one-liners need a public repo).
+   - [ ] License.
 
 ## M7 — Open capabilities ✓ (designed 2026-11-05)
 
