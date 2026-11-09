@@ -90,7 +90,6 @@ impl Bench {
         Running { child, lines }
     }
 
-    /// The daemon's socket, once it exists.
     /// A daemon holds its lock file while it runs (on every platform; Windows has no socket file).
     fn daemon_running(&self) -> bool {
         let Ok(entries) = std::fs::read_dir(self.runtime()) else {
@@ -109,6 +108,7 @@ impl Bench {
             })
     }
 
+    /// The daemon's socket, once it exists.
     #[cfg(unix)]
     fn socket(&self) -> Option<PathBuf> {
         std::fs::read_dir(self.runtime())
@@ -143,11 +143,12 @@ impl Running {
             assert!(Instant::now() < deadline, "did not exit within 10 s");
             std::thread::sleep(Duration::from_millis(20));
         };
-        let rest = self
-            .lines
-            .try_iter()
-            .map(|l| serde_json::from_str(&l).unwrap_or(Value::String(l)))
-            .collect();
+        // The reader thread may still be delivering the last lines: read to the end of the pipe
+        // (bounded, because a daemon this command started could hold the pipe open).
+        let mut rest = Vec::new();
+        while let Ok(l) = self.lines.recv_timeout(Duration::from_secs(2)) {
+            rest.push(serde_json::from_str(&l).unwrap_or(Value::String(l)));
+        }
         (code, rest)
     }
 }

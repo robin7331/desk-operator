@@ -1,6 +1,6 @@
-![A power supply, multimeter, soldering station, DC load and mains strip, all cabled to one terminal running desk commands](docs/banner.png)
+### Desk Operator - One CLI for your whole electronics bench
 
-# desk-operator
+![A power supply, multimeter, soldering station, DC load and mains strip, all cabled to one terminal running desk commands](docs/banner.png)
 
 [![CI](https://github.com/robin7331/desk-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/robin7331/desk-operator/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/robin7331/desk-operator)](https://github.com/robin7331/desk-operator/releases/latest)
