@@ -1,0 +1,43 @@
+#:schema ../../../schemas/model.schema.json
+# Model: true for every OWON OEL1515, nothing about any particular bench.
+
+[model]
+id       = "owon/oel1515"
+name     = "OWON OEL1515"
+requires = "desk-operator >= 0.1"
+status   = "community"
+sources  = [
+  "https://www.owon.com.hk/download/index.asp?S=95",
+  "https://github.com/BenchMesh/benchmesh/blob/main/ai_context/migration/device-notes/owon_oel.md",
+  "https://github.com/olegv142/dmmpy",
+  "https://github.com/al-s/owon-oel-battery-test",
+  "https://github.com/curtisgalloway/public-skills/blob/main/plugins/hardware-lab/skills/owon-dc-load/SKILL.md",
+]
+
+[load]
+script  = "driver.lua"
+# 1a86:7523 is a generic CH340 adapter without a serial number, shared by unrelated gadgets (the
+# XDM1041 uses it too): the driver checks *IDN? before anything else. With several of them, bind by
+# `path` (/dev/serial/by-path).
+port    = { usb_vid = 0x1a86, usb_pid = 0x7523 }
+timeout = "10s"
+
+[load.values]
+measured_voltage = { type = "number", unit = "V", doc = "voltage at the input" }
+measured_current = { type = "number", unit = "A", doc = "current through the input" }
+measured_power   = { type = "number", unit = "W", doc = "power at the input" }
+ovp_tripped      = { type = "boolean", doc = "over-voltage protection tripped: the input went off. Cleared on the front panel only" }
+ocp_tripped      = { type = "boolean", doc = "over-current protection tripped: the input went off. Cleared on the front panel only" }
+opp_tripped      = { type = "boolean", doc = "over-power protection tripped: the input went off. Cleared on the front panel only" }
+short            = { type = "boolean", doc = "the input is set to act as a short circuit" }
+firmware         = { type = "string", doc = "firmware version reported by the load" }
+
+# Applied in this order: the function first, because a setpoint only takes effect in its own
+# function, and the input last.
+[load.settings]
+function   = { type = "choice", choices = ["current", "voltage", "resistance", "power", "dynamic"], doc = "constant current, voltage, resistance or power. dynamic: its levels are set on the front panel. Changes what the load does right away if the input is on" }
+current    = { type = "number", unit = "A", min = 0, max = 15, doc = "setpoint of function current" }
+voltage    = { type = "number", unit = "V", min = 0, max = 150, doc = "setpoint of function voltage" }
+resistance = { type = "number", unit = "Ω", min = 0.05, max = 7500, doc = "setpoint of function resistance" }
+power      = { type = "number", unit = "W", min = 0, max = 150, doc = "setpoint of function power" }
+input      = { type = "boolean", doc = "whether the load draws power from what's connected" }

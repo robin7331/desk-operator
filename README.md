@@ -96,6 +96,7 @@ power = { provider = "ha", entity = "switch.desk_outlet_1" }   # optional: how i
 |---|---|---|
 | [FNIRSI DPS-150](models/fnirsi/README.md) | Power supply | community |
 | [FNIRSI IPS3608](models/fnirsi/README.md) | Power supply | tested |
+| [OWON OEL1515](models/owon/README.md) | DC load | community |
 | [OWON XDM1041](models/owon/README.md) | Multimeter | community |
 
 `tested`: smoke-tested on real hardware. `community`: not fully verified on hardware, see the vendor

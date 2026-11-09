@@ -1,8 +1,11 @@
-# OWON multimeters
+# OWON
 
 | Model | Name | Status |
 |---|---|---|
+| `owon/oel1515` | OEL1515 | community: functions, setpoints, input and mains behavior tried on firmware V1.4.0 with nothing connected; measurements on a real source not checked |
 | `owon/xdm1041` | XDM1041 | community: functions, ranges, rate and mains behavior tried on firmware V4.3.0 with open leads; accuracy on a real signal not checked |
+
+# XDM1041 multimeter
 
 ## Protocol
 
@@ -89,3 +92,75 @@ Firmware V4.3.0, November 2026, with open leads.
 - **Slow rate** gives about one new reading per second. `RATE S` works, and `RATE?` answers `S`.
 - **Open leads:** frequency and period settle at 0, AC voltage reads about 70 mV, and K-type temperature
   shows a value (about 12 °C) that means nothing without a sensor.
+
+# OEL1515 DC load
+
+150 V, 15 A, 150 W; constant resistance 0.05 to 7500 Ω. The `T` version adds battery, OCP and OPP
+test functions, with the same ratings.
+
+## Protocol
+
+SCPI text over USB through a CH340 USB serial adapter (`1a86:7523`, no serial number), or RS232 on the
+DB9 connector. Commands end with `\n`, replies with `\n`. Commands get no reply. Sources: OWON's
+[programming manual and user manual](https://www.owon.com.hk/download/index.asp?S=95) (the
+series' download page; `files.owon.com.cn` doesn't send its intermediate certificate, so some
+clients refuse it), and notes and working code from
+[BenchMesh](https://github.com/BenchMesh/benchmesh/blob/main/ai_context/migration/device-notes/owon_oel.md)
+(captures of an OEL1515), [dmmpy](https://github.com/olegv142/dmmpy) (tested with an OEL1515),
+[owon-oel-battery-test](https://github.com/al-s/owon-oel-battery-test) and
+[owon-dc-load](https://github.com/curtisgalloway/public-skills/blob/main/plugins/hardware-lab/skills/owon-dc-load/SKILL.md)
+(an OEL1520).
+
+| Command | Meaning |
+|---|---|
+| `*IDN?` | `OWON,OEL1515,<serial>,FV:V1.1.0`. Also answers in local mode |
+| `SYST:REM`, `SYST:LOC` | remote mode, which locks the front panel / back to local |
+| `MEAS:ALL:INFO?` | `<V>,<A>,<W>,<OVP>,<OCP>,<OPP>`, faults as `ON` or `OFF` |
+| `FUNC?` / `FUNC <CURR\|VOLT\|RES\|POW\|DYN>` | `current`, `voltage`, `resistance`, `power`, `dynamic` |
+| `INP?` / `INP <ON\|OFF>` | input |
+| `INP:SHOR?` | input acts as a short circuit |
+| `CURR?`, `VOLT?`, `RES?`, `POW?` / `CURR <A>`, `VOLT <V>`, `RES <Ω>`, `POW <W>` | setpoint of each function |
+
+## Quirks from the sources
+
+- **Local mode:** the load starts in local mode, where every query but `*IDN?` gets an empty line. In
+  remote mode only SHIFT + On/Off on the panel works, and a long press returns to local. So the driver
+  goes to remote at the start of every session and back to local at its end: the panel is locked
+  during a command and for the whole of a `desk watch`.
+- **Setpoints of another function** are dropped without any reply (seen for `VOLT`, `RES`, `POW`). The
+  driver refuses them, and doesn't change the function by itself: that would change what the load does
+  to whatever is connected.
+- **Replies differ from the manual:** `INP?` and `INP:SHOR?` answer `ON`/`OFF` on real units, not
+  `0`/`1`. The driver accepts both.
+- **Baud rate:** the user manual says 9600 8N1 and the menu offers 1200 to 115200, but a load on
+  firmware V1.4.0 answered at 115200 and not at 9600, as do the tools above. The driver's default is
+  115200 (the `baud` param).
+- **The sixth field of `MEAS:ALL:INFO?`** is OPP in the manual, while BenchMesh's first driver called it
+  OTP. Over-temperature may not be reported at all.
+- **Protections** turn the input off, and can only be cleared on the front panel: there's no command.
+- Unknown queries answer `ERR`. `*RST` restores defaults, so the driver doesn't send it.
+
+## Observed behavior
+
+Firmware V1.4.0, November 2026, with nothing connected to the input.
+
+- **Rear RS232:** works through the rear DB9 with a Prolific PL2303 USB-to-RS232 adapter, at 115200
+  baud, first byte after about 20 ms. With such an adapter, set `usb_vid` and `usb_pid` in your own
+  `port`: the model's ids are those of the USB port. The adapter stays connected while the load has no
+  mains, so a port that's there says nothing about the load.
+- **Remote mode:** the front panel works again after a session. The input stays on when the driver
+  returns to local mode.
+- **Settings:** all four functions took their setpoints and read them back.
+- **Mains loss:** the load keeps answering for about 2.5 s after mains goes off. With its rear power
+  button left on, it starts by itself when mains returns. Function and setpoints survived a cut of 15 s,
+  and an input that was on came back **off**.
+- **Boot:** about 2.7 s after mains returns, the load sends a boot log as text lines
+  (`main.c(1016): CPU,CLK=240000000Hz.` and so on), which the driver ignores. Commands fail until it
+  has booted: the first read that worked came about 3.8 s after mains on.
+
+## Known gaps
+
+Everything so far ran with nothing connected, so the measured values only ever read 0, and no protection
+has tripped: their accuracy and the three trip fields are unchecked. Not implemented: protection levels (`VOLT:PROT`, `CURR:PROT`,
+`POW:PROT`), the current limit, start voltage (`VOLT:ON`), slopes, ranges, setting the short circuit,
+remote sense, the levels of the dynamic function, the battery, OCP and OPP tests, and Modbus.
