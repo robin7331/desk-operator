@@ -837,7 +837,8 @@ the `check` hook, events, captures.
 
 ### Open questions (for the user)
 
-- ~~DC load: exact model and how it connects.~~ Answered: the OWON OEL1515 (`models/owon/oel1515`, SCPI over a USB serial adapter).
+- ~~DC load: exact model and how it connects.~~ Answered: the OWON OEL1515
+  (`models/owon/oel1515`, SCPI over a USB serial adapter).
 
 ## After M6 (rough order, re-evaluate each time)
 

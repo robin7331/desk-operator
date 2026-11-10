@@ -21,8 +21,8 @@ commands keep working (`docs/streaming.md`). **M7, open capabilities, done** (`p
 "M7"): models declare values, settings and actions; one command set for every device
 (`desk get|set|do|watch`; `desk source` is gone); channels. **Public since 2026-11-09**, releases
 `v0.1.0` and `v0.2.0`: CI, release builds, one-line installers and `desk update`. Still open:
-validating the `desk-setup` skill on a real bench, and real installs and serial devices on macOS and Windows
-(roadmap in `plan.md`).
+validating the `desk-setup` skill on a real bench, and real installs and serial devices on macOS
+and Windows (roadmap in `plan.md`).
 Keep it lean: build only what the current milestone needs.
 
 **One public repository**, two parts:
@@ -106,8 +106,8 @@ default.
 - Rust (stable, 2024 edition), single binary named `desk` (crate `desk-operator`).
 - `clap` (derive), `clap_complete` (feature `unstable-dynamic`: review the shell scripts when
   upgrading it), `tokio`, `reqwest` (rustls, json), `serde`, `toml` (+ `toml_edit` when the CLI
-  edits config), `thiserror` (`DeskError`) everywhere; parse helpers return `String` errors that callers wrap with context, `directories`
-  for config paths, `inquire` for TTY pickers.
+  edits config), `thiserror` (`DeskError`) everywhere; parse helpers return `String` errors that
+  callers wrap with context, `directories` for config paths, `inquire` for TTY pickers.
 - `mlua` with features `lua54`, `vendored`, `async`, `serialize`. Host functions are async and use
   tokio (`sleep` must be `tokio::time::sleep`, never a thread sleep).
 
