@@ -459,9 +459,9 @@ end
 "#;
 
 const DECLARED_DRIVER_SOURCE: &str = r#"-- Driver for {name} ({key}, a declared capability). Contract: docs/scripting.md.
--- desk parses units, checks ranges and limits, applies settings in declaration order (a switch-off first) and
--- verifies them by reading back; the driver only talks to the device. Return from read() only what the
--- device really reports.
+-- desk parses units, checks ranges and limits, applies settings in declaration order (a
+-- switch-off first) and verifies them by reading back; the driver only talks to the device.
+-- Return from read() only what the device really reports.
 
 PARAMS = {
   -- example = { type = "number", default = 300, doc = "what it means" },

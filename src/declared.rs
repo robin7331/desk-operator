@@ -6,8 +6,9 @@
 //! * **action**: something it does on request, optionally with arguments (`standby`)
 //!
 //! The core parses what you type with the unit table, checks the device range and your `limits`
-//! before anything is sent, applies several settings in declaration order (switching off first), reads back and verifies,
-//! and supports dry runs. Drivers only implement `read`, `set` and `action`.
+//! before anything is sent, applies several settings in declaration order (switching off first),
+//! reads back and verifies, and supports dry runs. Drivers only implement `read`, `set` and
+//! `action`.
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -721,8 +722,8 @@ pub async fn read(
     decode(decls, raw, &drv.label())
 }
 
-/// Apply settings, already parsed and range-checked, in declaration order (a boolean `switches` setting set to
-/// false goes first); then read back and verify. With `dry_run`, only read.
+/// Apply settings, already parsed and range-checked, in declaration order (a boolean `switches`
+/// setting set to false goes first); then read back and verify. With `dry_run`, only read.
 pub async fn set(
     drv: &dyn Driver,
     decls: &Declarations,

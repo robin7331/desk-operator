@@ -1,5 +1,6 @@
 //! The `voltage_source` capability (bench power supplies) and the semantics shared by every
-//! driver: limit checks, setpoints before switching on (switching off before setpoints), read-back verification, sessions.
+//! driver: limit checks, setpoints before switching on (switching off before setpoints),
+//! read-back verification, sessions.
 //!
 //! Drivers only implement the primitive operations. Everything a user relies on for safety lives
 //! here, so it holds for every driver, native or Lua.
