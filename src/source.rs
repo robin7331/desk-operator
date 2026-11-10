@@ -44,6 +44,18 @@ impl SourceInfo {
             max_power: min(self.max_power, other.max_power),
         }
     }
+
+    /// The first maximum that isn't a finite number, if any (a driver bug).
+    pub fn non_finite(&self) -> Option<&'static str> {
+        [
+            ("max_voltage", self.max_voltage),
+            ("max_current", self.max_current),
+            ("max_power", self.max_power),
+        ]
+        .into_iter()
+        .find(|(_, v)| v.is_some_and(|v| !v.is_finite()))
+        .map(|(name, _)| name)
+    }
 }
 
 /// Parse and check a `source` binding's `ratings = { max_voltage, max_current, max_power }`.
@@ -88,6 +100,26 @@ pub struct Reading {
     pub charge: Option<f64>,
     /// Energy delivered since the device's counter was reset, Wh.
     pub energy: Option<f64>,
+}
+
+impl Reading {
+    /// The first number that isn't finite, if any (a driver bug, e.g. a badly decoded frame).
+    pub fn non_finite(&self) -> Option<&'static str> {
+        [
+            ("voltage_set", self.voltage_set),
+            ("current_set", self.current_set),
+            ("voltage", self.voltage),
+            ("current", self.current),
+            ("power", self.power),
+            ("temperature", self.temperature),
+            ("input_voltage", self.input_voltage),
+            ("charge", self.charge),
+            ("energy", self.energy),
+        ]
+        .into_iter()
+        .find(|(_, v)| v.is_some_and(|v| !v.is_finite()))
+        .map(|(name, _)| name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -670,5 +702,20 @@ mod tests {
         .unwrap();
         assert!(!r.applied);
         assert!(f.calls().is_empty());
+    }
+
+    #[test]
+    fn non_finite_fields_are_named() {
+        assert_eq!(Reading::default().non_finite(), None);
+        let r = Reading {
+            current_set: Some(f64::NAN),
+            ..Reading::default()
+        };
+        assert_eq!(r.non_finite(), Some("current_set"));
+        let i = SourceInfo {
+            max_voltage: Some(f64::INFINITY),
+            ..SourceInfo::default()
+        };
+        assert_eq!(i.non_finite(), Some("max_voltage"));
     }
 }

@@ -813,6 +813,51 @@ function read(ctx) return { voltage_set = s[ctx.channel].v } end
 }
 
 #[test]
+fn a_source_driver_reporting_nan_is_refused() {
+    let b = Bench::with(
+        r#"
+[devices.psu]
+source = { script = "psu.lua", ratings = { max_voltage = 30, max_current = 3 } }
+limits = { source = { voltage = 12 } }
+"#,
+    );
+    b.file(
+        "psu.lua",
+        r#"
+function set_voltage(ctx, v) end
+function set_current(ctx, a) end
+function set_output(ctx, on) end
+function read(ctx) return { voltage_set = 0/0, output = false } end
+"#,
+    );
+    let out = b.run(&["--json", "set", "psu", "output", "on"]);
+    assert_eq!(out.code_str(), "script_failed", "{}", out.message());
+    assert!(out.message().contains("voltage_set"), "{}", out.message());
+    let out = b.run(&["--json", "get", "psu"]);
+    assert_eq!(out.code_str(), "script_failed", "{}", out.message());
+
+    let b = Bench::with(
+        r#"
+[devices.psu]
+source = { script = "psu.lua", ratings = { max_voltage = 30, max_current = 3 } }
+"#,
+    );
+    b.file(
+        "psu.lua",
+        r#"
+function set_voltage(ctx, v) end
+function set_current(ctx, a) end
+function set_output(ctx, on) end
+function read(ctx) return { voltage_set = 5, output = false } end
+function info(ctx) return { max_voltage = 0/0 } end
+"#,
+    );
+    let out = b.run(&["--json", "set", "psu", "voltage", "5v"]);
+    assert_eq!(out.code_str(), "script_failed", "{}", out.message());
+    assert!(out.message().contains("max_voltage"), "{}", out.message());
+}
+
+#[test]
 fn names_that_clash_are_qualified() {
     let b = Bench::with(
         r#"
