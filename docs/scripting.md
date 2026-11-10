@@ -213,9 +213,11 @@ every driver:
 ## Sandbox
 
 Only the `string`, `table`, `math`, `utf8` and `coroutine` libraries are available. There is no
-`io`, `os`, `require`/`package`, `debug`, `dofile` or `loadfile`: a script can only reach the outside
-world through `ctx`. `print` writes to the log, so `--json` output stays parseable. The timeout also
-interrupts busy loops.
+`io`, `os`, `require`/`package`, `debug`, `dofile`, `loadfile` or `string.dump`: a script can only
+reach the outside world through `ctx`. `load` compiles source text only, never precompiled chunks.
+A script may use up to 64 MiB of memory. One `port:read` returns at most 64 KiB; ask again for more.
+`print` writes to the log, so `--json` output stays parseable. The timeout also interrupts busy
+loops written in Lua.
 
 ## Examples
 
