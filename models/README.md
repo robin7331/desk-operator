@@ -34,7 +34,7 @@ models/
   <vendor>/
     README.md                  protocol notes, sources, known gaps, observed behavior
     shared/<protocol>.lua      drivers shared by several models (protocol families)
-    <model>/model.toml        one model per model
+    <model>/model.toml        one folder per model
 tests/
   model_<vendor>_<family>.rs  the driver against a fake device, one file per protocol family
 ```
@@ -68,7 +68,7 @@ An agent can walk you through all of it: `desk skill install` installs the `desk
 repository:
 
 1. Branch (`device/<vendor>-<model>`), then
-   `desk model new <vendor>/<model> --capability <name> --name "…" --dir devices`.
+   `desk model new <vendor>/<model> --capability <name> --name "…" --dir models`.
 2. Find out how the device talks: manuals, community protocol work, a capture of the vendor's
    software. Note sources in the vendor `README.md`. `desk port probe` sends documented
    read-only queries and dumps the replies as hex (it checks no limits: never send unknown
@@ -78,7 +78,7 @@ repository:
    add a fake-device test in `tests/model_<vendor>_<family>.rs` (`#[path = "support/models.rs"] mod harness;`
    gives it this checkout's `desk`).
 5. Smoke-test on real hardware with nothing connected to the outputs, at low values, using
-   `DESK_MODELS=devices`. Record what you observed (boot time, ramps, quirks) in the vendor
+   `DESK_MODELS=$PWD/models`. Record what you observed (boot time, ramps, quirks) in the vendor
    `README.md`, and set `status`/`tested`.
 6. Add the device to *Supported devices* in the main README, sorted by vendor and model (a test
    checks it).

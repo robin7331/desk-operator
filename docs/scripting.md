@@ -81,10 +81,14 @@ match; if several ports match, add `serial_number` or `path`.
 ```lua
 local port = ctx.serial.open{ baud = 115200 }   -- opens the binding's port
 port:write(string.pack("<BBf", 0xF1, 0xC1, 5.0)) -- bytes are Lua strings
-local reply = port:read(17, 500)                 -- up to 17 bytes within 500 ms (may be fewer, or "")
+local reply = port:read(17, 500)                 -- returns once 17 bytes arrived, else after 500 ms with what came ("" if nothing)
 port:clear()                                     -- drop input that arrived but wasn't read
 port:close()                                     -- also happens automatically after the command
 ```
+
+`port:read(max, ms)` waits the whole timeout unless `max` bytes arrive, so for line-based text
+protocols read one byte at a time until the line ending. The timeout defaults to 1 s. `port.path`
+is the path of the opened port.
 
 | `open{…}` option | Default | |
 |---|---|---|

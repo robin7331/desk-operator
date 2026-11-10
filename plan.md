@@ -430,7 +430,7 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
   branch + push/compare-URL steps or `git format-patch`; without a checkout a tarball of the
   vendor folder. The upstream URL comes from the checkout's remote (none is set yet).
 - **Capabilities:** the skill targets `voltage_source` and `power_switch`; anything else is reported
-  as needing a core capability first.
+  as needing a core capability first. *(Superseded by M7: any device gets a declared capability.)*
 
 **Done:**
 - [x] `desk skill list|<name>|install`; skills registry in `src/cli/skill.rs`, tested against `skills/`
@@ -540,6 +540,7 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
      switching, and a better error at `src/models.rs` (changes `config_invalid` semantics).
    - [x] First release: `v0.1.0` published by the workflow (2026-11-09). The real `curl | sh` install
      works on Linux.
+   - [x] Second release: `v0.2.0`.
    - [ ] Run the real install commands on macOS and Windows; CI only ran them against a local copy.
    - [ ] Try a real serial device on macOS and on Windows: no test covers serial there yet.
    - [x] License: MIT OR Apache-2.0 (2026-11-09), so anyone can use desk, also commercially.
@@ -836,7 +837,7 @@ the `check` hook, events, captures.
 
 ### Open questions (for the user)
 
-- DC load: exact model and how it connects.
+- ~~DC load: exact model and how it connects.~~ Answered: the OWON OEL1515 (`models/owon/oel1515`, SCPI over a USB serial adapter).
 
 ## After M6 (rough order, re-evaluate each time)
 
