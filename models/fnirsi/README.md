@@ -19,7 +19,8 @@ Binary frames `dir, type, cmd, len, data…, checksum` with `checksum = (cmd + l
 
 Types: `A1` query/response, `B1` write, `C1` session. **Never send type `C0`**: it switches the
 device into its firmware-update mode (USB mass storage, id `2e3c:5720`, the serial port
-disappears). Type `B0` sets a baud index with unknown effect. The driver sends neither.
+disappears). Type `B0` sets a baud index with unknown effect (the IPS3608 firmware ignores it).
+The driver sends neither.
 
 | cmd | | Meaning | Data |
 |---|---|---|---|
@@ -32,10 +33,10 @@ disappears). Type `B0` sets a baud index with unknown effect. The driver sends n
 | `D1`–`D5` | write | OVP V / OCP A / OPP W / OTP °C / LVP V (input under-voltage) thresholds (stored) | f32 |
 | `D6` / `D7` | write | brightness / volume (stored) | u8 |
 | `D8` | write, query | metering (Ah/Wh counting) on/off | u8 |
-| `D9` / `DA` | pushed | charge Ah / energy Wh | f32 |
+| `D9` / `DA` | pushed, query | charge Ah / energy Wh (writing them does nothing on the IPS3608) | f32 |
 | `DB` | write, query | output on/off. **`DB=1` also clears a latched protection** | u8 |
 | `DC` | query | protection: 0 none, 1 OVP, 2 OCP, 3 OPP, 4 OTP, 5 LVP | u8 |
-| `DD` | query | mode: 1 CV, 0 CC (DPS-150; **not** on the IPS3608, see below) | u8 |
+| `DD` | pushed, query | mode: 1 CV, 0 CC (DPS-150; the IPS3608's **query** is inverted, see below) | u8 |
 | `DE` / `DF` / `E0` | query | model name / **hardware** version / **firmware** version (ASCII) | |
 | `E1` | query | device address (1) | u8 |
 | `E2` / `E3` | query | maximum settable V / A right now | f32 |
@@ -43,9 +44,11 @@ disappears). Type `B0` sets a baud index with unknown effect. The driver sends n
 | `FF` | query | full status, 139 bytes (layout below) | |
 
 Queries are `F1 A1 <cmd> 01 00 <cmd+1>`. No command exists for the push rate, key lock, preset
-recall, counter reset or a soft reset. **The devices don't validate written values** (a DPS-150
-accepts 31 V or −1 V), so desk's ratings and limits are the only guard. A write is **dropped when
-the next frame follows within a few ms**: the driver waits `gap_ms` (50) after every write.
+recall, counter reset or a soft reset. **The devices barely validate written values** (a DPS-150
+accepts 31 V or −1 V; the IPS3608 firmware only ignores a voltage above 36.0 V or a current
+above 8.2 A, silently, and has no lower bound), so desk's ratings and limits are the guard. A
+write is **dropped when the next frame follows within a few ms**: the driver waits `gap_ms` (50)
+after every write.
 
 **Full status** (`FF`), offsets in bytes, float32 LE unless noted (same on both models):
 
@@ -84,8 +87,9 @@ Read-only probes with `desk port probe`, output switched only through desk, noth
 - **Every documented query answers** (`DE` … `E8`, `C0`–`C4`, `DB`, `DC`, `DD`, `FF`). The full
   status replies within about 20 ms, also at 10 queries per second.
 - **Mode: use status offset 109.** With the output on and no load, offset 109 reads 1 (CV) while
-  query `DD` reads 0 in every state. CC (0) is from the sources; not yet seen on this unit (needs a
-  load).
+  query `DD` reads 0. The firmware explains it: the `DD` query returns its internal flag as is,
+  while the full status and the pushed `DD` invert it (see *IPS3608 firmware*). CC (0) is from
+  the sources; not yet seen on this unit (needs a load).
 - **Input voltage: use query `C0`** (44.7–46.2 V, moves with load); status offset 0 stays 48.0.
 - Protection thresholds as shipped: OVP 36 V, OCP 8 A, OPP 150 W, OTP 60 °C, LVP 40 V. Ceilings:
   36 V, 8.2 A, 288 W, 99 °C, 48 V. `E2` answers input − 0.2 V (44.5 V) while status offset 111
@@ -100,20 +104,56 @@ Read-only probes with `desk port probe`, output switched only through desk, noth
   reading, full status and input voltage, ~25 ms each); 200 in a row without a failure, and the
   measurements change from one reading to the next.
 
+## IPS3608 firmware (static analysis, Nov 2026)
+
+FNIRSI publishes the application images (V1.2, V1.3, V1.7, V1.9) on its
+[Manuals & Firmwares](https://www.fnirsi.com/pages/manuals-firmwares) page. We decompiled V1.9
+(`APP_IPS3608_V1.9_260429.bin`, Cortex-M, linked at `0x08006800`, SHA-256
+`7a6e87a7661c5a0afe537b2b7865826106638fb2fa49a7a76268389e8013669d`) and compared V1.2, which
+has the same serial command set. Static analysis only, nothing was run; the firmware isn't in
+this repository. Addresses below are V1.9.
+
+- **The command set above is complete.** One function reads the USB serial port (`0x08010358`,
+  from the main loop); it checks the checksum and looks the type up in a five-entry table:
+  `C1` session, `A1` query (`0x0801289c`: `C0`–`E8`, `FF`), `B1` write (`0x08012cf8`: `C1`–`DB`),
+  `C0` firmware-update mode, `B0` nothing. Queries and writes need an open session. Every frame
+  the device sends is one of the commands in the table.
+- **The front USB-A and USB-C ports aren't reachable over serial.** A separate fast-charge chip
+  (I²C address `0x78`) drives them; the firmware reads its port state, negotiated protocol
+  (QC2.0, QC3.0, AFC, SCP, SFCP, PE, PD-FIX, PD-PPS) and voltage/current for the display only,
+  and writes to it only at boot (no switching the ports at run time).
+- **Writes:** `C1`/`C2` are ignored above 36.0 V / 8.2 A. `D6`/`D7` take 0–14 (stored as a
+  percentage; `D7` beeps). `D9`/`DA` do nothing: the Ah/Wh counters can only be reset on the
+  front panel; metering off (`D8` = 0) pauses them. Other commands are ignored as writes.
+- **Writing a preset (`C5`–`D0`) also makes that preset group active**, and OVP/OCP/OPP/OTP
+  (`D1`–`D4`) belong to the active group: a preset write can change the active protection
+  thresholds. desk sends neither.
+- **Queries `D1`–`D4` seem to read the next group's thresholds** (one 24-byte group further than
+  writes and the full status use). Unverified on hardware; the full status agrees with the writes.
+- **Constants:** `DE`/`DF`/`E0` are fixed strings (`IPS3608`, `V1.1`, `V1.9`); `E3`–`E8` answer
+  8.2, 36, 8.2, 288, 100, 36, while the full status ceilings are 36, 8.2, 36, 8.2, 288, 99, 48.
+- **The full status query sets the input voltage variable to 48.0** (the constant at offset 0)
+  until the next measurement updates it, so query `C0` right after `FF` could in theory answer
+  48.0. Not seen so far on hardware.
+- **Pushed** every 500 ms: `C3`, `C4`, and `D9`, `DA` while metering is on; `DB`, `DC`, `DD`
+  when they change.
+
 ## Known gaps
 
 - **USB id `2e3c:5740` is Artery's generic AT32 id**, not FNIRSI-specific: other gadgets share it.
   Both models check the model name (`DE`) before sending anything; bind by `serial_number` in
   your own config.
-- **Not exposed by desk yet:** protection thresholds, presets, metering on/off and counter reset
-  (turning metering off and on resets it per the DPS-150 manual; unverified), brightness, volume.
-  All of these write settings stored on the device.
+- **Not exposed by desk yet:** protection thresholds, presets, metering on/off, brightness,
+  volume. All of these write settings stored on the device. Resetting the Ah/Wh counters: the
+  DPS-150 manual says turning metering off and on resets them (unverified); the IPS3608 firmware
+  can't do it over serial.
+- **IPS3608 front USB-A/USB-C ports:** not reachable over serial (see *IPS3608 firmware*).
 - **DPS-150:** not yet run with desk on hardware. Its output state at power-up isn't documented:
   check before connecting a load.
 
 ## Tests
 
-`harness/tests/fnirsi_dps150.rs` runs the driver against a fake device that speaks this protocol
+`tests/model_fnirsi_dps150.rs` runs the driver against a fake device that speaks this protocol
 over a pseudo-terminal: connect/disconnect, setpoints, output echo (or none), pushed telemetry,
 garbage and resynchronization, a silent device, the name check, the IPS3608 status layout with
 every field, the quiet gap after writes, and a latched protection.
