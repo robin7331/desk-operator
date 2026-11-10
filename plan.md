@@ -540,7 +540,8 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
      switching, and a better error at `src/models.rs` (changes `config_invalid` semantics).
    - [x] First release: `v0.1.0` published by the workflow (2026-11-09). The real `curl | sh` install
      works on Linux.
-   - [x] Second release: `v0.2.0`. Third: `v0.3.0` (sandbox hardening, safer switching and limits).
+   - [x] Second release: `v0.2.0`. Third: `v0.3.0` (sandbox hardening, safer switching and
+     limits), then `v0.3.1` (IPS3608 firmware notes).
    - [ ] Run the real install commands on macOS and Windows; CI only ran them against a local copy.
    - [ ] Try a real serial device on macOS and on Windows: no test covers serial there yet.
    - [x] License: MIT OR Apache-2.0 (2026-11-09), so anyone can use desk, also commercially.
