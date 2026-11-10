@@ -98,7 +98,7 @@ pub fn run(bench: Result<Bench>, config_path: Option<&Path>) -> Report {
                     "desk do <device>[:<channel>] <action> [<arg>=<value>...] [--dry-run]",
                     "desk watch <device>[:<channel>] [<name>...] [--interval 100ms] [--count N] [--changes]"
                 ],
-                "rules": "numbers need their unit (330c, 250ma, 1.5kohm; prefixes are case-sensitive: m milli, M mega); the device range (min/max) and the bench limit are checked before anything is sent (limit_exceeded); several settings apply in declaration order; settings are read back (verified: true, absent = the device can't report it); `switches: true` means a physical effect: ask the user first",
+                "rules": "numbers need their unit (330c, 250ma, 1.5kohm; prefixes are case-sensitive: m milli, M mega); the device range (min/max) and the bench limit are checked before anything is sent (limit_exceeded); several settings apply in declaration order, except that a boolean `switches` setting set to off is sent first; settings are read back (verified: true, absent = the device can't report it); `switches: true` means a physical effect: ask the user first",
                 "values": "numbers come in the declared unit without prefixes; a value declared with `units` comes as { value, unit }; absent = not reported",
                 "left_out": "`desk set <device>` and `desk do <device>` list what's possible; `desk set <device> <setting>` and `desk do <device> <action>` (if it needs arguments) describe that one, with the setting's current value if it could be read (value, or value_error). All of them change nothing and end as a usage error, with the listing in data"
             }

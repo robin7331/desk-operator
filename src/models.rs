@@ -456,9 +456,145 @@ fn check_requires(req: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+const WAY_OUT: &str = "a binding of your own with `script = …` replaces the model's";
+
+fn num(v: &toml::Value) -> Option<f64> {
+    match v {
+        toml::Value::Float(f) => Some(*f),
+        toml::Value::Integer(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+fn show(v: &toml::Value) -> String {
+    match v {
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Integer(i) => i.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn too_loose(path: &str, device: &toml::Value, model: &toml::Value, word: &str) -> String {
+    format!(
+        "`{path}` = {} is {word} the model's {} (a device can tighten what its model states, \
+         not loosen it; {WAY_OUT})",
+        show(device),
+        show(model)
+    )
+}
+
+fn model_owned(path: &str) -> String {
+    format!("`{path}` belongs to the model and can't be changed here ({WAY_OUT})")
+}
+
+fn check_switches(
+    path: &str,
+    model: &toml::Table,
+    device: &toml::Table,
+) -> std::result::Result<(), String> {
+    let lowers = device.get("switches") == Some(&toml::Value::Boolean(false))
+        && model.get("switches") != Some(&toml::Value::Boolean(false));
+    if lowers {
+        return Err(model_owned(&format!("{path}.switches")));
+    }
+    Ok(())
+}
+
+fn check_decl(
+    path: &str,
+    model: &toml::Table,
+    device: &toml::Table,
+) -> std::result::Result<(), String> {
+    if let (Some(m), Some(d)) = (
+        model.get("max").and_then(num),
+        device.get("max").and_then(num),
+    ) && d > m
+    {
+        return Err(too_loose(
+            &format!("{path}.max"),
+            &device["max"],
+            &model["max"],
+            "above",
+        ));
+    }
+    if let (Some(m), Some(d)) = (
+        model.get("min").and_then(num),
+        device.get("min").and_then(num),
+    ) && d < m
+    {
+        return Err(too_loose(
+            &format!("{path}.min"),
+            &device["min"],
+            &model["min"],
+            "below",
+        ));
+    }
+    for k in ["type", "unit", "units", "choices"] {
+        if let Some(d) = device.get(k)
+            && model.get(k) != Some(d)
+        {
+            return Err(model_owned(&format!("{path}.{k}")));
+        }
+    }
+    check_switches(path, model, device)
+}
+
+/// Check that a device's own values only tighten what its model states: `ratings` may be lowered,
+/// a declared `max` lowered and `min` raised, and a declared name keeps its `type`, `unit`,
+/// `units`, `choices` and `switches`. Names and keys the model doesn't have are free.
+pub fn check_tightens(
+    model: &toml::Table,
+    device: &toml::Table,
+) -> std::result::Result<(), String> {
+    let table = |t: &toml::Table, k: &str| match t.get(k) {
+        Some(toml::Value::Table(x)) => Some(x.clone()),
+        _ => None,
+    };
+    if let (Some(m), Some(d)) = (table(model, "ratings"), table(device, "ratings")) {
+        for (k, dv) in &d {
+            if let Some(mv) = m.get(k)
+                && let (Some(dn), Some(mn)) = (num(dv), num(mv))
+                && dn > mn
+            {
+                return Err(too_loose(&format!("ratings.{k}"), dv, mv, "above"));
+            }
+        }
+    }
+    for section in ["values", "settings"] {
+        let (Some(m), Some(d)) = (table(model, section), table(device, section)) else {
+            continue;
+        };
+        for (name, dd) in &d {
+            if let (Some(toml::Value::Table(md)), toml::Value::Table(dd)) = (m.get(name), dd) {
+                check_decl(&format!("{section}.{name}"), md, dd)?;
+            }
+        }
+    }
+    if let (Some(m), Some(d)) = (table(model, "actions"), table(device, "actions")) {
+        for (name, da) in &d {
+            let (Some(toml::Value::Table(ma)), toml::Value::Table(da)) = (m.get(name), da) else {
+                continue;
+            };
+            let path = format!("actions.{name}");
+            check_switches(&path, ma, da)?;
+            if let (Some(margs), Some(dargs)) = (table(ma, "args"), table(da, "args")) {
+                for (arg, dd) in &dargs {
+                    if let (Some(toml::Value::Table(md)), toml::Value::Table(dd)) =
+                        (margs.get(arg), dd)
+                    {
+                        check_decl(&format!("{path}.args.{arg}"), md, dd)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Merge a device's own binding table over a model's: tables merge key by key (e.g. adding
 /// `port.serial_number`), other values are replaced. A device table with its own `script` or
-/// `provider` replaces the model's binding entirely.
+/// `provider` replaces the model's binding entirely. `check_tightens` guards the model's
+/// `ratings` and declarations and runs before this.
 pub fn merge(model: &toml::Table, device: &toml::Table) -> toml::Table {
     if device.contains_key("script") || device.contains_key("provider") {
         return device.clone();
@@ -522,6 +658,71 @@ mod tests {
         assert_eq!(
             resolve_relative(Path::new("/lib/acme/psu/model.toml"), "../shared/x.lua"),
             PathBuf::from("/lib/acme/shared/x.lua")
+        );
+    }
+
+    #[test]
+    fn devices_tighten_but_never_loosen() {
+        let ratings = t("ratings = { max_voltage = 30.0, max_current = 5.0 }");
+        let ok = |m: &toml::Table, d: &str| {
+            let r = check_tightens(m, &t(d));
+            assert!(r.is_ok(), "{d}: {r:?}");
+        };
+        let err = |m: &toml::Table, d: &str, what: &str| {
+            let r = check_tightens(m, &t(d));
+            assert!(r.as_ref().is_err_and(|e| e.contains(what)), "{d}: {r:?}");
+        };
+        ok(&ratings, "ratings = { max_voltage = 12 }");
+        ok(&ratings, "ratings = { max_voltage = 30 }");
+        err(
+            &ratings,
+            "ratings = { max_voltage = 100.0 }",
+            "ratings.max_voltage",
+        );
+        ok(&ratings, "ratings = { max_power = 50.0 }");
+        ok(
+            &ratings,
+            "port = { serial_number = \"X\" }\nparams = { max_voltage = 99 }",
+        );
+
+        let s = t("[settings]\nrange = { type = \"number\", unit = \"V\", min = 0.1, max = 1000 }");
+        ok(&s, "settings = { range = { max = 500 } }");
+        err(
+            &s,
+            "settings = { range = { max = 5000 } }",
+            "settings.range.max",
+        );
+        err(
+            &s,
+            "settings = { range = { min = 0.01 } }",
+            "settings.range.min",
+        );
+        ok(&s, "settings = { range = { min = 1 } }");
+        err(
+            &s,
+            "settings = { range = { unit = \"mV\" } }",
+            "settings.range.unit",
+        );
+        ok(&s, "settings = { range = { unit = \"V\" } }");
+        err(
+            &s,
+            "settings = { range = { switches = false } }",
+            "settings.range.switches",
+        );
+        ok(&s, "settings = { extra = { type = \"boolean\" } }");
+
+        let a = t(
+            "[actions]\nboost = { switches = true, args = { seconds = { type = \"number\", unit = \"s\", min = 1, max = 60 } } }",
+        );
+        err(
+            &a,
+            "actions = { boost = { args = { seconds = { max = 600 } } } }",
+            "actions.boost.args.seconds.max",
+        );
+        err(
+            &a,
+            "actions = { boost = { switches = false } }",
+            "actions.boost.switches",
         );
     }
 

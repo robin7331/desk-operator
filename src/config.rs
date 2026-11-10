@@ -308,14 +308,22 @@ impl DeviceLimits {
         self.caps.is_empty()
     }
 
-    /// The bench limit of one setting, for a channel (a channel's own limit wins).
+    /// The bench limit of one setting, for a channel. A channel's own `min`/`max` win; a bound
+    /// the channel doesn't give stays the general one.
     pub fn get(&self, cap: &str, setting: &str, channel: Option<&str>) -> Option<Limit> {
         let c = self.caps.get(cap)?;
-        channel
+        let all = c.all.get(setting).copied();
+        let own = channel
             .and_then(|ch| c.channels.get(ch))
             .and_then(|l| l.get(setting))
-            .or_else(|| c.all.get(setting))
-            .copied()
+            .copied();
+        match (own, all) {
+            (Some(own), Some(all)) => Some(Limit {
+                min: own.min.or(all.min),
+                max: own.max.or(all.max),
+            }),
+            (own, all) => own.or(all),
+        }
     }
 
     /// The `voltage_source` limits in its own form.
@@ -399,6 +407,11 @@ fn parse_limits(
                     return Err(format!("`{key}.{name}` must be >= 0"));
                 }
             }
+            if let (Some(lo), Some(hi)) = (l.min, l.max)
+                && lo > hi
+            {
+                return Err(format!("`{key}.{name}`: `min` is above `max`"));
+            }
             Ok(l)
         };
         let mut c = CapLimits::default();
@@ -415,6 +428,18 @@ fn parse_limits(
                 c.channels.insert(name.clone(), m);
             } else {
                 c.all.insert(name.clone(), one(name, v).map_err(bad)?);
+            }
+        }
+        for (ch, settings) in &c.channels {
+            for (name, own) in settings {
+                let all = c.all.get(name).copied().unwrap_or_default();
+                if let (Some(lo), Some(hi)) = (own.min.or(all.min), own.max.or(all.max))
+                    && lo > hi
+                {
+                    return Err(bad(format!(
+                        "`{key}.{ch}.{name}`: `min` is above `max` (together with the limit for every channel)"
+                    )));
+                }
             }
         }
         limits.caps.insert(key.clone(), c);
@@ -470,6 +495,7 @@ fn build_binding(
         (None, None) => return Ok(None),
         (None, Some(def)) => (def.clone(), false),
         (Some(own), Some(def)) if !own.contains_key("script") && !own.contains_key("provider") => {
+            models::check_tightens(def, own).map_err(bad)?;
             (models::merge(def, own), false)
         }
         // The device's own binding (paths relative to the config file).
@@ -732,6 +758,46 @@ fn resolve_script_path(binding: Binding, config_path: &Path) -> Binding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_limits_override_bound_by_bound() {
+        use crate::declared::Limit;
+        let mut all = IndexMap::new();
+        all.insert(
+            "setpoint".to_string(),
+            Limit {
+                min: None,
+                max: Some(380.0),
+            },
+        );
+        let mut ch2 = IndexMap::new();
+        ch2.insert(
+            "setpoint".to_string(),
+            Limit {
+                min: Some(100.0),
+                max: None,
+            },
+        );
+        let mut channels = IndexMap::new();
+        channels.insert("ch2".to_string(), ch2);
+        let mut caps = IndexMap::new();
+        caps.insert("heater".to_string(), CapLimits { all, channels });
+        let l = DeviceLimits { caps };
+        let max = Some(Limit {
+            min: None,
+            max: Some(380.0),
+        });
+        assert_eq!(
+            l.get("heater", "setpoint", Some("ch2")),
+            Some(Limit {
+                min: Some(100.0),
+                max: Some(380.0)
+            })
+        );
+        assert_eq!(l.get("heater", "setpoint", Some("ch1")), max);
+        assert_eq!(l.get("heater", "setpoint", None), max);
+        assert_eq!(l.get("heater", "other", Some("ch2")), None);
+    }
 
     fn parse(text: &str) -> Result<Config> {
         Config::parse(text, PathBuf::from("/bench/desk.toml"))

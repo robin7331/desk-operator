@@ -17,18 +17,19 @@ id       = "fnirsi/ips3608"
 name     = "FNIRSI IPS3608"
 requires = "desk-operator >= 0.1"
 status   = "tested"
-tested   = ["firmware V1.1 / hardware V1.2"]
+tested   = ["hardware V1.1 / firmware V1.2 (Nov 2026)"]
 sources  = ["https://github.com/hamsternz/fnirsi_psu"]
 
 [source]
 script  = "../shared/dps150_protocol.lua"
 port    = { usb_vid = 0x2e3c, usb_pid = 0x5740 }
-ratings = { max_voltage = 36.0, max_current = 8.0 }
+ratings = { max_voltage = 36.0, max_current = 8.0, max_power = 285.0 }
 
 [source.params]
-name      = "IPS3608"
-settle_ms = 1000
-status    = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, output = 107 }
+name        = "IPS3608"
+settle_ms   = 1000
+input_query = true
+status = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, temperature = 24, charge = 99, energy = 103, output = 107, protection = 108, mode = 109 }
 ```
 
 ## `[model]`
@@ -56,15 +57,16 @@ up per bench).
 | `[source]` | `voltage_source` (a bench power supply), well-known | `set_voltage`, `set_current`, `set_output`, `read`; optional `open`, `close`, `info` | `ratings` with `max_voltage`, `max_current` |
 | any other name (`[meter]`, `[heater]`, …) | a **declared** capability | `read`, `set`, `action` as its declarations need; optional `open`, `close` | at least one of `values`, `settings`, `actions` |
 
-Names: lowercase letters, digits, `_`; not `model` or `mains`. A table without declarations
-(e.g. a typo like `[sorce]`) is an error, not a new capability.
+Names: lowercase letters, digits, `_`; not `mains` and not a device key (`name`, `model`, `aliases`,
+`limits`). A table without declarations (e.g. a typo like `[sorce]`) is an error, not a new
+capability.
 
 The well-known capabilities have names fixed by the core, so every power supply looks the same:
 `source` has the settings `voltage`, `current`, `output` and the values `measured_voltage`,
 `measured_current`, `measured_power`, `mode`, `protection`, `temperature`, `input_voltage`,
 `charge`, `energy` (whatever the driver's `read()` reports), and the core's stricter rules
-(setpoints before output, protection handling). `source` may declare `channels`, but no extra
-values, settings or actions yet.
+(setpoints before switching on, switching off first, protection handling). `source` may declare
+`channels`, but no extra values, settings or actions yet.
 
 ### Declarations (declared capabilities)
 
@@ -177,10 +179,16 @@ limits = { heater = { setpoint = 380, ch2 = { setpoint = 300 } } }   # a number 
 ```
 
 Limits are per capability and setting: a number is the maximum, `{ min = …, max = … }` both. A
-table named like a channel overrides them for that channel. `source` limits are maximums.
+table named like a channel overrides them for that channel, bound by bound: a channel that only
+gives a `min` keeps the general `max`. A `min` above the `max` is an error. `source` limits are
+maximums.
 
 The device's tables **merge** into the model's key by key (tables merge, values replace). A
 device table with its own `script` or `provider` replaces the model's binding entirely.
+
+A device can tighten what its model states (lower `ratings` and `max`, higher `min`) but not
+loosen it or change a declared name's `type`, `unit`, `choices` or `switches`: that is
+`config_invalid`.
 
 ## Tooling
 

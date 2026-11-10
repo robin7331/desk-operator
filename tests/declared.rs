@@ -721,6 +721,49 @@ fn lua_driver_readings_are_checked_against_the_declarations() {
     );
 }
 
+#[test]
+fn a_channel_minimum_keeps_the_general_maximum() {
+    let cfg = RELAYS.replace(
+        "limits = { board = { delay = 5, ch2 = { delay = 1 } } }",
+        "limits = { board = { delay = 5, ch2 = { delay = { min = 1 } } } }",
+    );
+    assert_ne!(cfg, RELAYS);
+    let b = Bench::with(&cfg);
+    b.file("relays.lua", RELAYS_DRIVER);
+    let out = b.run(&["--json", "set", "relays:ch2", "delay", "6s"]);
+    assert_eq!(out.code_str(), "limit_exceeded", "{}", out.message());
+    let out = b.run(&["--json", "set", "relays:ch2", "delay", "0.5s"]);
+    assert_eq!(out.code_str(), "limit_exceeded", "{}", out.message());
+    assert!(out.message().contains("below"), "{}", out.message());
+    let out = b.run(&["--json", "set", "relays:ch2", "delay", "3s"]);
+    assert_eq!(out.code, 0, "{}", out.message());
+    let out = b.run(&["--json", "set", "relays:ch1", "delay", "0.5s"]);
+    assert_eq!(out.code, 0, "{}", out.message());
+}
+
+#[test]
+fn impossible_limits_are_a_config_error() {
+    for line in [
+        "limits = { board = { delay = { min = 4, max = 2 } } }",
+        "limits = { board = { delay = 5, ch2 = { delay = { min = 6 } } } }",
+    ] {
+        let cfg = RELAYS.replace(
+            "limits = { board = { delay = 5, ch2 = { delay = 1 } } }",
+            line,
+        );
+        assert_ne!(cfg, RELAYS);
+        let b = Bench::with(&cfg);
+        b.file("relays.lua", RELAYS_DRIVER);
+        let out = b.run(&["--json", "get", "relays"]);
+        assert_eq!(out.code_str(), "config_invalid", "{line}");
+        assert!(
+            out.message().contains("`min` is above `max`"),
+            "{}",
+            out.message()
+        );
+    }
+}
+
 const RELAYS: &str = r#"
 [devices.relays]
 limits = { board = { delay = 5, ch2 = { delay = 1 } } }
@@ -777,6 +820,37 @@ fn channels_are_addressed_and_limited_one_by_one() {
     assert!(out.stdout.contains("channel ch2:"), "{}", out.stdout);
 }
 
+const SINK: &str = r#"
+[devices.load.sink]
+script = "sink.lua"
+settings = { level = { type = "number", unit = "A", min = 0, max = 10 }, enabled = { type = "boolean" } }
+"#;
+
+const SINK_DRIVER: &str = r#"
+local s = { level = 0, enabled = true }
+function read(ctx) return { level = s.level, enabled = s.enabled } end
+function set(ctx, name, value) ctx.log("set " .. name); s[name] = value end
+"#;
+
+#[test]
+fn switching_off_comes_before_other_settings() {
+    let b = Bench::with(SINK);
+    b.file("sink.lua", SINK_DRIVER);
+    let out = b.run(&["--json", "set", "load", "level", "5a", "enabled", "off"]);
+    assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
+    let log = out.data()["log"].to_string();
+    let (e, l) = (log.find("set enabled"), log.find("set level"));
+    assert!(e.is_some() && l.is_some() && e < l, "{log}");
+
+    let b = Bench::with(SINK);
+    b.file("sink.lua", SINK_DRIVER);
+    let out = b.run(&["--json", "set", "load", "level", "3a", "enabled", "on"]);
+    assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
+    let log = out.data()["log"].to_string();
+    let (e, l) = (log.find("set enabled"), log.find("set level"));
+    assert!(e.is_some() && l.is_some() && l < e, "{log}");
+}
+
 #[test]
 fn power_supplies_can_have_channels() {
     let b = Bench::with(
@@ -810,6 +884,51 @@ function read(ctx) return { voltage_set = s[ctx.channel].v } end
         d["channels"]["1"].is_object() && d["channels"]["2"].is_object(),
         "{d}"
     );
+}
+
+#[test]
+fn a_source_driver_reporting_nan_is_refused() {
+    let b = Bench::with(
+        r#"
+[devices.psu]
+source = { script = "psu.lua", ratings = { max_voltage = 30, max_current = 3 } }
+limits = { source = { voltage = 12 } }
+"#,
+    );
+    b.file(
+        "psu.lua",
+        r#"
+function set_voltage(ctx, v) end
+function set_current(ctx, a) end
+function set_output(ctx, on) end
+function read(ctx) return { voltage_set = 0/0, output = false } end
+"#,
+    );
+    let out = b.run(&["--json", "set", "psu", "output", "on"]);
+    assert_eq!(out.code_str(), "script_failed", "{}", out.message());
+    assert!(out.message().contains("voltage_set"), "{}", out.message());
+    let out = b.run(&["--json", "get", "psu"]);
+    assert_eq!(out.code_str(), "script_failed", "{}", out.message());
+
+    let b = Bench::with(
+        r#"
+[devices.psu]
+source = { script = "psu.lua", ratings = { max_voltage = 30, max_current = 3 } }
+"#,
+    );
+    b.file(
+        "psu.lua",
+        r#"
+function set_voltage(ctx, v) end
+function set_current(ctx, a) end
+function set_output(ctx, on) end
+function read(ctx) return { voltage_set = 5, output = false } end
+function info(ctx) return { max_voltage = 0/0 } end
+"#,
+    );
+    let out = b.run(&["--json", "set", "psu", "voltage", "5v"]);
+    assert_eq!(out.code_str(), "script_failed", "{}", out.message());
+    assert!(out.message().contains("max_voltage"), "{}", out.message());
 }
 
 #[test]
@@ -943,6 +1062,54 @@ hold = { switches = false, args = { mode = { type = "choice", choices = ["on", "
         "{}",
         out.stdout
     );
+}
+
+fn dmm_bench(device_line: &str) -> Bench {
+    let b = Bench::with(&format!(
+        "[devices.dmm]\nmodel = \"acme/dmm-1\"\n{device_line}\n"
+    ));
+    b.file(
+        "models/acme/dmm-1/model.toml",
+        r#"
+[model]
+id = "acme/dmm-1"
+name = "ACME DMM 1"
+requires = "desk-operator >= 0.1"
+status = "community"
+
+[meter]
+script = "meter.lua"
+
+[meter.settings]
+range = { type = "number", unit = "V", min = 0.1, max = 1000 }
+function = { type = "choice", choices = ["dcv", "ohm"], switches = false }
+
+[meter.values]
+reading = { type = "number", units = ["V", "Ω"] }
+overload = { type = "boolean" }
+
+[meter.actions]
+hold = { switches = false, args = { mode = { type = "choice", choices = ["on", "off"] } } }
+"#,
+    );
+    b.file(
+        "models/acme/dmm-1/meter.lua",
+        &METER_DRIVER.replace(
+            "PARAMS = {}",
+            "PARAMS = { range_default = { type = \"number\", doc = \"x\" } }",
+        ),
+    );
+    b
+}
+
+#[test]
+fn a_device_cannot_widen_a_models_setting() {
+    let b = dmm_bench("meter = { settings = { range = { max = 5000 } } }");
+    let out = b.run(&["--json", "get", "dmm"]);
+    assert_eq!(out.code_str(), "config_invalid", "{}", out.stdout);
+    let b = dmm_bench("meter = { settings = { range = { max = 500 } } }");
+    let out = b.run(&["--json", "set", "dmm", "range", "600v"]);
+    assert_eq!(out.code_str(), "limit_exceeded", "{}", out.stdout);
 }
 
 #[test]

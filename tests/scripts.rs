@@ -310,6 +310,66 @@ fn sandbox_has_no_io_os_or_modules() {
 }
 
 #[test]
+fn sandbox_refuses_binary_chunks() {
+    let b = bench(
+        r#"
+        function on(ctx)
+          ctx.log(type(string.dump), type(("x").dump))
+          ctx.log(load("return 1 + 1")())
+          ctx.log(load("return x", "chunk", "t", { x = 7 })())
+          local f, err = load("\27Lua")
+          ctx.log(tostring(f), err)
+          local g, err2 = load("\27Lua", "chunk", "b")
+          ctx.log(tostring(g), err2)
+        end
+        function off(ctx) end
+        "#,
+        "",
+    );
+    let out = b.run(&["--json", "power", "on", "dev"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let log = &out.json()["data"]["results"][0]["log"];
+    assert_eq!(log[0], "nil nil");
+    assert_eq!(log[1], "2");
+    assert_eq!(log[2], "7");
+    for i in [3, 4] {
+        let line = log[i].as_str().unwrap_or_default();
+        assert!(
+            line.starts_with("nil ") && line.contains("binary"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn sandbox_limits_memory() {
+    let b = bench(
+        r#"
+        function on(ctx) local s = string.rep("x", 200 * 1024 * 1024) end
+        function off(ctx) end
+        "#,
+        "",
+    );
+    let out = b.run(&["--json", "power", "on", "dev"]);
+    assert_ne!(out.code, 0, "{}", out.stdout);
+    assert_eq!(out.error_code(), "script_failed", "{}", out.stdout);
+}
+
+#[test]
+fn huge_durations_are_script_errors_not_panics() {
+    let b = bench(
+        r#"
+        function on(ctx) ctx.sleep(1e300) end
+        function off(ctx) end
+        "#,
+        "",
+    );
+    let out = b.run(&["--json", "power", "on", "dev"]);
+    assert_eq!(out.error_code(), "script_failed", "{}", out.stdout);
+    assert!(out.error_message().contains("ctx.sleep"), "{}", out.stdout);
+}
+
+#[test]
 fn bad_scripts_are_reported() {
     let syntax = bench("function on(ctx) oops(", "");
     let out = syntax.run(&["--json", "power", "on", "dev"]);

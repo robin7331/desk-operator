@@ -81,10 +81,14 @@ match; if several ports match, add `serial_number` or `path`.
 ```lua
 local port = ctx.serial.open{ baud = 115200 }   -- opens the binding's port
 port:write(string.pack("<BBf", 0xF1, 0xC1, 5.0)) -- bytes are Lua strings
-local reply = port:read(17, 500)                 -- up to 17 bytes within 500 ms (may be fewer, or "")
+local reply = port:read(17, 500)                 -- 17 bytes, or what came within 500 ms (maybe "")
 port:clear()                                     -- drop input that arrived but wasn't read
 port:close()                                     -- also happens automatically after the command
 ```
+
+`port:read(max, ms)` waits the whole timeout unless `max` bytes arrive, so for line-based text
+protocols read one byte at a time until the line ending. The timeout defaults to 1 s. `port.path`
+is the path of the opened port.
 
 | `open{…}` option | Default | |
 |---|---|---|
@@ -129,7 +133,8 @@ function close(ctx) end              -- optional: end of a session (always calle
 - A value declared with `units = [...]` is returned as `{ value = 4.98, unit = "V" }`.
 - `set` and `action` get values that desk already parsed (units), converted (to the declared
   unit) and checked (range, bench limits). Several settings of one command arrive one by one, in
-  declaration order; desk calls `read()` afterwards to verify them.
+  declaration order, except that a boolean setting with `switches` that is set to off/false is
+  sent first; desk calls `read()` afterwards to verify them.
 - With `channels`, every call sees `ctx.channel`.
 
 Everything else is desk's, the same for every driver: units, ranges and limits before anything is
@@ -197,8 +202,8 @@ every driver:
 - **Limits:** values above `info()`'s maximum or the device's bench `limits` are refused before
   the driver is called. Switching the output on is also refused when the device *already* holds a
   setpoint above the bench limits (as far as `read()` reports it).
-- **Order:** voltage, then current, then output (`desk set psu output on voltage 5v` is applied
-  in that order too).
+- **Order:** voltage and current before the output is switched on (`desk set psu output on
+  voltage 5v` is applied in that order). When a command switches the output off, that comes first.
 - **Channels:** with `channels = 2` on the binding, every call sees `ctx.channel`; users address
   `psu:1`, and `limits` can be per channel (`limits = { source = { voltage = 12, "2" = { voltage
   = 5 } } }`).
@@ -213,9 +218,11 @@ every driver:
 ## Sandbox
 
 Only the `string`, `table`, `math`, `utf8` and `coroutine` libraries are available. There is no
-`io`, `os`, `require`/`package`, `debug`, `dofile` or `loadfile`: a script can only reach the outside
-world through `ctx`. `print` writes to the log, so `--json` output stays parseable. The timeout also
-interrupts busy loops.
+`io`, `os`, `require`/`package`, `debug`, `dofile`, `loadfile` or `string.dump`: a script can only
+reach the outside world through `ctx`. `load` compiles source text only, never precompiled chunks.
+A script may use up to 64 MiB of memory. One `port:read` returns at most 64 KiB; ask again for more.
+`print` writes to the log, so `--json` output stays parseable. The timeout also interrupts busy
+loops written in Lua.
 
 ## Examples
 

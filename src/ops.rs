@@ -8,7 +8,8 @@
 //! the daemon's live session of a watched device.
 //!
 //! Power supplies keep their stricter rules: their part of an op runs through
-//! [`crate::source::apply`] (setpoints before output, protection handling, limits on switch-on).
+//! [`crate::source::apply`] (setpoints before switching on, switching off first, protection
+//! handling, limits on switch-on).
 
 use std::time::Duration;
 

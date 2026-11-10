@@ -324,7 +324,9 @@ standby  = { switches = true, doc = "heater to standby temperature" }
   is sent. `tolerance`: how far a read-back may differ (default 0.5 %).
 - **`switches`:** true for anything with a physical effect (heats, outputs, moves, energizes). Agents
   ask the user before those. Be honest: when in doubt, true.
-- Settings apply in declaration order: declare the safe order (e.g. a setpoint before `enabled`).
+- Settings apply in declaration order: declare the safe order for switching on (e.g. a setpoint
+  before `enabled`). desk sends a switch-off (a boolean `switches` setting set to false) first by
+  itself.
 - Something only the rotary knob changes is a **value**, not a setting.
 - `channels = 2` (or a list of names) for multi-channel devices: the driver gets `ctx.channel`.
 

@@ -173,6 +173,23 @@ fn binary_frames_with_string_pack() {
 }
 
 #[test]
+fn a_huge_read_count_is_capped() {
+    let dev = FakeDevice::start();
+    let dir = bench(
+        &script(
+            r#"
+            local port = ctx.serial.open{}
+            local t = port:read(1099511627776, 100)
+            ctx.log(#t)"#,
+        ),
+        &path_port(&dev),
+    );
+    let out = run(dir.path(), &["--json", "power", "on", "dev"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert_eq!(out.log(0), "0");
+}
+
+#[test]
 fn read_returns_what_arrived_within_the_timeout() {
     let dev = FakeDevice::start();
     let dir = bench(

@@ -1,5 +1,6 @@
 //! The `voltage_source` capability (bench power supplies) and the semantics shared by every
-//! driver: limit checks, setpoints before output, read-back verification, sessions.
+//! driver: limit checks, setpoints before switching on (switching off before setpoints),
+//! read-back verification, sessions.
 //!
 //! Drivers only implement the primitive operations. Everything a user relies on for safety lives
 //! here, so it holds for every driver, native or Lua.
@@ -43,6 +44,18 @@ impl SourceInfo {
             max_current: min(self.max_current, other.max_current),
             max_power: min(self.max_power, other.max_power),
         }
+    }
+
+    /// The first maximum that isn't a finite number, if any (a driver bug).
+    pub fn non_finite(&self) -> Option<&'static str> {
+        [
+            ("max_voltage", self.max_voltage),
+            ("max_current", self.max_current),
+            ("max_power", self.max_power),
+        ]
+        .into_iter()
+        .find(|(_, v)| v.is_some_and(|v| !v.is_finite()))
+        .map(|(name, _)| name)
     }
 }
 
@@ -88,6 +101,26 @@ pub struct Reading {
     pub charge: Option<f64>,
     /// Energy delivered since the device's counter was reset, Wh.
     pub energy: Option<f64>,
+}
+
+impl Reading {
+    /// The first number that isn't finite, if any (a driver bug, e.g. a badly decoded frame).
+    pub fn non_finite(&self) -> Option<&'static str> {
+        [
+            ("voltage_set", self.voltage_set),
+            ("current_set", self.current_set),
+            ("voltage", self.voltage),
+            ("current", self.current),
+            ("power", self.power),
+            ("temperature", self.temperature),
+            ("input_voltage", self.input_voltage),
+            ("charge", self.charge),
+            ("energy", self.energy),
+        ]
+        .into_iter()
+        .find(|(_, v)| v.is_some_and(|v| !v.is_finite()))
+        .map(|(name, _)| name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,8 +266,8 @@ pub struct Report {
     pub applied: bool,
 }
 
-/// Apply a request: check limits, set voltage, set current, switch output (in that order), then
-/// read back and verify. With `dry_run`, only reads and checks.
+/// Apply a request: check limits, set voltage, set current, switch output on (switching off comes
+/// first), then read back and verify. With `dry_run`, only reads and checks.
 pub async fn apply(
     src: &dyn VoltageSource,
     req: Request,
@@ -288,14 +321,18 @@ pub async fn apply(
         });
     }
 
+    // Switching off comes first: a new setpoint must never reach a live output on its way off.
+    if req.output == Some(false) {
+        src.set_output(false).await?;
+    }
     if let Some(v) = req.voltage {
         src.set_voltage(v).await?;
     }
     if let Some(a) = req.current {
         src.set_current(a).await?;
     }
-    if let Some(on) = req.output {
-        src.set_output(on).await?;
+    if req.output == Some(true) {
+        src.set_output(true).await?;
     }
 
     let reading = src.read().await?;
@@ -537,6 +574,24 @@ mod tests {
     }
 
     #[test]
+    fn output_off_comes_before_setpoints() {
+        let f = Fake {
+            readback: true,
+            ..Fake::default()
+        };
+        let r = run(apply(
+            &f,
+            req(Some(12.0), Some(1.0), Some(false)),
+            Limits::default(),
+            SourceInfo::default(),
+            false,
+        ))
+        .unwrap();
+        assert_eq!(f.calls(), ["out=false", "v=12", "a=1"]);
+        assert!(r.verified.all());
+    }
+
+    #[test]
     fn unreadable_setpoints_are_unverified_not_confirmed() {
         let f = Fake::default();
         let r = run(apply(
@@ -670,5 +725,20 @@ mod tests {
         .unwrap();
         assert!(!r.applied);
         assert!(f.calls().is_empty());
+    }
+
+    #[test]
+    fn non_finite_fields_are_named() {
+        assert_eq!(Reading::default().non_finite(), None);
+        let r = Reading {
+            current_set: Some(f64::NAN),
+            ..Reading::default()
+        };
+        assert_eq!(r.non_finite(), Some("current_set"));
+        let i = SourceInfo {
+            max_voltage: Some(f64::INFINITY),
+            ..SourceInfo::default()
+        };
+        assert_eq!(i.non_finite(), Some("max_voltage"));
     }
 }

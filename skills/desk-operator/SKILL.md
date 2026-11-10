@@ -114,8 +114,9 @@ the first failure only.
   is reached, e.g. a short or a charging battery), `protection` (`none` or what tripped),
   `temperature`, `input_voltage`, `charge`/`energy` (Ah/Wh counters).
 - Set the current limit together with the voltage when the user gave one
-  (`desk set psu voltage 5v current 500ma`). desk applies setpoints before the output, whatever
-  order you write them in. Add `output on` only when the user wants the output on.
+  (`desk set psu voltage 5v current 500ma`). desk applies setpoints before switching the output on,
+  and switches it off first, whatever order you write them in. Add `output on` only when the user
+  wants the output on.
 - A tripped protection blocks `output on` (`protection_tripped`). `--clear-protection` overrides
   that and switches the output back on, so it's the user's call, never yours.
 
@@ -153,7 +154,8 @@ limits  = { source = { voltage = 12, current = 2 } }            # ask the user f
 ```
 
 Values in the device merge into the model's bindings. Never copy bench-specific things
-(entities, limits, serial numbers) into a model.
+(entities, limits, serial numbers) into a model. A device can lower a model's maximums, never
+raise them (`config_invalid`).
 
 After editing it, check with `desk device list --json`. Lua power scripts are documented in the
 project's `docs/scripting.md`.

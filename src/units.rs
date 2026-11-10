@@ -201,12 +201,16 @@ pub fn parse(input: &str, unit: Option<&str>) -> Result<f64, String> {
     if suffix.is_empty() {
         return Err(format!("`{input}` needs a unit: {}", example(unit)));
     }
-    factor(suffix, unit).map(|f| number * f).ok_or_else(|| {
+    let value = factor(suffix, unit).map(|f| number * f).ok_or_else(|| {
         format!(
             "`{input}`: `{suffix}` is not a unit for {unit} ({})",
             example(unit)
         )
-    })
+    })?;
+    if !value.is_finite() {
+        return Err(format!("`{input}` is not a finite number"));
+    }
+    Ok(value)
 }
 
 /// The factor that turns a typed suffix into the declared unit, if it is a spelling of it.
@@ -300,6 +304,10 @@ mod tests {
         assert!(parse("5v", None).unwrap_err().contains("no unit"));
         assert_eq!(parse("42", None).unwrap(), 42.0);
         assert!(parse("1e999v", Some("V")).is_err(), "not finite");
+        assert!(
+            parse("1e308kv", Some("V")).is_err(),
+            "not finite after the prefix"
+        );
     }
 
     #[test]

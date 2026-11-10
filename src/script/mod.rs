@@ -8,7 +8,9 @@
 //! so keep it small and stable.
 //!
 //! Sandbox: only the `table`, `string`, `math`, `utf8` and `coroutine` libraries are loaded, and
-//! `dofile`/`loadfile` are removed, so there is no file, OS or network access except through `ctx`.
+//! `dofile`/`loadfile`/`string.dump` are removed, so there is no file, OS or network access except
+//! through `ctx`. `load` only takes source text (binary chunks are unverified bytecode), and each
+//! state has a memory limit.
 //! `print` goes to the log. A global instruction hook enforces the timeout even in busy loops.
 
 pub mod declared;
@@ -36,6 +38,12 @@ pub use source::ScriptSource;
 
 /// How often (in VM instructions) the timeout hook runs.
 const HOOK_EVERY: u32 = 10_000;
+
+/// Memory one script may use. Drivers need kilobytes; this stops a runaway allocation.
+const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// The most one `port:read` returns. A read returns "up to" its count, so more is just asked again.
+const MAX_READ: usize = 64 * 1024;
 
 /// Device facts passed to the script as `ctx.device`.
 pub struct DeviceInfo<'a> {
@@ -127,6 +135,7 @@ impl Engine {
             LuaOptions::default(),
         )
         .map_err(internal)?;
+        lua.set_memory_limit(MEMORY_LIMIT).map_err(internal)?;
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let deadline = Arc::new(Mutex::new(Some(Instant::now() + timeout)));
@@ -391,6 +400,20 @@ fn host_api(
     let globals = lua.globals();
     globals.set("dofile", Value::Nil)?;
     globals.set("loadfile", Value::Nil)?;
+    // Lua doesn't verify bytecode, so binary chunks are a way out of the sandbox: nothing can
+    // produce them (`string.dump`) and `load` only takes source text.
+    let string: Table = globals.get("string")?;
+    string.set("dump", Value::Nil)?;
+    lua.load(
+        r#"
+        local raw_load = load
+        load = function(chunk, name, mode, ...)
+          return raw_load(chunk, name, "t", ...)
+        end
+        "#,
+    )
+    .set_name("=sandbox")
+    .exec()?;
 
     let ctx = lua.create_table()?;
 
@@ -423,7 +446,8 @@ fn host_api(
         let d = match arg {
             Value::Integer(ms) if ms >= 0 => Duration::from_millis(ms as u64),
             Value::Number(ms) if ms >= 0.0 && ms.is_finite() => {
-                Duration::from_secs_f64(ms / 1000.0)
+                Duration::try_from_secs_f64(ms / 1000.0)
+                    .map_err(|_| mlua::Error::runtime("ctx.sleep: the duration is too long"))?
             }
             Value::String(s) => humantime::parse_duration(&s.to_str()?)
                 .map_err(|e| mlua::Error::runtime(format!("ctx.sleep: invalid duration: {e}")))?,
@@ -605,7 +629,7 @@ fn port_handle(lua: &Lua, port: Port) -> mlua::Result<Table> {
             async move {
                 let mut a = args(a);
                 let max = match a.pop_front() {
-                    Some(Value::Integer(n)) if n > 0 => n as usize,
+                    Some(Value::Integer(n)) if n > 0 => (n as usize).min(MAX_READ),
                     _ => {
                         return Err(mlua::Error::runtime(
                             "port:read expects a byte count, e.g. port:read(17, 500)",
@@ -616,7 +640,9 @@ fn port_handle(lua: &Lua, port: Port) -> mlua::Result<Table> {
                     None | Some(Value::Nil) => Duration::from_secs(1),
                     Some(Value::Integer(ms)) if ms >= 0 => Duration::from_millis(ms as u64),
                     Some(Value::Number(ms)) if ms >= 0.0 && ms.is_finite() => {
-                        Duration::from_secs_f64(ms / 1000.0)
+                        Duration::try_from_secs_f64(ms / 1000.0).map_err(|_| {
+                            mlua::Error::runtime("port:read: the timeout is too long")
+                        })?
                     }
                     Some(_) => {
                         return Err(mlua::Error::runtime(
