@@ -63,7 +63,7 @@ The well-known capabilities have names fixed by the core, so every power supply 
 `source` has the settings `voltage`, `current`, `output` and the values `measured_voltage`,
 `measured_current`, `measured_power`, `mode`, `protection`, `temperature`, `input_voltage`,
 `charge`, `energy` (whatever the driver's `read()` reports), and the core's stricter rules
-(setpoints before output, protection handling). `source` may declare `channels`, but no extra
+(setpoints before switching on, switching off first, protection handling). `source` may declare `channels`, but no extra
 values, settings or actions yet.
 
 ### Declarations (declared capabilities)

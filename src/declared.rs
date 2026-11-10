@@ -6,7 +6,7 @@
 //! * **action**: something it does on request, optionally with arguments (`standby`)
 //!
 //! The core parses what you type with the unit table, checks the device range and your `limits`
-//! before anything is sent, applies several settings in declaration order, reads back and verifies,
+//! before anything is sent, applies several settings in declaration order (switching off first), reads back and verifies,
 //! and supports dry runs. Drivers only implement `read`, `set` and `action`.
 
 use async_trait::async_trait;
@@ -721,8 +721,8 @@ pub async fn read(
     decode(decls, raw, &drv.label())
 }
 
-/// Apply settings, already parsed and range-checked, in declaration order; then read back and
-/// verify. With `dry_run`, only read.
+/// Apply settings, already parsed and range-checked, in declaration order (a boolean `switches` setting set to
+/// false goes first); then read back and verify. With `dry_run`, only read.
 pub async fn set(
     drv: &dyn Driver,
     decls: &Declarations,
@@ -736,9 +736,22 @@ pub async fn set(
             ..Outcome::default()
         });
     }
-    for name in decls.settings.keys() {
-        if let Some(v) = requested.get(name) {
-            drv.set(channel, name, v).await?;
+    // Switching something off comes first, so a new setpoint never reaches a live device on its
+    // way off. Everything else in declaration order (models declare the safe order for "on").
+    let off_first = |name: &str| {
+        decls
+            .settings
+            .get(name)
+            .is_some_and(|d| d.kind == Type::Boolean && d.switches)
+            && requested.get(name).and_then(Val::as_bool) == Some(false)
+    };
+    for pass_off in [true, false] {
+        for name in decls.settings.keys() {
+            if off_first(name) == pass_off
+                && let Some(v) = requested.get(name)
+            {
+                drv.set(channel, name, v).await?;
+            }
         }
     }
     let values = read(drv, decls, channel).await?;

@@ -114,8 +114,8 @@ the first failure only.
   is reached, e.g. a short or a charging battery), `protection` (`none` or what tripped),
   `temperature`, `input_voltage`, `charge`/`energy` (Ah/Wh counters).
 - Set the current limit together with the voltage when the user gave one
-  (`desk set psu voltage 5v current 500ma`). desk applies setpoints before the output, whatever
-  order you write them in. Add `output on` only when the user wants the output on.
+  (`desk set psu voltage 5v current 500ma`). desk applies setpoints before switching the output on,
+  and switches it off first, whatever order you write them in. Add `output on` only when the user wants the output on.
 - A tripped protection blocks `output on` (`protection_tripped`). `--clear-protection` overrides
   that and switches the output back on, so it's the user's call, never yours.
 
