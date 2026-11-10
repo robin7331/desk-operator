@@ -11,17 +11,18 @@ first if the device is off.
 
 **Status:** M0–M5.1 done: mains power via Home Assistant or Lua scripts, the `voltage_source`
 capability (bench power supplies) with Lua drivers and serial ports, a set of models with a
-specified format, agent-ready CLI (`--json`, `schema`, `skill`). Two real devices so far:
-`fnirsi/ips3608` (smoke-tested) and `owon/xdm1041` (`community`: tried with open leads only).
+specified format, agent-ready CLI (`--json`, `schema`, `skill`). Four models so far
+(see *Supported devices* in `README.md`): `fnirsi/ips3608`, `fnirsi/dps-150`, `owon/xdm1041`,
+`owon/oel1515`.
 **M6, AI skills, done**: `desk skill list|install`, `desk port probe` and the `desk-add-device`
 skill, validated when a fresh session added the XDM1041. Streaming is done: a daemon
 (`desk serve`, started on demand) holds device sessions so `desk watch` streams while other
 commands keep working (`docs/streaming.md`). **M7, open capabilities, done** (`plan.md`,
 "M7"): models declare values, settings and actions; one command set for every device
-(`desk get|set|do|watch`; `desk source` is gone); channels. **Public since 2026-11-09**, first
-release `v0.1.0`: CI, release builds, one-line installers and `desk update`. Still open: validating
-the `desk-setup` skill on a real bench, and real installs and serial devices on macOS and Windows
-(roadmap in `plan.md`).
+(`desk get|set|do|watch`; `desk source` is gone); channels. **Public since 2026-11-09**, releases
+`v0.1.0` and `v0.2.0`: CI, release builds, one-line installers and `desk update`. Still open:
+validating the `desk-setup` skill on a real bench, and real installs and serial devices on macOS
+and Windows (roadmap in `plan.md`).
 Keep it lean: build only what the current milestone needs.
 
 **One public repository**, two parts:
@@ -49,11 +50,11 @@ Keep it lean: build only what the current milestone needs.
 | **Value / setting / action** | What a capability declares: a **value** is reported (`temperature`), a **setting** is reported and changeable (`setpoint`), an **action** is done on request (`standby`). Typed (`number` with a unit, `boolean`, `choice`, `string`), with ranges; `switches` marks a physical effect. |
 | **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which is the `output` setting of `source`. Never mix "power" and "output". |
 | **Capability binding** | One config key per capability: `power`, `source`, or the declared capability's name. Each is a native provider binding or a Lua script. |
-| **Control path** | How a device is commanded (serial, USBTMC, LAN, …). Post-MVP. |
+| **Connection** | What a binding may open to reach its device: a serial `port` today; other kinds (LAN, USBTMC, …) when a device needs one. A driver's connection is part of its capability binding. |
 | **Provider** | A configured connection to something that can switch or control many things, such as Home Assistant, a Shelly, a USB relay board, or an RF dongle. You configure it once. |
 | **Endpoint** | One thing a provider can list and control, such as an HA entity `switch.desk_outlet_1`. Providers can list their endpoints, which is what makes pickers possible. |
 | **Binding** | A device's power path. It is either **native** (`{ provider = "ha", entity = "…" }`) or **script** (`{ script = "x.lua" }`). |
-| **Host API** | The Rust functions exposed to Lua scripts (providers, `sleep`, `log`, later serial/USB). This is the real plugin contract, so keep it small and stable. |
+| **Host API** | The Rust functions exposed to Lua scripts (providers, `sleep`, `log`, `clock`, serial ports). This is the real plugin contract, so keep it small and stable. |
 
 ### Power bindings
 
@@ -105,12 +106,12 @@ default.
 - Rust (stable, 2024 edition), single binary named `desk` (crate `desk-operator`).
 - `clap` (derive), `clap_complete` (feature `unstable-dynamic`: review the shell scripts when
   upgrading it), `tokio`, `reqwest` (rustls, json), `serde`, `toml` (+ `toml_edit` when the CLI
-  edits config), `anyhow` at the CLI edge, `thiserror` in core modules, `directories` for config
-  paths, `inquire` for TTY pickers.
+  edits config), `thiserror` (`DeskError`) everywhere; parse helpers return `String` errors that
+  callers wrap with context, `directories` for config paths, `inquire` for TTY pickers.
 - `mlua` with features `lua54`, `vendored`, `async`, `serialize`. Host functions are async and use
   tokio (`sleep` must be `tokio::time::sleep`, never a thread sleep).
 
-## Layout (MVP: one crate, split into a workspace only when the daemon/UI arrives)
+## Layout (one crate; split into a workspace only when a UI needs a shared library)
 
 ```
 src/

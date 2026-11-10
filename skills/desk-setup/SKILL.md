@@ -75,8 +75,12 @@ desk provider test ha --json
 desk provider endpoints ha --search <text> --json   # the entity for each outlet
 ```
 
-**Anything else** (a USB relay board, an RF dongle, a smart plug without Home Assistant): a Lua
-script binding, documented in `docs/scripting.md` of the desk-operator repository.
+**A USB relay board or an RF dongle** on a serial port: a Lua script binding, documented in
+`docs/scripting.md` of the desk-operator repository.
+
+**A network smart plug without Home Assistant** is not supported yet, because scripts have no
+network access. Use Home Assistant for it, or tell the user it needs a new provider and suggest
+opening an issue.
 
 ## 4. One device at a time
 

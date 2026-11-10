@@ -17,18 +17,19 @@ id       = "fnirsi/ips3608"
 name     = "FNIRSI IPS3608"
 requires = "desk-operator >= 0.1"
 status   = "tested"
-tested   = ["firmware V1.1 / hardware V1.2"]
+tested   = ["hardware V1.1 / firmware V1.2 (Nov 2026)"]
 sources  = ["https://github.com/hamsternz/fnirsi_psu"]
 
 [source]
 script  = "../shared/dps150_protocol.lua"
 port    = { usb_vid = 0x2e3c, usb_pid = 0x5740 }
-ratings = { max_voltage = 36.0, max_current = 8.0 }
+ratings = { max_voltage = 36.0, max_current = 8.0, max_power = 285.0 }
 
 [source.params]
-name      = "IPS3608"
-settle_ms = 1000
-status    = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, output = 107 }
+name        = "IPS3608"
+settle_ms   = 1000
+input_query = true
+status = { voltage_set = 4, current_set = 8, voltage = 12, current = 16, power = 20, temperature = 24, charge = 99, energy = 103, output = 107, protection = 108, mode = 109 }
 ```
 
 ## `[model]`
@@ -56,8 +57,9 @@ up per bench).
 | `[source]` | `voltage_source` (a bench power supply), well-known | `set_voltage`, `set_current`, `set_output`, `read`; optional `open`, `close`, `info` | `ratings` with `max_voltage`, `max_current` |
 | any other name (`[meter]`, `[heater]`, …) | a **declared** capability | `read`, `set`, `action` as its declarations need; optional `open`, `close` | at least one of `values`, `settings`, `actions` |
 
-Names: lowercase letters, digits, `_`; not `model` or `mains`. A table without declarations
-(e.g. a typo like `[sorce]`) is an error, not a new capability.
+Names: lowercase letters, digits, `_`; not `mains` and not a device key (`name`, `model`, `aliases`,
+`limits`). A table without declarations (e.g. a typo like `[sorce]`) is an error, not a new
+capability.
 
 The well-known capabilities have names fixed by the core, so every power supply looks the same:
 `source` has the settings `voltage`, `current`, `output` and the values `measured_voltage`,
