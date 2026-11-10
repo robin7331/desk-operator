@@ -128,13 +128,15 @@ this repository. Addresses below are V1.9.
 - **Writing a preset (`C5`–`D0`) also makes that preset group active**, and OVP/OCP/OPP/OTP
   (`D1`–`D4`) belong to the active group: a preset write can change the active protection
   thresholds. desk sends neither.
-- **Queries `D1`–`D4` seem to read the next group's thresholds** (one 24-byte group further than
-  writes and the full status use). Unverified on hardware; the full status agrees with the writes.
+- **Queries `D1`–`D4` don't return the active thresholds**: they read one 24-byte group further
+  than writes and the full status use. On hardware (V1.2, Nov 2026) they answered 0.0 while the
+  full status had OVP 36, OCP 8, OPP 150, OTP 60; `D5` (LVP) matched at 40. Use the full status.
 - **Constants:** `DE`/`DF`/`E0` are fixed strings (`IPS3608`, `V1.1`, `V1.9`); `E3`–`E8` answer
   8.2, 36, 8.2, 288, 100, 36, while the full status ceilings are 36, 8.2, 36, 8.2, 288, 99, 48.
 - **The full status query sets the input voltage variable to 48.0** (the constant at offset 0)
   until the next measurement updates it, so query `C0` right after `FF` could in theory answer
-  48.0. Not seen so far on hardware.
+  48.0. Not seen on hardware: 200 readings in a row at ~18 per second (V1.2, Nov 2026) all had
+  the measured input (45.73–45.75 V).
 - **Pushed** every 500 ms: `C3`, `C4`, and `D9`, `DA` while metering is on; `DB`, `DC`, `DD`
   when they change.
 
