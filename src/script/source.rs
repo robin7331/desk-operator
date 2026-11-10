@@ -60,11 +60,18 @@ impl VoltageSource for ScriptSource {
             return Ok(SourceInfo::default());
         }
         let v = self.engine.call("info", Value::Nil).await?;
-        self.engine.decode(
+        let info: SourceInfo = self.engine.decode(
             "info",
             "a table like { max_voltage = 30, max_current = 5 }",
             v,
-        )
+        )?;
+        if let Some(field) = info.non_finite() {
+            return Err(DeskError::ScriptFailed(format!(
+                "{}: info(): `{field}` is not a finite number",
+                self.engine.file_name()
+            )));
+        }
+        Ok(info)
     }
 
     async fn set_voltage(&self, volts: f64) -> Result<()> {
@@ -88,6 +95,12 @@ impl VoltageSource for ScriptSource {
                      (mode: cv|cc; protection: none|ovp|ocp|opp|otp|uvp|other)",
                     v,
                 )?;
+                if let Some(field) = r.non_finite() {
+                    return Err(DeskError::ScriptFailed(format!(
+                        "{}: read(): `{field}` is not a finite number",
+                        self.engine.file_name()
+                    )));
+                }
                 // A regulation mode means nothing while the output is off.
                 if r.output == Some(false) {
                     r.mode = None;

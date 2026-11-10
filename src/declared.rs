@@ -520,6 +520,11 @@ pub fn check_range(name: &str, decl: &Decl, val: &Val, limit: Option<Limit>) -> 
     let Some(v) = val.as_f64() else {
         return Ok(());
     };
+    if !v.is_finite() {
+        return Err(DeskError::Usage(format!(
+            "{name} must be a finite number, got {v}"
+        )));
+    }
     let unit = decl.unit.as_deref();
     let fail = |limit: f64, kind: &str, below: bool| DeskError::LimitExceeded {
         what: name.to_string(),
@@ -897,6 +902,16 @@ mod tests {
                 .contains("bench limit")
         );
         assert!(check(380.0, bench).is_ok());
+
+        let free = decls("[settings]\nlevel = { type = \"number\" }").unwrap();
+        let e = check_range(
+            "level",
+            &free.settings["level"],
+            &Val::Number(f64::INFINITY),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.code(), "usage");
     }
 
     #[test]
