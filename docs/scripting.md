@@ -129,7 +129,8 @@ function close(ctx) end              -- optional: end of a session (always calle
 - A value declared with `units = [...]` is returned as `{ value = 4.98, unit = "V" }`.
 - `set` and `action` get values that desk already parsed (units), converted (to the declared
   unit) and checked (range, bench limits). Several settings of one command arrive one by one, in
-  declaration order; desk calls `read()` afterwards to verify them.
+  declaration order, except that a boolean setting with `switches` that is set to off/false is
+  sent first; desk calls `read()` afterwards to verify them.
 - With `channels`, every call sees `ctx.channel`.
 
 Everything else is desk's, the same for every driver: units, ranges and limits before anything is
@@ -197,8 +198,8 @@ every driver:
 - **Limits:** values above `info()`'s maximum or the device's bench `limits` are refused before
   the driver is called. Switching the output on is also refused when the device *already* holds a
   setpoint above the bench limits (as far as `read()` reports it).
-- **Order:** voltage, then current, then output (`desk set psu output on voltage 5v` is applied
-  in that order too).
+- **Order:** voltage and current before the output is switched on (`desk set psu output on
+  voltage 5v` is applied in that order). When a command switches the output off, that comes first.
 - **Channels:** with `channels = 2` on the binding, every call sees `ctx.channel`; users address
   `psu:1`, and `limits` can be per channel (`limits = { source = { voltage = 12, "2" = { voltage
   = 5 } } }`).

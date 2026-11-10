@@ -777,6 +777,37 @@ fn channels_are_addressed_and_limited_one_by_one() {
     assert!(out.stdout.contains("channel ch2:"), "{}", out.stdout);
 }
 
+const SINK: &str = r#"
+[devices.load.sink]
+script = "sink.lua"
+settings = { level = { type = "number", unit = "A", min = 0, max = 10 }, enabled = { type = "boolean" } }
+"#;
+
+const SINK_DRIVER: &str = r#"
+local s = { level = 0, enabled = true }
+function read(ctx) return { level = s.level, enabled = s.enabled } end
+function set(ctx, name, value) ctx.log("set " .. name); s[name] = value end
+"#;
+
+#[test]
+fn switching_off_comes_before_other_settings() {
+    let b = Bench::with(SINK);
+    b.file("sink.lua", SINK_DRIVER);
+    let out = b.run(&["--json", "set", "load", "level", "5a", "enabled", "off"]);
+    assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
+    let log = out.data()["log"].to_string();
+    let (e, l) = (log.find("set enabled"), log.find("set level"));
+    assert!(e.is_some() && l.is_some() && e < l, "{log}");
+
+    let b = Bench::with(SINK);
+    b.file("sink.lua", SINK_DRIVER);
+    let out = b.run(&["--json", "set", "load", "level", "3a", "enabled", "on"]);
+    assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
+    let log = out.data()["log"].to_string();
+    let (e, l) = (log.find("set enabled"), log.find("set level"));
+    assert!(e.is_some() && l.is_some() && l < e, "{log}");
+}
+
 #[test]
 fn power_supplies_can_have_channels() {
     let b = Bench::with(

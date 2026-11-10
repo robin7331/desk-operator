@@ -1,5 +1,6 @@
 //! The `voltage_source` capability (bench power supplies) and the semantics shared by every
-//! driver: limit checks, setpoints before output, read-back verification, sessions.
+//! driver: limit checks, setpoints before switching on (switching off before setpoints),
+//! read-back verification, sessions.
 //!
 //! Drivers only implement the primitive operations. Everything a user relies on for safety lives
 //! here, so it holds for every driver, native or Lua.
@@ -233,8 +234,8 @@ pub struct Report {
     pub applied: bool,
 }
 
-/// Apply a request: check limits, set voltage, set current, switch output (in that order), then
-/// read back and verify. With `dry_run`, only reads and checks.
+/// Apply a request: check limits, set voltage, set current, switch output on (switching off comes
+/// first), then read back and verify. With `dry_run`, only reads and checks.
 pub async fn apply(
     src: &dyn VoltageSource,
     req: Request,
@@ -288,14 +289,18 @@ pub async fn apply(
         });
     }
 
+    // Switching off comes first: a new setpoint must never reach a live output on its way off.
+    if req.output == Some(false) {
+        src.set_output(false).await?;
+    }
     if let Some(v) = req.voltage {
         src.set_voltage(v).await?;
     }
     if let Some(a) = req.current {
         src.set_current(a).await?;
     }
-    if let Some(on) = req.output {
-        src.set_output(on).await?;
+    if req.output == Some(true) {
+        src.set_output(true).await?;
     }
 
     let reading = src.read().await?;
@@ -534,6 +539,24 @@ mod tests {
         assert_eq!(f.calls(), ["v=5", "a=1", "out=true"]);
         assert!(r.verified.all());
         assert_eq!(r.verified.voltage, Some(true));
+    }
+
+    #[test]
+    fn output_off_comes_before_setpoints() {
+        let f = Fake {
+            readback: true,
+            ..Fake::default()
+        };
+        let r = run(apply(
+            &f,
+            req(Some(12.0), Some(1.0), Some(false)),
+            Limits::default(),
+            SourceInfo::default(),
+            false,
+        ))
+        .unwrap();
+        assert_eq!(f.calls(), ["out=false", "v=12", "a=1"]);
+        assert!(r.verified.all());
     }
 
     #[test]
