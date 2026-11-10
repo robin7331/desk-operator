@@ -153,7 +153,8 @@ limits  = { source = { voltage = 12, current = 2 } }            # ask the user f
 ```
 
 Values in the device merge into the model's bindings. Never copy bench-specific things
-(entities, limits, serial numbers) into a model.
+(entities, limits, serial numbers) into a model. A device can lower a model's maximums, never
+raise them (`config_invalid`).
 
 After editing it, check with `desk device list --json`. Lua power scripts are documented in the
 project's `docs/scripting.md`.
