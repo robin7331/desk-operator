@@ -177,7 +177,9 @@ limits = { heater = { setpoint = 380, ch2 = { setpoint = 300 } } }   # a number 
 ```
 
 Limits are per capability and setting: a number is the maximum, `{ min = …, max = … }` both. A
-table named like a channel overrides them for that channel. `source` limits are maximums.
+table named like a channel overrides them for that channel, bound by bound: a channel that only
+gives a `min` keeps the general `max`. A `min` above the `max` is an error. `source` limits are
+maximums.
 
 The device's tables **merge** into the model's key by key (tables merge, values replace). A
 device table with its own `script` or `provider` replaces the model's binding entirely.

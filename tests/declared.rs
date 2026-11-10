@@ -721,6 +721,49 @@ fn lua_driver_readings_are_checked_against_the_declarations() {
     );
 }
 
+#[test]
+fn a_channel_minimum_keeps_the_general_maximum() {
+    let cfg = RELAYS.replace(
+        "limits = { board = { delay = 5, ch2 = { delay = 1 } } }",
+        "limits = { board = { delay = 5, ch2 = { delay = { min = 1 } } } }",
+    );
+    assert_ne!(cfg, RELAYS);
+    let b = Bench::with(&cfg);
+    b.file("relays.lua", RELAYS_DRIVER);
+    let out = b.run(&["--json", "set", "relays:ch2", "delay", "6s"]);
+    assert_eq!(out.code_str(), "limit_exceeded", "{}", out.message());
+    let out = b.run(&["--json", "set", "relays:ch2", "delay", "0.5s"]);
+    assert_eq!(out.code_str(), "limit_exceeded", "{}", out.message());
+    assert!(out.message().contains("below"), "{}", out.message());
+    let out = b.run(&["--json", "set", "relays:ch2", "delay", "3s"]);
+    assert_eq!(out.code, 0, "{}", out.message());
+    let out = b.run(&["--json", "set", "relays:ch1", "delay", "0.5s"]);
+    assert_eq!(out.code, 0, "{}", out.message());
+}
+
+#[test]
+fn impossible_limits_are_a_config_error() {
+    for line in [
+        "limits = { board = { delay = { min = 4, max = 2 } } }",
+        "limits = { board = { delay = 5, ch2 = { delay = { min = 6 } } } }",
+    ] {
+        let cfg = RELAYS.replace(
+            "limits = { board = { delay = 5, ch2 = { delay = 1 } } }",
+            line,
+        );
+        assert_ne!(cfg, RELAYS);
+        let b = Bench::with(&cfg);
+        b.file("relays.lua", RELAYS_DRIVER);
+        let out = b.run(&["--json", "get", "relays"]);
+        assert_eq!(out.code_str(), "config_invalid", "{line}");
+        assert!(
+            out.message().contains("`min` is above `max`"),
+            "{}",
+            out.message()
+        );
+    }
+}
+
 const RELAYS: &str = r#"
 [devices.relays]
 limits = { board = { delay = 5, ch2 = { delay = 1 } } }
