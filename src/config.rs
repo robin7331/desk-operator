@@ -495,6 +495,7 @@ fn build_binding(
         (None, None) => return Ok(None),
         (None, Some(def)) => (def.clone(), false),
         (Some(own), Some(def)) if !own.contains_key("script") && !own.contains_key("provider") => {
+            models::check_tightens(def, own).map_err(bad)?;
             (models::merge(def, own), false)
         }
         // The device's own binding (paths relative to the config file).

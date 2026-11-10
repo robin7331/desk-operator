@@ -184,6 +184,10 @@ maximums.
 The device's tables **merge** into the model's key by key (tables merge, values replace). A
 device table with its own `script` or `provider` replaces the model's binding entirely.
 
+A device can tighten what its model states (lower `ratings` and `max`, higher `min`) but not
+loosen it or change a declared name's `type`, `unit`, `choices` or `switches`: that is
+`config_invalid`.
+
 ## Tooling
 
 ```sh

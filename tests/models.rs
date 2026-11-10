@@ -137,6 +137,22 @@ fn own_values_merge_over_the_model() {
 }
 
 #[test]
+fn a_device_cannot_raise_the_models_ratings() {
+    let b = Bench::new(
+        "[devices.psu]\nmodel = \"acme/psu-3000\"\nsource = { ratings = { max_voltage = 100.0 } }\n",
+    );
+    let out = b.run(&["--json", "get", "psu"]);
+    assert_eq!(
+        out.json()["error"]["code"],
+        "config_invalid",
+        "{}",
+        out.stdout
+    );
+    assert!(out.message().contains("max_voltage"), "{}", out.message());
+    assert!(out.message().contains("model"), "{}", out.message());
+}
+
+#[test]
 fn own_script_replaces_the_model() {
     let b = Bench::new(
         "[devices.psu]\nmodel = \"acme/psu-3000\"\nsource = { script = \"mine.lua\", params = { flavor = \"mine\" } }\n",

@@ -1064,6 +1064,54 @@ hold = { switches = false, args = { mode = { type = "choice", choices = ["on", "
     );
 }
 
+fn dmm_bench(device_line: &str) -> Bench {
+    let b = Bench::with(&format!(
+        "[devices.dmm]\nmodel = \"acme/dmm-1\"\n{device_line}\n"
+    ));
+    b.file(
+        "models/acme/dmm-1/model.toml",
+        r#"
+[model]
+id = "acme/dmm-1"
+name = "ACME DMM 1"
+requires = "desk-operator >= 0.1"
+status = "community"
+
+[meter]
+script = "meter.lua"
+
+[meter.settings]
+range = { type = "number", unit = "V", min = 0.1, max = 1000 }
+function = { type = "choice", choices = ["dcv", "ohm"], switches = false }
+
+[meter.values]
+reading = { type = "number", units = ["V", "Ω"] }
+overload = { type = "boolean" }
+
+[meter.actions]
+hold = { switches = false, args = { mode = { type = "choice", choices = ["on", "off"] } } }
+"#,
+    );
+    b.file(
+        "models/acme/dmm-1/meter.lua",
+        &METER_DRIVER.replace(
+            "PARAMS = {}",
+            "PARAMS = { range_default = { type = \"number\", doc = \"x\" } }",
+        ),
+    );
+    b
+}
+
+#[test]
+fn a_device_cannot_widen_a_models_setting() {
+    let b = dmm_bench("meter = { settings = { range = { max = 5000 } } }");
+    let out = b.run(&["--json", "get", "dmm"]);
+    assert_eq!(out.code_str(), "config_invalid", "{}", out.stdout);
+    let b = dmm_bench("meter = { settings = { range = { max = 500 } } }");
+    let out = b.run(&["--json", "set", "dmm", "range", "600v"]);
+    assert_eq!(out.code_str(), "limit_exceeded", "{}", out.stdout);
+}
+
 #[test]
 fn models_new_scaffolds_a_declared_capability() {
     let b = Bench::with("");

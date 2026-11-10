@@ -19,7 +19,8 @@ limits = { source = { voltage = 12, current = 2 } }           # yours: bench saf
 
 Your own values **merge** into the model's bindings key by key (tables like `port` and
 `params` merge, other values replace). A binding of your own with `script` or `provider` replaces
-the model's binding entirely.
+the model's binding entirely. A device can tighten what the model states (lower `ratings` and
+`max`, higher `min`) but not loosen it: that is `config_invalid`.
 
 desk looks models up in this order, first match wins:
 
