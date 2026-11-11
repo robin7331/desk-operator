@@ -343,7 +343,9 @@ struct Fill {
     /// The largest block: [`BLOCK_MAX`] rounded down to whole units.
     cap: usize,
     buf: Vec<u8>,
-    /// When the block being built got its first byte.
+    /// When the block being built got its first byte: the flusher sends it [`FLUSH_AFTER`]
+    /// later. `None` while there is nothing to send: an empty buffer, or only a partial unit
+    /// that waits for its rest.
     first_at: Option<Instant>,
     seq: u64,
     /// Units in blocks that went out.
@@ -463,10 +465,13 @@ impl StreamOutput {
         let mut rest = bytes;
         while !rest.is_empty() {
             if f.buf.is_empty() {
-                f.first_at = Some(now);
-                wake = true;
                 let want = f.cap.min(rest.len().max(64 * 1024));
                 f.buf.reserve(want);
+            }
+            // The first byte of a block, or more bytes for a partial unit that waited.
+            if f.first_at.is_none() {
+                f.first_at = Some(now);
+                wake = true;
             }
             let n = (f.cap - f.buf.len()).min(rest.len());
             f.buf.extend_from_slice(&rest[..n]);
@@ -512,6 +517,10 @@ impl StreamOutput {
         let n = f.buf.len() - f.buf.len() % f.unit;
         if n > 0 {
             self.emit(&mut f, n);
+        } else {
+            // Nothing whole to send. A partial unit has no deadline until more bytes arrive
+            // (`write` sets one then); with one, the flusher would come back at once, forever.
+            f.first_at = None;
         }
     }
 
@@ -676,6 +685,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(data(got).0.data, b"hello");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_partial_unit_waits_for_its_rest_without_spinning() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fan = Arc::new(Fanout::default());
+        let sub = fan.subscribe();
+        let out = StreamOutput::new("bytes", fan.clone());
+        let three = serde_json::json!({ "unit_size": 3 });
+        out.describe(three.as_object().unwrap().clone()).unwrap();
+        // The flusher as in the daemon, with its polls counted.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let task = {
+            let (flusher, polls) = (out.clone(), polls.clone());
+            tokio::spawn(async move {
+                let run = flusher.flusher();
+                tokio::pin!(run);
+                std::future::poll_fn(|cx| {
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    run.as_mut().poll(cx)
+                })
+                .await
+            })
+        };
+        // One byte of a three-byte unit, and then nothing for a while.
+        out.write(b"a").unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let n = polls.load(Ordering::Relaxed);
+        assert!(
+            n < 20,
+            "the flusher spins while a unit is incomplete: {n} polls"
+        );
+        // Its rest arrives: the unit goes out within the usual few milliseconds.
+        out.write(b"bc").unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(1), sub.next())
+            .await
+            .unwrap();
+        assert_eq!(data(got).0.data, b"abc");
+        // A whole unit and a bit: the unit goes out, the bit waits, again without spinning.
+        out.write(b"defg").unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(1), sub.next())
+            .await
+            .unwrap();
+        assert_eq!(data(got).0.data, b"def");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let n = polls.load(Ordering::Relaxed);
+        assert!(
+            n < 40,
+            "the flusher spins on the rest of a block: {n} polls"
+        );
         task.abort();
     }
 
