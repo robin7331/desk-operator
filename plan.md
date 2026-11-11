@@ -1055,6 +1055,80 @@ ctx.sigrok.set{ config = { voltage_target = 5, enabled = true }, group = "CH1" }
 Not in M8.1: long-running sigrok sessions (one process per call, so `watch` is slower than on a
 serial device), parsing `--show`, caching values.
 
+## M9 — Binary streams (designed 2026-11-11; issue #6)
+
+**Goal:** another program gets a device's live data from desk at full bandwidth: a logic
+analyzer's samples for a protocol analyzer that reacts in real time, a viewer, a recorder; later a
+camera's frames. desk stays the backend and keeps owning the device. This is the second kind of
+the sink from M8: there a source fills a file, here it fills the daemon's subscribers.
+
+Three slices:
+
+- **M9.1 Raw streams.** Models declare streams; a source fills a stream sink; the daemon fans the
+  blocks out to subscribers over its socket; `desk stream`. Built for throughput, and measured.
+- **M9.2 Activity.** The daemon reduces a `logic` stream next to the source (per time slice and
+  channel: was low, was high, edges) as JSON lines, with a terminal view. One more subscriber of
+  the same stream; its rate doesn't depend on the sample rate.
+- **M9.3 History.** The daemon keeps the reduced data so a late subscriber can ask for the past;
+  then a raw look-back buffer.
+
+### M9.1 — Raw streams
+
+Model format, next to values, settings and actions:
+
+    [capture.streams.samples]
+    content = "logic"
+    doc     = "live samples"
+
+    [capture.streams.samples.args]
+    samplerate = { type = "number", unit = "Hz", default = 10e6 }
+    channels   = { type = "string", default = "D0,D1,D2,D3,D4,D5,D6,D7" }
+
+- **Content.** `logic` is well-known: the stream's description must give `unit_size` (bytes per
+  sample), `samplerate` and `channels` (names in bit order: the first is bit 0), and blocks hold
+  whole samples. Any other content name is declared: the payload is opaque bytes to the core.
+- **Driver.** `stream(ctx, name, args)` describes the data once (`ctx.describe{ into = ctx.output,
+  … }`), then fills `ctx.output` with a host function and returns when the source ends. The same
+  host functions as for captures: `ctx.sigrok.acquire{ continuous = true, into = ctx.output }`
+  (sigrok's binary output read from its stdout), `ctx.append`.
+- **The daemon** runs one acquisition per device and stream. The first subscriber's arguments
+  start it; the same arguments join; different ones are refused with the running ones named. It
+  stops when the last subscriber leaves or the source ends. The stream holds the device: other
+  commands for it are refused as busy meanwhile.
+- **Blocks.** The core moves blocks of up to 1 MiB and never looks inside. A block goes out when
+  it is full or a few milliseconds old, so low rates stay live. Every block carries its sequence
+  number and the offset of its first unit since the start (samples for `logic`, bytes otherwise).
+- **A slow subscriber never slows the device or the others.** It loses whole blocks, oldest
+  first; the next block it gets says how many it lost, and the offsets show which.
+- **Protocol.** On the daemon's socket, a `["stream", …]` request is answered with one JSON line
+  (the usual envelope: device, stream, content, the description, the start time), then binary
+  frames: a fixed 32-byte little-endian header and the payload. The last frame is an end frame
+  whose payload is a JSON envelope: ended, or the error.
+- **`desk stream <device> [<stream>] [args…]`** writes the payload to stdout (never to a
+  terminal); `--header` prints the JSON line first; `--frames` passes the frames as they are;
+  `--discard` reads without writing and reports throughput; `--duration` and `--bytes` end it.
+- **No silent stall.** A source that sends nothing for 10 s ends the stream with `timeout`.
+- **Measured, not assumed.** Throughput through desk (source → daemon → socket → `desk stream
+  --discard`) is measured with a synthetic source, with the fake sigrok-cli (adds the pipe) and
+  with the real `demo` driver, and the numbers are in `docs/streaming.md`. They decide whether a
+  shared-memory transport is needed for the highest rates.
+
+- [ ] `streams` in the model format (schema, `model check`, `device show`, `desk schema`, docs)
+- [ ] Stream sink, `ctx.describe`, the driver's `stream()`; `acquire` with `continuous`
+- [ ] Daemon hub: start, join, refuse, fan-out, drops, end, stall, device lock, idle exit
+- [ ] Socket protocol and `desk stream` (`--header`, `--frames`, `--discard`, `--duration`, `--bytes`)
+- [ ] Mock source and tests: two subscribers, a slow one, different arguments, source ends, source
+      fails, daemon stopped mid-stream, a busy device, stall
+- [ ] sigrok source against the fake and the real `demo` driver
+- [ ] Throughput measured and documented; an example consumer (`examples/stream_edges.rs`)
+- [ ] Docs and skills
+
+### Not in M9.1
+
+- The activity stream and the terminal view (M9.2), history and look-back (M9.3).
+- A shared-memory transport, network access, triggers inside a stream, protocol decoding, a
+  viewer, cameras (`frames` content gets its rules with the first camera).
+
 ## After M6 (rough order, re-evaluate each time)
 
 1. **Config editing from the CLI:** `device add`, `device power <dev>` with interactive provider/entity pickers (`toml_edit`, `inquire`)
