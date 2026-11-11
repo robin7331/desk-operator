@@ -11,9 +11,9 @@ first if the device is off.
 
 **Status:** M0–M5.1 done: mains power via Home Assistant or Lua scripts, the `voltage_source`
 capability (bench power supplies) with Lua drivers and serial ports, a set of models with a
-specified format, agent-ready CLI (`--json`, `schema`, `skill`). Four models so far
+specified format, agent-ready CLI (`--json`, `schema`, `skill`). Five models so far
 (see *Supported devices* in `README.md`): `fnirsi/ips3608`, `fnirsi/dps-150`, `owon/xdm1041`,
-`owon/oel1515`.
+`owon/oel1515`, `sipeed/slogic32u3` (the first one reached through sigrok).
 **M6, AI skills, done**: `desk skill list|install`, `desk port probe` and the `desk-add-device`
 skill, validated when a fresh session added the XDM1041. Streaming is done: a daemon
 (`desk serve`, started on demand) holds device sessions so `desk watch` streams while other
