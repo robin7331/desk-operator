@@ -109,6 +109,7 @@ keeps owning the device and shares the stream with every program that asks. See
 | [FNIRSI IPS3608](models/fnirsi/README.md) | Power supply | tested |
 | [OWON OEL1515](models/owon/README.md) | DC load | community |
 | [OWON XDM1041](models/owon/README.md) | Multimeter | community |
+| [Sipeed SLogic32U3](models/sipeed/README.md) | Logic analyzer | community |
 
 `tested`: smoke-tested on real hardware. `community`: not fully verified on hardware, see the vendor
 README. `desk model list` shows what your build includes.
