@@ -1062,15 +1062,16 @@ analyzer's samples for a protocol analyzer that reacts in real time, a viewer, a
 camera's frames. desk stays the backend and keeps owning the device. This is the second kind of
 the sink from M8: there a source fills a file, here it fills the daemon's subscribers.
 
-Three slices:
+Two slices:
 
 - **M9.1 Raw streams.** Models declare streams; a source fills a stream sink; the daemon fans the
   blocks out to subscribers over its socket; `desk stream`. Built for throughput, and measured.
 - **M9.2 Activity.** The daemon reduces a `logic` stream next to the source (per time slice and
   channel: was low, was high, edges) as JSON lines, with a terminal view. One more subscriber of
   the same stream; its rate doesn't depend on the sample rate.
-- **M9.3 History.** The daemon keeps the reduced data so a late subscriber can ask for the past;
-  then a raw look-back buffer.
+
+Keeping history in the daemon (the reduced data for late subscribers, a raw look-back buffer) was
+planned as a third slice and dropped on 2026-11-11: a program that wants the past keeps it itself.
 
 ### M9.1 — Raw streams
 
@@ -1125,7 +1126,7 @@ Model format, next to values, settings and actions:
 
 ### Not in M9.1
 
-- The activity stream and the terminal view (M9.2), history and look-back (M9.3).
+- The activity stream and the terminal view (M9.2). History and look-back in the daemon: dropped.
 - A shared-memory transport, network access, triggers inside a stream, protocol decoding, a
   viewer, cameras (`frames` content gets its rules with the first camera).
 
