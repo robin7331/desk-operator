@@ -7,12 +7,11 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::connections::{BackendRef, Connections};
 use crate::declared::{self, Declarations, Limit};
 use crate::error::{DeskError, Result};
 use crate::models::{self, Models};
 use crate::providers;
-use crate::serial::PortSpec;
-use crate::sigrok::SigrokSpec;
 use crate::source::Limits;
 
 #[derive(Debug)]
@@ -110,6 +109,17 @@ impl Device {
     pub fn source(&self) -> Option<&Binding> {
         self.caps.get(SOURCE).map(|c| &c.binding)
     }
+
+    /// Whether this device uses provider `id`: its power path names it (when the provider's
+    /// endpoints are bound `natively`), or the connections of one of its capabilities run
+    /// through it (a connection backend; mains has no actions, so nothing to capture into).
+    pub fn uses_provider(&self, id: &str, natively: bool) -> bool {
+        let named = matches!(&self.power, Some(Binding::Native { provider, .. }) if provider == id);
+        (natively && named)
+            || self.caps.values().any(|c| {
+                matches!(&c.binding, Binding::Script { connections, .. } if connections.uses(id))
+            })
+    }
 }
 
 /// How a capability of a device is implemented: by a provider, or by a Lua script.
@@ -131,12 +141,9 @@ pub enum Binding {
         params: toml::Table,
         #[serde(serialize_with = "ser_opt_duration")]
         timeout: Option<Duration>,
-        /// The only serial port this script may open (`ctx.serial.open`).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        port: Option<PortSpec>,
-        /// The only sigrok device this script may capture from (`ctx.sigrok`).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        sigrok: Option<Box<SigrokSpec>>,
+        /// What the script may open to reach the device (`port`, `sigrok`).
+        #[serde(flatten)]
+        connections: Connections,
         /// The device's maximums, in the capability's standard form (e.g. `max_voltage`).
         #[serde(skip_serializing_if = "toml::Table::is_empty")]
         ratings: toml::Table,
@@ -185,19 +192,9 @@ impl Binding {
             }
             Binding::Script {
                 script,
-                port,
-                sigrok,
+                connections,
                 ..
-            } => {
-                let mut s = format!("script {}", script.display());
-                if let Some(port) = port {
-                    s.push_str(&format!(" on {port}"));
-                }
-                if let Some(sigrok) = sigrok {
-                    s.push_str(&format!(" with {sigrok}"));
-                }
-                s
-            }
+            } => format!("script {}{}", script.display(), connections.describe()),
         }
     }
 }
@@ -234,34 +231,18 @@ impl TryFrom<toml::Table> for Binding {
                     Some(toml::Value::Table(r)) => r,
                     Some(_) => return Err("`ratings` must be a table".into()),
                 };
-                let port = match t.remove("port") {
-                    None => None,
-                    Some(toml::Value::Table(p)) => Some(PortSpec::try_from(p)?),
-                    Some(_) => {
-                        return Err(
-                            "`port` must be a table, e.g. { usb_vid = 0x1a86, usb_pid = 0x7523 }"
-                                .into(),
-                        );
-                    }
-                };
-                let sigrok = match t.remove("sigrok") {
-                    None => None,
-                    Some(toml::Value::Table(s)) => Some(Box::new(SigrokSpec::try_from(s)?)),
-                    Some(_) => {
-                        return Err("`sigrok` must be a table, e.g. { driver = \"demo\" }".into());
-                    }
-                };
+                let connections = Connections::take(&mut t)?;
                 if let Some(k) = t.keys().next() {
                     return Err(format!(
-                        "unknown key `{k}` in script binding (allowed: script, params, ratings, timeout, port, sigrok)"
+                        "unknown key `{k}` in script binding (allowed: script, params, ratings, timeout, {})",
+                        Connections::KEYS.join(", ")
                     ));
                 }
                 Ok(Binding::Script {
                     script,
                     params,
                     timeout,
-                    port,
-                    sigrok,
+                    connections,
                     ratings,
                 })
             }
@@ -752,23 +733,22 @@ impl Config {
                         d.id
                     ));
                 }
-                if let Some(Binding::Script {
-                    sigrok: Some(s), ..
-                }) = binding
-                    && let Some(b) = &s.backend
-                {
-                    match self.providers.get(b) {
-                        Some(p) if p.kind != crate::sigrok::KIND => problems.push(format!(
-                            "device `{}`: {key}: sigrok backend `{b}` is a `{}` provider, not \
-                             kind = \"sigrok\"",
-                            d.id, p.kind
-                        )),
-                        None if b != crate::sigrok::IMPLICIT => problems.push(format!(
-                            "device `{}`: {key}: sigrok backend `{b}` is not defined under \
-                             [providers] (kind = \"sigrok\")",
+                let Some(Binding::Script { connections, .. }) = binding else {
+                    continue;
+                };
+                for BackendRef { provider: b, kind } in connections.backends() {
+                    match providers::kind_of(b, &self.providers) {
+                        Some(k) if k == kind => {}
+                        Some(k) => problems.push(format!(
+                            "device `{}`: {key}: {kind} backend `{b}` is a `{k}` provider, not \
+                             kind = \"{kind}\"",
                             d.id
                         )),
-                        _ => {}
+                        None => problems.push(format!(
+                            "device `{}`: {key}: {kind} backend `{b}` is not defined under \
+                             [providers] (kind = \"{kind}\")",
+                            d.id
+                        )),
                     }
                 }
             }
@@ -831,15 +811,13 @@ fn resolve_script_path(binding: Binding, config_path: &Path) -> Binding {
             script,
             params,
             timeout,
-            port,
-            sigrok,
+            connections,
             ratings,
         } if script.is_relative() && !models::is_bundled(&script) => Binding::Script {
             script: config_path.parent().unwrap_or(Path::new(".")).join(script),
             params,
             timeout,
-            port,
-            sigrok,
+            connections,
             ratings,
         },
         other => other,

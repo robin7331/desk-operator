@@ -129,6 +129,7 @@ impl Client {
         DeskError::ProviderUnreachable {
             provider: self.id.clone(),
             message: message.into(),
+            hint: None,
         }
     }
 

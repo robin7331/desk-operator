@@ -26,6 +26,7 @@ use tokio::io::AsyncReadExt;
 use crate::capture::Output;
 use crate::config::ProviderConfig;
 use crate::error::{DeskError, Result};
+use crate::providers::BuildContext;
 
 /// The provider kind of a sigrok backend.
 pub const KIND: &str = "sigrok";
@@ -35,8 +36,10 @@ pub const IMPLICIT: &str = "sigrok";
 pub const PROGRAM: &str = "sigrok-cli";
 /// Timeout of the short queries (version, drivers, scan, show) unless the provider sets one.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Marks the message of a missing program, so the error gets its hint.
-pub const PROGRAM_MISSING: &str = "sigrok-cli not found";
+/// The message of a missing program (followed by where it was looked for).
+const PROGRAM_MISSING: &str = "sigrok-cli not found";
+/// The hint a missing program's error carries.
+const PROGRAM_MISSING_HINT: &str = "install sigrok (sigrok-cli) from your package manager or https://sigrok.org, or set `program` in [providers.<id>] kind = \"sigrok\" (docs/sigrok.md)";
 
 /// The most of a query's stdout that is kept (a `--show` or `-L` is a few KiB).
 const MAX_STDOUT: usize = 1 << 20;
@@ -203,7 +206,8 @@ fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 impl Backend {
-    /// The implicit backend: `sigrok-cli` on PATH.
+    /// The implicit backend: `sigrok-cli` on PATH. The same as a configured backend without
+    /// settings, built as the implicit provider.
     pub fn implicit() -> Backend {
         let found = on_path(PROGRAM);
         Backend {
@@ -217,7 +221,7 @@ impl Backend {
 
     /// A `[providers.<id>] kind = "sigrok"`: `program` (relative to the config folder, `~/`
     /// expanded; default `sigrok-cli` on PATH) and `timeout` for the short queries.
-    pub fn configured(id: &str, cfg: &ProviderConfig, base_dir: &Path) -> Result<Backend> {
+    pub fn configured(id: &str, cfg: &ProviderConfig, ctx: &BuildContext) -> Result<Backend> {
         let p = crate::providers::Params::new(&cfg.settings, format!("provider `{id}`"));
         p.only(&["program", "timeout"])?;
         let timeout = p.duration("timeout")?.unwrap_or(DEFAULT_TIMEOUT);
@@ -232,7 +236,6 @@ impl Backend {
                 )));
             }
             Some(s) => {
-                let ctx = crate::providers::BuildContext { base_dir };
                 let path = ctx.resolve_path(s);
                 let found = path.is_file();
                 (path, found)
@@ -243,7 +246,7 @@ impl Backend {
             program,
             found,
             timeout,
-            implicit: false,
+            implicit: ctx.implicit,
         })
     }
 
@@ -256,6 +259,7 @@ impl Backend {
         DeskError::ProviderUnreachable {
             provider: self.id.clone(),
             message: format!("{PROGRAM_MISSING} {how}"),
+            hint: Some(PROGRAM_MISSING_HINT),
         }
     }
 
@@ -285,6 +289,7 @@ impl Backend {
             Ok(ran) => Err(DeskError::ProviderUnreachable {
                 provider: self.id.clone(),
                 message: format!("{what} failed: {}", ran.error_text()),
+                hint: None,
             }),
             Err(Stop::Timeout) => Err(DeskError::Timeout {
                 what: format!("sigrok-cli {what}"),
@@ -429,6 +434,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How a `[providers.<id>]` backend is built.
+fn configured(base_dir: &Path) -> BuildContext<'_> {
+    BuildContext {
+        base_dir,
+        implicit: false,
+    }
+}
+
 /// Every sigrok backend, in resolution order: `sigrok` first (the configured one, else the
 /// implicit one on PATH), then the configured ones in config order. `all` keeps an implicit
 /// backend whose program isn't on PATH.
@@ -440,7 +453,7 @@ pub fn backends(
     let mut out = Vec::new();
     match configs.get(IMPLICIT) {
         Some(cfg) if cfg.kind == KIND => {
-            out.push(Backend::configured(IMPLICIT, cfg, base_dir));
+            out.push(Backend::configured(IMPLICIT, cfg, &configured(base_dir)));
         }
         Some(_) => {}
         None => {
@@ -452,7 +465,7 @@ pub fn backends(
     }
     for (id, cfg) in configs {
         if id != IMPLICIT && cfg.kind == KIND {
-            out.push(Backend::configured(id, cfg, base_dir));
+            out.push(Backend::configured(id, cfg, &configured(base_dir)));
         }
     }
     out
@@ -465,12 +478,12 @@ pub fn backend(
     id: &str,
 ) -> Result<Backend> {
     match configs.get(id) {
-        Some(cfg) if cfg.kind == KIND => Backend::configured(id, cfg, base_dir),
+        Some(cfg) if cfg.kind == KIND => Backend::configured(id, cfg, &configured(base_dir)),
         Some(cfg) => Err(DeskError::ConfigInvalid(format!(
             "provider `{id}` is a `{}` provider, not a sigrok backend (kind = \"sigrok\")",
             cfg.kind
         ))),
-        None if id == IMPLICIT => Ok(Backend::implicit()),
+        None if crate::providers::kind_of(id, configs) == Some(KIND) => Ok(Backend::implicit()),
         None => Err(DeskError::ConfigInvalid(format!(
             "no sigrok backend `{id}`: define `[providers.{id}] kind = \"sigrok\"`, or use \
              the implicit `{IMPLICIT}` (sigrok-cli on PATH)"
@@ -686,6 +699,7 @@ async fn run(
             DeskError::ProviderUnreachable {
                 provider: backend.id.clone(),
                 message: format!("cannot run {}: {e}", backend.program.display()),
+                hint: None,
             }
         })
     })?;

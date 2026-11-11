@@ -2,6 +2,7 @@ mod bench;
 mod capture;
 mod cli;
 mod config;
+mod connections;
 mod daemon;
 mod deadline;
 mod declared;

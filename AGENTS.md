@@ -95,6 +95,10 @@ default.
 - **The core owns hardware.** Scripts get handles from the host API. They never open arbitrary
   ports or network connections themselves (the Lua stdlib is sandboxed: no `io`, `os`, `package`
   or `debug`).
+- **A connection kind lives in three places.** Its spec is one field of `Connections`
+  (`src/connections.rs`), its host API is `src/script/<kind>.rs`, and a backend it runs through
+  is a provider that says how its endpoints are used (`Provider::endpoint_use`). Generic code asks
+  the provider, never its kind; `bench.rs` and `cli/models.rs` don't change for a new kind.
 - **Secrets are never in the config file.** Tokens come from an env var or a separate `token_file`
   (keyring later), and are never printed or logged.
 - **The core never knows a specific model.** Nothing in `src/` names a vendor or model or reads the
@@ -124,6 +128,8 @@ src/
   output.rs            Report, --json envelope, human tables
   error.rs             DeskError: stable `code()` + `exit_code()` + `hint()` (part of the CLI contract)
   config.rs            load/validate desk.toml, Device, PowerBinding, device resolution
+  connections.rs       Connections: what a script binding may open (`port`, `sigrok`), their
+                       parsing, model check and the backends (providers) they run through
   model.rs             Capability, Power, PowerState, PowerFeatures
   power.rs             PowerSwitch trait + switch semantics (idempotent, read-back verification)
   source.rs            VoltageSource trait + PSU semantics (limits, setpoints before output, protections)
@@ -141,9 +147,10 @@ src/
                        running sigrok-cli (`acquire`'s checked command line); `desk sigrok
                        drivers|show` lives in cli/sigrok.rs, the provider in providers/sigrok.rs
   models.rs           models: search path, `model.toml` parsing, merge, bundled files
-  providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs,
-                       sigrok.rs
-  script/              mlua engine, sandbox, host API (`ctx`), timeout hook
+  providers/           Provider trait, lazy Registry, implicit providers, Params helper; mock.rs,
+                       home_assistant.rs, sigrok.rs
+  script/              mlua engine, sandbox, host API (`ctx`), timeout hook; one file per
+                       connection kind's host API: serial.rs (`ctx.serial`), sigrok.rs (`ctx.sigrok`)
   daemon/              `desk serve`: local socket (ipc.rs), JSON-lines protocol, CLI forwarding,
                        `watch` streams; session.rs = live device sessions + per-device lock
   cli/ops.rs           `desk get`, `desk set`, `desk do` (rendering included); left-out arguments

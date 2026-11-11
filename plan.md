@@ -989,6 +989,16 @@ real `sigrok-cli -d demo` runs only where sigrok is installed.
       `docs/scripting.md`, `docs/model-format.md`, `models/README.md`, skills (`desk-operator`,
       `desk-setup`, `desk-add-device`), `AGENTS.md`, README
 
+### Cleanup (2026-11-11)
+
+sigrok was attached to the core through special cases, so the next connection kind would have
+added the same branches again. Every connection a script binding may open is now one
+`Connections` value (`src/connections.rs`), each kind's host API has its own file
+(`src/script/serial.rs`, `src/script/sigrok.rs`), and a connection backend is a provider that
+says how its endpoints are used, how long its queries may take, whether it is there and which
+hint its errors carry; implicit providers are one table in `src/providers/mod.rs`. Behaviour is
+unchanged.
+
 ### Not in M8
 
 - The SLogic32U3 model (a fresh session with `desk-add-device`; then a hardware smoke test).

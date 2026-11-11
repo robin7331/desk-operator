@@ -380,9 +380,8 @@ fn parse_model(id: &str, text: &str, file: PathBuf, origin: Origin) -> Result<Mo
             return Err(bad(format!("`{key}` needs `script = \"...\"`")));
         };
         required_ratings(&key, &binding).map_err(bad)?;
-        if let Some(t) = binding.get("sigrok") {
-            crate::sigrok::check_model_table(t).map_err(|e| bad(format!("`{key}`: {e}")))?;
-        }
+        crate::connections::Connections::check_model(&binding)
+            .map_err(|e| bad(format!("`{key}`: {e}")))?;
         let resolved = resolve_relative(&file, script);
         binding.insert(
             "script".into(),

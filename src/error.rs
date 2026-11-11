@@ -54,7 +54,12 @@ pub enum DeskError {
     },
 
     #[error("provider `{provider}` unreachable: {message}")]
-    ProviderUnreachable { provider: String, message: String },
+    ProviderUnreachable {
+        provider: String,
+        message: String,
+        /// The provider's own next step (e.g. how to install a missing program).
+        hint: Option<&'static str>,
+    },
 
     #[error("endpoint `{endpoint}` unavailable: {message}")]
     EndpointUnavailable { endpoint: String, message: String },
@@ -161,13 +166,7 @@ impl DeskError {
             DeskError::UpdateUnsupported(_) => Some(
                 "update your clone and run `cargo install --path .` again, or `desk update --force` to replace it with the release build",
             ),
-            DeskError::ProviderUnreachable { message, .. }
-                if message.starts_with(crate::sigrok::PROGRAM_MISSING) =>
-            {
-                Some(
-                    "install sigrok (sigrok-cli) from your package manager or https://sigrok.org, or set `program` in [providers.<id>] kind = \"sigrok\" (docs/sigrok.md)",
-                )
-            }
+            DeskError::ProviderUnreachable { hint, .. } => *hint,
             DeskError::LimitExceeded { kind, .. } if kind == crate::capture::SIZE_CAP => Some(
                 "nothing was kept; allow more with --max-size or `[captures] max_size` in desk.toml",
             ),
@@ -336,6 +335,7 @@ mod tests {
             DeskError::ProviderUnreachable {
                 provider: String::new(),
                 message: String::new(),
+                hint: None,
             },
             DeskError::EndpointUnavailable {
                 endpoint: String::new(),

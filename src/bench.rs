@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::capture::Cancel;
 use crate::config::{Binding, Config, Device};
+use crate::connections::Connections;
 use crate::daemon::session::{Sessions, Watcher};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, Confidence, Power, PowerState};
@@ -13,8 +14,6 @@ use crate::ops::{self, CapDriver, Catalog, Drivers, Entry, Kind, Op};
 use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
 use crate::providers::{Endpoint, ProviderInfo, Registry};
 use crate::script::{DeviceInfo, ScriptDriver, ScriptSource, ScriptSpec, ScriptSwitch};
-use crate::serial::PortSpec;
-use crate::sigrok::SigrokSpec;
 use crate::source;
 
 pub struct Bench {
@@ -68,8 +67,7 @@ impl Bench {
                 script,
                 params,
                 timeout,
-                port,
-                sigrok,
+                connections,
                 ..
             } => {
                 let timeout = timeout.unwrap_or(power::DEFAULT_SCRIPT_TIMEOUT);
@@ -77,7 +75,7 @@ impl Bench {
                     device,
                     script,
                     params,
-                    (port.as_ref(), sigrok.as_deref()),
+                    connections,
                     timeout,
                 ))?;
                 (Box::new(sw), timeout)
@@ -123,7 +121,7 @@ impl Bench {
         device: &'a Device,
         path: &'a Path,
         params: &'a toml::Table,
-        (port, sigrok): (Option<&'a PortSpec>, Option<&'a SigrokSpec>),
+        connections: &'a Connections,
         timeout: Duration,
     ) -> ScriptSpec<'a> {
         ScriptSpec {
@@ -133,8 +131,7 @@ impl Bench {
             },
             path,
             params,
-            port,
-            sigrok,
+            connections,
             timeout,
             providers: self.providers.clone(),
         }
@@ -157,15 +154,14 @@ impl Bench {
                 Binding::Script {
                     script,
                     params,
-                    port,
-                    sigrok,
+                    connections,
                     ..
                 },
             ) => CapDriver::Source(Box::new(ScriptSource::load(self.script_spec(
                 device,
                 script,
                 params,
-                (port.as_ref(), sigrok.as_deref()),
+                connections,
                 entry.timeout,
             ))?)),
             (
@@ -183,18 +179,11 @@ impl Bench {
                 Binding::Script {
                     script,
                     params,
-                    port,
-                    sigrok,
+                    connections,
                     ..
                 },
             ) => CapDriver::Declared(Box::new(ScriptDriver::load(
-                self.script_spec(
-                    device,
-                    script,
-                    params,
-                    (port.as_ref(), sigrok.as_deref()),
-                    entry.timeout,
-                ),
+                self.script_spec(device, script, params, connections, entry.timeout),
                 &entry.decls,
             )?)),
         })
@@ -396,19 +385,9 @@ impl Bench {
         }
     }
 
-    /// The ceiling around a provider's `test` and `endpoints`. A sigrok backend runs several
-    /// queries, each under its own `timeout`.
-    fn provider_timeout(&self, id: &str) -> Duration {
-        if self.providers.kind(id) == Some(crate::sigrok::KIND) {
-            Duration::from_secs(300)
-        } else {
-            power::DEFAULT_TIMEOUT
-        }
-    }
-
     pub async fn test_provider(&self, id: &str) -> Result<ProviderInfo> {
         let provider = self.providers.get(id)?;
-        let after = self.provider_timeout(id);
+        let after = provider.query_ceiling();
         tokio::time::timeout(after, provider.test())
             .await
             .map_err(|_| DeskError::Timeout {
@@ -419,7 +398,7 @@ impl Bench {
 
     pub async fn endpoints(&self, id: &str, capability: Capability) -> Result<Vec<Endpoint>> {
         let provider = self.providers.get(id)?;
-        let after = self.provider_timeout(id);
+        let after = provider.query_ceiling();
         tokio::time::timeout(after, provider.endpoints(capability))
             .await
             .map_err(|_| DeskError::Timeout {

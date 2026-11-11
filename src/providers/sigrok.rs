@@ -2,25 +2,16 @@
 //! test` runs the program, `desk provider endpoints` lists what `--scan` finds. Devices reach it
 //! through a script binding's `sigrok = { … }`, never as `provider = …` (see `crate::sigrok`).
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 
-use super::{Endpoint, Provider, ProviderInfo};
-use crate::declared::{Declarations, Driver};
-use crate::error::{DeskError, Result};
+use super::{Endpoint, EndpointUse, Provider, ProviderInfo};
+use crate::error::Result;
 use crate::model::Capability;
-use crate::power::PowerSwitch;
 use crate::sigrok::Backend;
-use crate::source::VoltageSource;
 
 pub struct SigrokProvider(pub Backend);
-
-fn not_a_binding() -> DeskError {
-    DeskError::ConfigInvalid(
-        "a sigrok backend is reached through a model's `sigrok = { … }` binding (a script \
-         binding with `sigrok = { driver = \"…\" }`), not `provider = …`"
-            .into(),
-    )
-}
 
 #[async_trait]
 impl Provider for SigrokProvider {
@@ -62,15 +53,30 @@ impl Provider for SigrokProvider {
             .collect())
     }
 
-    fn power_switch(&self, _params: &toml::Table) -> Result<Box<dyn PowerSwitch>> {
-        Err(not_a_binding())
+    /// As a script binding's `sigrok = { … }`, never as `provider = …`.
+    fn endpoint_use(&self) -> EndpointUse {
+        let id = &self.0.id;
+        EndpointUse::Connection {
+            key: "sigrok",
+            not_native: "a sigrok backend is reached through a model's `sigrok = { … }` binding (a \
+                         script binding with `sigrok = { driver = \"…\" }`), not `provider = …`",
+            note: format!(
+                "(a model gives `driver`; `conn` and `backend = \"{id}\"` go in your desk.toml)"
+            ),
+            none_found: format!(
+                "sigrok backend `{id}` found no devices (a plain scan finds USB devices; a \
+                 serial one needs its `conn`: try `desk sigrok show <driver> --conn <port>`)"
+            ),
+        }
     }
 
-    fn voltage_source(&self, _params: &toml::Table) -> Result<Box<dyn VoltageSource>> {
-        Err(not_a_binding())
+    /// `test` and `endpoints` run several queries, each under the backend's own `timeout`.
+    fn query_ceiling(&self) -> Duration {
+        Duration::from_secs(300)
     }
 
-    fn declared(&self, _params: &toml::Table, _decls: &Declarations) -> Result<Box<dyn Driver>> {
-        Err(not_a_binding())
+    /// The implicit backend is listed only when `sigrok-cli` is on PATH.
+    fn present(&self) -> bool {
+        self.0.found
     }
 }

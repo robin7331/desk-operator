@@ -2,21 +2,19 @@ use serde::Serialize;
 
 use super::ProviderCmd;
 use crate::bench::Bench;
-use crate::config::Binding;
 use crate::error::Result;
 use crate::model::Capability;
 use crate::output::{Report, table};
-use crate::providers::Endpoint;
-use crate::sigrok;
+use crate::providers::{self, Endpoint, EndpointUse};
 
 #[derive(Serialize)]
 struct ProviderView<'a> {
     id: &'a str,
     kind: &'a str,
-    /// Devices whose power path uses this provider (a sigrok backend: whose `sigrok` binding
-    /// names it).
+    /// Devices that use this provider: their power path names it, or their connections run
+    /// through it (a connection backend).
     used_by: Vec<&'a str>,
-    /// The implicit sigrok backend: not configured, `sigrok-cli` is on PATH.
+    /// An implicit provider: not configured, but there (e.g. its program is installed).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     implicit: bool,
 }
@@ -24,10 +22,11 @@ struct ProviderView<'a> {
 #[derive(Serialize)]
 struct EndpointsData<'a> {
     provider: &'a str,
-    /// What the endpoints are listed for (not for a sigrok backend).
+    /// What the endpoints are listed for (only for native bindings).
     #[serde(skip_serializing_if = "Option::is_none")]
     capability: Option<Capability>,
-    /// The binding key their `params` go in: `power`, or `sigrok` for a sigrok backend.
+    /// The binding key their `params` go in: `power`, or a connection key for a connection
+    /// backend.
     binding: &'static str,
     endpoints: Vec<Endpoint>,
 }
@@ -47,7 +46,7 @@ pub async fn run(bench: &Bench, cmd: ProviderCmd) -> Result<Report> {
         }
         ProviderCmd::Endpoints { provider, search } => {
             let capability = Capability::PowerSwitch;
-            let is_sigrok = bench.providers.kind(&provider) == Some(sigrok::KIND);
+            let usage = bench.providers.get(&provider)?.endpoint_use();
             let mut endpoints = bench.endpoints(&provider, capability).await?;
             if let Some(q) = search.as_deref().map(str::to_lowercase) {
                 endpoints.retain(|e| {
@@ -57,16 +56,24 @@ pub async fn run(bench: &Bench, cmd: ProviderCmd) -> Result<Report> {
                             .is_some_and(|n| n.to_lowercase().contains(&q))
                 });
             }
-            let human = if is_sigrok {
-                render_scan(&provider, &endpoints)
-            } else {
-                render_endpoints(&provider, &endpoints)
+            let (human, binding, capability) = match &usage {
+                EndpointUse::Native => (
+                    render_endpoints(&provider, &endpoints),
+                    "power",
+                    Some(capability),
+                ),
+                EndpointUse::Connection {
+                    key,
+                    note,
+                    none_found,
+                    ..
+                } => (render_found(key, note, none_found, &endpoints), *key, None),
             };
             Ok(Report::new(
                 &EndpointsData {
                     provider: &provider,
-                    capability: (!is_sigrok).then_some(capability),
-                    binding: if is_sigrok { "sigrok" } else { "power" },
+                    capability,
+                    binding,
                     endpoints,
                 },
                 human,
@@ -75,52 +82,41 @@ pub async fn run(bench: &Bench, cmd: ProviderCmd) -> Result<Report> {
     }
 }
 
-/// Devices whose `sigrok` binding names `backend`.
-fn sigrok_users<'a>(bench: &'a Bench, backend: &str) -> Vec<&'a str> {
+/// The devices that use provider `id`.
+fn users<'a>(bench: &'a Bench, id: &str) -> Vec<&'a str> {
+    // A provider that can't be built still counts its native bindings.
+    let natively = bench
+        .providers
+        .get(id)
+        .map_or(true, |p| p.endpoint_use() == EndpointUse::Native);
     bench
         .config
         .devices
         .iter()
-        .filter(|d| {
-            d.caps.values().any(|c| {
-                matches!(&c.binding, Binding::Script { sigrok: Some(s), .. }
-                    if s.backend.as_deref() == Some(backend))
-            })
-        })
+        .filter(|d| d.uses_provider(id, natively))
         .map(|d| d.id.as_str())
         .collect()
 }
 
 fn list(bench: &Bench) -> Result<Report> {
     let mut views: Vec<ProviderView> = Vec::new();
-    // `sigrok-cli` on PATH is a backend without configuration.
-    if bench.providers.kind(sigrok::IMPLICIT) == Some(sigrok::KIND)
-        && !bench.providers.configs().contains_key(sigrok::IMPLICIT)
-        && sigrok::Backend::implicit().found
-    {
-        views.push(ProviderView {
-            id: sigrok::IMPLICIT,
-            kind: sigrok::KIND,
-            used_by: sigrok_users(bench, sigrok::IMPLICIT),
-            implicit: true,
-        });
+    // Providers that exist without configuration, when they are there.
+    for (id, kind) in providers::implicit() {
+        if !bench.providers.configs().contains_key(id)
+            && bench.providers.get(id).is_ok_and(|p| p.present())
+        {
+            views.push(ProviderView {
+                id,
+                kind,
+                used_by: users(bench, id),
+                implicit: true,
+            });
+        }
     }
     views.extend(bench.providers.ids().map(|(id, cfg)| ProviderView {
         id,
         kind: &cfg.kind,
-        used_by: if cfg.kind == sigrok::KIND {
-            sigrok_users(bench, id)
-        } else {
-            bench
-                .config
-                .devices
-                .iter()
-                .filter(|d| {
-                    matches!(&d.power, Some(Binding::Native { provider, .. }) if provider == id)
-                })
-                .map(|d| d.id.as_str())
-                .collect()
-        },
+        used_by: users(bench, id),
         implicit: false,
     }));
     let rows: Vec<Vec<String>> = views
@@ -145,13 +141,10 @@ fn list(bench: &Bench) -> Result<Report> {
     ))
 }
 
-/// What a sigrok backend's scan found, with the binding to paste.
-fn render_scan(provider: &str, endpoints: &[Endpoint]) -> String {
+/// What a connection backend found, with the connection to paste into a script binding.
+fn render_found(key: &str, note: &str, none_found: &str, endpoints: &[Endpoint]) -> String {
     let Some(first) = endpoints.first() else {
-        return format!(
-            "sigrok backend `{provider}` found no devices (a plain scan finds USB devices; a \
-             serial one needs its `conn`: try `desk sigrok show <driver> --conn <port>`)\n"
-        );
+        return format!("{none_found}\n");
     };
     let rows: Vec<Vec<String>> = endpoints
         .iter()
@@ -164,8 +157,7 @@ fn render_scan(provider: &str, endpoints: &[Endpoint]) -> String {
         .map(|(k, v)| format!("{k} = {v}"))
         .collect();
     out.push_str(&format!(
-        "\nbind it in a script binding with: sigrok = {{ {} }}\n(a model gives `driver`; \
-         `conn` and `backend = \"{provider}\"` go in your desk.toml)\n",
+        "\nbind it in a script binding with: {key} = {{ {} }}\n{note}\n",
         params.join(", ")
     ));
     out
