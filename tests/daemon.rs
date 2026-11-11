@@ -466,3 +466,48 @@ fn a_starting_daemon_removes_files_of_daemons_that_are_gone() {
     assert!(run.join("desk-1111111111111111.log").exists());
     drop(held);
 }
+
+/// `desk watch … | head -1`: when the reader closes the pipe, the watch ends quietly (exit 0).
+#[cfg(unix)]
+#[test]
+fn watch_ends_quietly_when_its_reader_goes_away() {
+    use std::io::Read;
+    for json in [true, false] {
+        let b = Bench::new();
+        let mut args = vec!["watch", "psu", "--interval", "20ms"];
+        if json {
+            args.insert(0, "--json");
+        }
+        let mut child = b
+            .cmd(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut first = String::new();
+        out.read_line(&mut first).unwrap();
+        assert!(!first.is_empty(), "no output at all");
+        drop(out); // the reader goes away
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break s;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("watch kept running after its reader left");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert_eq!(status.code(), Some(0), "json={json}: {stderr}");
+        assert!(!stderr.contains("panicked"), "json={json}: {stderr}");
+    }
+}
