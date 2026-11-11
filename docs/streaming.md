@@ -233,12 +233,17 @@ subscriber received in 3 s, the best of three runs:
 | Real `sigrok-cli -d demo`, 8 channels, 100 MHz | `--discard` | 97 (sigrok alone into a pipe: 102) |
 | The same, 500 MHz | `--discard` | 481 (alone: 502) |
 | The same, 1 GHz (the most the demo driver accepts) | `--discard` | 629 (alone: 657) |
+| A USB 3 logic analyzer through its vendor's `sigrok-cli`, 32 channels at 200 MHz (800 MB/s) | `--discard --duration 5s` | 783 (alone, 5 s with its start: 783) |
 
 The fast sources outrun one subscriber, which then loses blocks (that's the rule: the source
 never waits); a source at a fixed rate below that (`rate=500000000` on the mock: 499 MB/s, the
 sigrok rows) loses nothing. "Alone" is `sigrok-cli` writing into a pipe that a small program
 reads, counted from the first byte; desk's numbers include sigrok's start (about 0.1 s of the 3 s).
 The numbers varied by up to a factor of three between runs, with the machine's other load.
+
+desk reads sigrok's stdout with blocking reads on a thread of its own. Reading it through the
+async runtime, woken after each pipe-full, held that analyzer to about 690 MB/s: sigrok-cli waited
+on the full pipe and buffered the rest (its memory grew by about 100 MB a second).
 
 desk passes on everything sigrok's `demo` driver delivers, up to its maximum, and moves about
 2 GB/s per subscriber from a synthetic source. A shared-memory transport is not needed for these

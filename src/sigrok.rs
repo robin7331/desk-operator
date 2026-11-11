@@ -940,10 +940,44 @@ impl Acquire {
 /// How much of the program's stdout a stream reads at once.
 const STREAM_READ: usize = 1 << 20;
 
+/// The program's stdout as a blocking file, for a thread of its own.
+#[cfg(unix)]
+fn blocking_pipe(pipe: tokio::process::ChildStdout) -> std::io::Result<std::fs::File> {
+    pipe.into_owned_fd().map(std::fs::File::from)
+}
+
+/// The program's stdout as a blocking file, for a thread of its own.
+#[cfg(windows)]
+fn blocking_pipe(pipe: tokio::process::ChildStdout) -> std::io::Result<std::fs::File> {
+    pipe.into_owned_handle().map(std::fs::File::from)
+}
+
+/// Copy `pipe` into `out` until its end, an error, or `out` refusing more (the stream stopped).
+fn pump_pipe(mut pipe: std::fs::File, out: &StreamOutput, program: &str) -> Result<u64> {
+    use std::io::Read;
+    let mut delivered = 0u64;
+    let mut buf = vec![0u8; STREAM_READ];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => return Ok(delivered),
+            Ok(n) => {
+                out.write(&buf[..n])?;
+                delivered += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(DeskError::Internal(format!("reading from {program}: {e}"))),
+        }
+    }
+}
+
 /// Run an acquisition into a stream sink: the program writes to its stdout (no `-o`), which the
 /// core reads in large chunks into `out`. Ends when the program does, when `out` is cancelled
 /// (the stream stopped), or at `req.timeout` (unless [`NO_TIMEOUT`]); the program is killed and
 /// reaped on anything but its own end. Returns the bytes it delivered.
+///
+/// The pipe is read by a thread of its own with blocking reads: a reader that waits in `read`
+/// takes the data as soon as it is there, while one woken by the runtime after each pipe-full
+/// left a fast program (800 MB/s) waiting on a full pipe.
 pub async fn stream(
     configs: &indexmap::IndexMap<String, ProviderConfig>,
     base_dir: &Path,
@@ -968,30 +1002,27 @@ pub async fn stream(
     })?;
     // stdin stays open until the program exits (`--continuous` stops at once on end of file).
     let stdin = child.stdin.take();
-    let mut stdout = child.stdout.take();
+    let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let deadline = Instant::now().checked_add(req.timeout);
+    let program = backend.program.display().to_string();
     let pump = async {
-        let mut delivered = 0u64;
-        let Some(pipe) = stdout.as_mut() else {
-            return Ok(delivered);
+        let Some(pipe) = stdout else {
+            return Ok(0);
         };
-        let mut buf = vec![0u8; STREAM_READ];
-        loop {
-            match pipe.read(&mut buf).await {
-                Ok(0) => return Ok(delivered),
-                Ok(n) => {
-                    out.write(&buf[..n])?;
-                    delivered += n as u64;
-                }
-                Err(e) => {
-                    return Err(DeskError::Internal(format!(
-                        "reading from {}: {e}",
-                        backend.program.display()
-                    )));
-                }
-            }
-        }
+        let pipe = blocking_pipe(pipe)
+            .map_err(|e| DeskError::Internal(format!("reading from {program}: {e}")))?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (sink, name) = (out.clone(), program.clone());
+        // Not joined: it ends with the pipe, or at its next write once the stream is stopped.
+        std::thread::Builder::new()
+            .name("sigrok-stream".into())
+            .spawn(move || {
+                let _ = tx.send(pump_pipe(pipe, &sink, &name));
+            })
+            .map_err(|e| DeskError::Internal(format!("starting the stream reader: {e}")))?;
+        rx.await
+            .unwrap_or_else(|_| Err(DeskError::Internal("the stream reader stopped".into())))
     };
     let errors = read_bounded(stderr, MAX_STDERR, true);
     tokio::pin!(pump, errors);
