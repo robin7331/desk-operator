@@ -120,6 +120,7 @@ Write only what identifies this unit, and which build runs it:
 [devices.la]
 model   = "vendor/model"
 capture = { sigrok = { conn = "1.23" } }     # `conn` from `desk provider endpoints`, if needed
+                                             # (the key is the model's capability: capture, meter, …)
 
 [providers.vendor]                           # only for a vendor's own sigrok build
 kind    = "sigrok"

@@ -147,11 +147,13 @@ reports about it), and give the user the path. desk never overwrites a file: an 
 its size cap (default 1 GiB, `[captures] max_size`) or is cancelled leaves no file behind.
 `--dry-run` says where the file would go (`data.into`) and creates nothing.
 
-Devices that sigrok drives (logic analyzers and others) capture through `sigrok-cli`, which the
-user installs separately. `desk sigrok drivers` and `desk provider test sigrok` show whether it is
-there. A second capture on the same device waits while the daemon runs, and otherwise fails as
-busy (`endpoint_unavailable`): don't retry it in a loop. A sigrok capture failing with
-`script_failed` carries sigrok's own message; show it.
+Devices that sigrok drives (logic analyzers, and also meters, supplies and loads) work through
+`sigrok-cli`, which the user installs separately: captures with `desk do`, readings and settings
+with `desk get`, `desk set` and `desk watch` like any other device. Each reading starts `sigrok-cli` once, so a
+`watch` on such a device updates more slowly than on a serial one. `desk sigrok drivers` and
+`desk provider test sigrok` show whether sigrok is there. A second capture on the same device
+waits while the daemon runs, and otherwise fails as busy (`endpoint_unavailable`): don't retry it
+in a loop. A sigrok call failing with `script_failed` carries sigrok's own message; show it.
 
 ## Safety
 

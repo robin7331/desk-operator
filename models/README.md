@@ -66,10 +66,28 @@ Rules:
 
 A model can reach its device through sigrok instead of a serial port: `sigrok = { driver = "…" }`
 on its binding, plus `build = "https://…"` when stock sigrok lacks the driver and a vendor build
-has it. The driver script captures with `ctx.sigrok.acquire{ … }` (see
-[`docs/scripting.md`](../docs/scripting.md) and [`docs/sigrok.md`](../docs/sigrok.md)). Users add
-`conn` and `backend` in their own config. `desk sigrok drivers`, `desk sigrok show <driver>` and
-`desk provider endpoints sigrok` help with finding the driver id, its config keys and the device.
+has it. The driver script captures with `ctx.sigrok.acquire{ … }`, and a meter, supply or load
+reads and changes values with `ctx.sigrok.measure`, `get` and `set` in its `read()` and `set()`
+(see [`docs/scripting.md`](../docs/scripting.md) and [`docs/sigrok.md`](../docs/sigrok.md)).
+Users add `conn` and `backend` in their own config. `desk sigrok drivers`, `desk sigrok show
+<driver>` and `desk provider endpoints sigrok` help with finding the driver id, its channels,
+channel groups and config keys, and the device.
+
+```lua
+function read(ctx)
+  local v = ctx.sigrok.get{ keys = { "voltage_target", "enabled" }, group = "CH1" }
+  local m = ctx.sigrok.measure{ channels = { "CH1" } }[1]
+  return { voltage = v.voltage_target, output = v.enabled, measured = m and m.value }
+end
+function set(ctx, name, value)
+  local key = ({ voltage = "voltage_target", output = "enabled" })[name]
+  ctx.sigrok.set{ config = { [key] = value }, group = "CH1" }
+end
+```
+
+Declare settings only when the device keeps them between runs of `sigrok-cli` and `get` reads
+them back: desk confirms a setting by reading it again. A device that forgets them declares
+values only.
 
 Its test uses a fake `sigrok-cli` (`tests/support/fake_sigrok_cli.rs`, built by `cargo test`),
 so neither CI nor contributors need sigrok or the device. `tests/support/sigrok.rs` sets up a
@@ -89,7 +107,11 @@ assert_eq!(b.fake.captures()[0][..4], ["-d", "acme-la", "--config", "samplerate=
 ```
 
 The fake's scenario (its drivers, devices, and behaviour such as a busy or missing device, a slow
-capture or a failure with a given message) is described at the top of `fake_sigrok_cli.rs`.
+capture or a failure with a given message) is described at the top of `fake_sigrok_cli.rs`. For
+values and settings, give it the device's config (`b.fake.device_config("CH1/voltage_target=0.0")`,
+which `--get` answers and `--set` keeps), its channel groups (`b.fake.groups(…)`) and the lines
+a measurement prints (`b.fake.readings("P1: 4.98 V DC")`), and assert `b.fake.gets()`,
+`b.fake.sets()` and `b.fake.measures()`. `tests/sigrok_values.rs` has examples.
 
 ## Contributing a model
 

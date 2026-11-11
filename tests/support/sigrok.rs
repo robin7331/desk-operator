@@ -93,6 +93,56 @@ impl Fake {
         self
     }
 
+    /// The device's config values for `--get` and `--set`: `key=value` or `GROUP/key=value` per
+    /// line, values as sigrok prints them (`200000`, `10.0`, `true`, `'square'`). Clears what an
+    /// earlier `--set` kept.
+    pub fn device_config(&self, lines: &str) -> &Self {
+        let _ = std::fs::remove_file(self.dir.join("kept"));
+        self.write("config", lines)
+    }
+
+    /// Channel groups `-g` accepts, one per line (groups in `device_config` count too).
+    pub fn groups(&self, lines: &str) -> &Self {
+        self.write("groups", lines)
+    }
+
+    /// What a measurement prints on stdout (with `per_channel=1` in `behaviour`: per sample and
+    /// requested channel, the first line for that channel).
+    pub fn readings(&self, lines: &str) -> &Self {
+        self.write("readings", lines)
+    }
+
+    /// What `--set` kept so far (`key=value` or `GROUP/key=value` lines).
+    pub fn kept(&self) -> String {
+        std::fs::read_to_string(self.dir.join("kept")).unwrap_or_default()
+    }
+
+    /// The calls that read config keys (they have `--get`).
+    pub fn gets(&self) -> Vec<Vec<String>> {
+        self.calls()
+            .into_iter()
+            .filter(|c| c.iter().any(|a| a == "--get"))
+            .collect()
+    }
+
+    /// The calls that changed config keys (they have `--set`).
+    pub fn sets(&self) -> Vec<Vec<String>> {
+        self.calls()
+            .into_iter()
+            .filter(|c| c.iter().any(|a| a == "--set"))
+            .collect()
+    }
+
+    /// The calls that took readings (`--samples` or `--time`, no `-o`).
+    pub fn measures(&self) -> Vec<Vec<String>> {
+        self.calls()
+            .into_iter()
+            .filter(|c| {
+                c.iter().any(|a| a == "--samples" || a == "--time") && !c.iter().any(|a| a == "-o")
+            })
+            .collect()
+    }
+
     /// Every call so far, each as its argument vector.
     pub fn calls(&self) -> Vec<Vec<String>> {
         std::fs::read_to_string(self.dir.join("log"))

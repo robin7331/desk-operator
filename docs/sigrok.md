@@ -2,15 +2,17 @@
 
 [sigrok](https://sigrok.org) drives many logic analyzers, oscilloscopes, multimeters and other
 instruments. To desk, sigrok is a **connection kind**, like a serial port: a model's binding names
-a sigrok driver, and its Lua driver captures through it (`ctx.sigrok.acquire`, see
-[`scripting.md`](scripting.md)).
+a sigrok driver, and its Lua driver captures, takes readings and changes settings through it
+(`ctx.sigrok.acquire`, `measure`, `get` and `set`, see [`scripting.md`](scripting.md)).
 
 desk never links sigrok's library. It runs a `sigrok-cli` program as a separate process and reads
-the file it writes. sigrok is GPLv3+ and desk is MIT OR Apache-2.0, so desk doesn't bundle sigrok
-or download it: you install it yourself.
+the file it writes or what it prints. sigrok is GPLv3+ and desk is MIT OR Apache-2.0, so desk
+doesn't bundle sigrok or download it: you install it yourself.
 
 ```sh
 desk do la capture duration=2s samplerate=10MHz    # a file in the capture folder
+desk get dmm                                       # a meter's reading
+desk set psu voltage 5v                            # a supply's setpoint, read back
 ```
 
 ## Getting sigrok
@@ -88,6 +90,29 @@ is checked while the file grows.
 sigrok's warnings on stderr (stock builds print Python decoder warnings on every run) never fail
 a capture: only its exit code does. When it fails, its last lines become the error message.
 
+## Values and settings
+
+Multimeters, power supplies and loads that sigrok drives work like any other device: `desk get`,
+`desk set` and `desk watch`. Their driver's `read()` takes readings with `ctx.sigrok.measure`
+and reads config keys with `ctx.sigrok.get`; its `set()` changes them with `ctx.sigrok.set`.
+`desk sigrok show <driver>` lists the channels, channel groups and config keys a device has.
+
+- **One process per call.** Every `measure`, `get` and `set` starts `sigrok-cli` and opens the
+  device again, so a reading takes as long as sigrok needs to start and connect (0.1 to 0.2 s
+  for the `demo` driver, more for a real device). `desk watch` on a sigrok device is slower
+  than on a serial device.
+- **Settings only for devices that keep them.** desk remembers nothing: after `desk set`, the
+  driver's `read()` reads the setting back with `get`, and desk confirms it or reports that it
+  was not confirmed. A device that forgets its config when `sigrok-cli` exits (sigrok's `demo`
+  device does) should not declare settings: its `get` reads values only.
+- **Readings come in the base unit.** sigrok prints `0.0 mV` or `3.3 kΩ`; the driver gets `0` V
+  and `3300` Ω, so a model declares `V` and `Ω` (or `units = [...]` for a meter whose unit
+  changes).
+
+For debugging by hand: `sigrok-cli -d <driver> --get a:b` prints the values of several keys in
+an order of its own, not the order asked for. desk passes one `--get <key>` per key, which keeps
+the order: `sigrok-cli -d demo -g A0 --get amplitude --get pattern`.
+
 ## Troubleshooting
 
 | Error | Meaning | What to do |
@@ -96,9 +121,10 @@ a capture: only its exit code does. When it fails, its last lines become the err
 | `config_invalid`: no sigrok backend has the driver | No backend lists the model's driver | `desk sigrok drivers`; add a build that has it (the message names the model's `build` link if it has one) |
 | `endpoint_unavailable`: found no such device | sigrok found nothing for this driver (and `conn`) | Plugged in, powered, the right `conn` (`desk provider endpoints`), udev rules |
 | `endpoint_unavailable`: the device is busy | Another program holds the device ("Unable to claim USB interface") | Close it (PulseView, another desk), then try again |
-| `timeout` | The capture took longer than the driver's `timeout` (a trigger that never came, say) | Check the trigger and the duration |
+| `endpoint_unavailable`: the device sent no readings | `measure` printed no reading for its channels | The channel names (`desk sigrok show`); a device that needs more `samples` or `time` |
+| `timeout` | The capture took longer than the driver's `timeout` (a trigger that never came, say), or a reading or setting longer than its own | Check the trigger and the duration; for readings, the backend's `timeout` |
 | `limit_exceeded` | The file grew over the size cap | Capture less, or `--max-size` |
-| `script_failed` with sigrok's text | Anything else sigrok refused, e.g. `unknown channel 'Z9'.` | Usually the driver's request; `desk sigrok show <driver>` lists what the device takes |
+| `script_failed` with sigrok's text | Anything else sigrok refused, e.g. `unknown channel 'Z9'.`, `Unknown option 'x'` or `Invalid channel group 'X'` | Usually the driver's request; `desk sigrok show <driver>` lists what the device takes |
 
 ## Trying it without hardware
 
@@ -107,4 +133,6 @@ Stock sigrok has a `demo` driver that needs no device:
 ```sh
 desk --config examples/sigrok/desk.toml do la capture duration=200ms
 desk --config examples/sigrok/desk.toml do la capture duration=1s samplerate=100khz format=binary
+desk --config examples/sigrok/desk.toml get dmm      # the demo device's analog channels
+desk --config examples/sigrok/desk.toml watch dmm --count 5
 ```

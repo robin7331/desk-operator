@@ -6,9 +6,10 @@
 //! * A **binding** names a sigrok driver: `sigrok = { driver, build, conn, backend }` on a script
 //!   binding of any capability, like `port`. `driver` and `build` come from the model; `conn` and
 //!   `backend` are per bench.
-//! * The driver script fills a capture with [`acquire`] (`ctx.sigrok.acquire{ … }`). The core
-//!   builds the command line, one checked argument per element, no shell: a script can never pass
-//!   raw arguments, a path or a program.
+//! * The driver script fills a capture with [`acquire`] (`ctx.sigrok.acquire{ … }`), takes
+//!   readings with [`measure`] and reads and changes config keys with [`get`] and [`set`]. The
+//!   core builds the command line, one checked argument per element, no shell: a script can never
+//!   pass raw arguments, a path or a program. desk keeps no state between runs.
 //!
 //! stderr never decides success (stock builds print Python decoder warnings on every run): the
 //! exit code does, and stderr only becomes the error text when the program failed.
@@ -864,22 +865,45 @@ pub fn check_format(f: &str) -> std::result::Result<(), String> {
     }
 }
 
+/// A channel group (`-g`): checked like a channel name.
+pub fn check_group(g: &str) -> std::result::Result<(), String> {
+    check_channel(g).map_err(|_| {
+        format!(
+            "group `{}` must be letters, digits, `_`, `.`, `-` (a channel group from `desk sigrok \
+             show`, e.g. CH1)",
+            g.escape_debug()
+        )
+    })
+}
+
+/// `-d <driver>[:conn=…]`, then `-g <group>` when there is one: how every run starts.
+fn device_args(spec: &SigrokSpec, group: Option<&str>) -> Vec<OsString> {
+    let mut a: Vec<OsString> = vec![
+        "-d".into(),
+        device_arg(&spec.driver, spec.conn.as_deref()).into(),
+    ];
+    if let Some(g) = group {
+        a.push("-g".into());
+        a.push(g.into());
+    }
+    a
+}
+
+/// `--config k=v:k=v`, nothing for no config.
+fn push_config(a: &mut Vec<OsString>, config: &[(String, String)]) {
+    if config.is_empty() {
+        return;
+    }
+    let joined: Vec<String> = config.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    a.push("--config".into());
+    a.push(joined.join(":").into());
+}
+
 impl Acquire {
     /// The command line for this capture into `path`: one argument per element.
     pub fn args(&self, spec: &SigrokSpec, path: &Path) -> Vec<OsString> {
-        let mut a: Vec<OsString> = vec![
-            "-d".into(),
-            device_arg(&spec.driver, spec.conn.as_deref()).into(),
-        ];
-        if !self.config.is_empty() {
-            let joined: Vec<String> = self
-                .config
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect();
-            a.push("--config".into());
-            a.push(joined.join(":").into());
-        }
+        let mut a = device_args(spec, None);
+        push_config(&mut a, &self.config);
         if !self.channels.is_empty() {
             a.push("--channels".into());
             a.push(self.channels.join(",").into());
@@ -921,22 +945,369 @@ pub async fn acquire(
     let mut cmd = backend.command(&args)?;
     // stdout carries nothing a capture needs.
     cmd.stdout(Stdio::null());
-    let fail = |text: String| {
-        let e = DeskError::ScriptFailed(format!(
-            "sigrok-cli ({}) failed for `{device}`: {text}",
-            backend.id
-        ));
-        backend.map_failure(e, &spec.driver, spec.conn.as_deref(), spec.build.as_deref())
-    };
     match run(cmd, &backend, req.timeout, Some(out)).await {
         Ok(ran) if ran.ok => out.check_size(),
-        Ok(ran) => Err(fail(ran.error_text())),
+        Ok(ran) => Err(failed(&backend, device, spec, ran.error_text())),
         Err(Stop::Timeout) => Err(DeskError::Timeout {
             what: format!("the sigrok capture of `{device}`"),
             after: req.timeout,
         }),
         Err(Stop::Failed(e)) => Err(e),
     }
+}
+
+/// A run that failed, as the error that says what to do: busy, not found, a missing driver;
+/// otherwise sigrok's own text.
+fn failed(backend: &Backend, device: &str, spec: &SigrokSpec, text: String) -> DeskError {
+    let e = DeskError::ScriptFailed(format!(
+        "sigrok-cli ({}) failed for `{device}`: {text}",
+        backend.id
+    ));
+    backend.map_failure(e, &spec.driver, spec.conn.as_deref(), spec.build.as_deref())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Values and settings: short runs inside a driver's read() or set()
+
+/// What `ctx.sigrok.get{ … }` asked for, checked: config keys, read in this order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Get {
+    pub keys: Vec<String>,
+    pub group: Option<String>,
+    /// `None`: the backend's query timeout.
+    pub timeout: Option<Duration>,
+}
+
+/// What `ctx.sigrok.set{ … }` asked for, checked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Set {
+    /// Keys and values as text, sorted by key (at least one).
+    pub config: Vec<(String, String)>,
+    pub group: Option<String>,
+    pub timeout: Option<Duration>,
+}
+
+/// What `ctx.sigrok.measure{ … }` asked for, checked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Measure {
+    /// At least one.
+    pub channels: Vec<String>,
+    /// `--samples <n>` or `--time <ms>`.
+    pub length: Length,
+    /// Applied in the same run.
+    pub config: Vec<(String, String)>,
+    pub group: Option<String>,
+    pub timeout: Option<Duration>,
+}
+
+impl Get {
+    /// One `--get <key>` per key: sigrok prints the keys of one `--get a:b` in an order of its
+    /// own, but repeated flags in the order given.
+    pub fn args(&self, spec: &SigrokSpec) -> Vec<OsString> {
+        let mut a = device_args(spec, self.group.as_deref());
+        for k in &self.keys {
+            a.push("--get".into());
+            a.push(k.into());
+        }
+        a
+    }
+}
+
+impl Set {
+    pub fn args(&self, spec: &SigrokSpec) -> Vec<OsString> {
+        let mut a = device_args(spec, self.group.as_deref());
+        push_config(&mut a, &self.config);
+        a.push("--set".into());
+        a
+    }
+}
+
+impl Measure {
+    /// No `-O`: sigrok's default output prints the analog readings as text (`-O analog` fails on
+    /// some builds after printing them).
+    pub fn args(&self, spec: &SigrokSpec) -> Vec<OsString> {
+        let mut a = device_args(spec, self.group.as_deref());
+        push_config(&mut a, &self.config);
+        a.push("--channels".into());
+        a.push(self.channels.join(",").into());
+        let (flag, n) = match self.length {
+            Length::Time(ms) => ("--time", ms),
+            Length::Samples(n) => ("--samples", n),
+            Length::Frames(n) => ("--frames", n),
+        };
+        a.push(flag.into());
+        a.push(n.to_string().into());
+        a
+    }
+}
+
+/// A value as `--get` printed it, typed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Typed {
+    Bool(bool),
+    Integer(i64),
+    Number(f64),
+    Text(String),
+}
+
+/// A number as sigrok prints it: `Some(Some(n))` for a finite number, `Some(None)` for
+/// infinity or NaN (an overload), `None` for anything that isn't a number.
+fn number(tok: &str) -> Option<Option<f64>> {
+    let lower = tok.to_ascii_lowercase();
+    let word = lower.trim_start_matches(['+', '-']);
+    if matches!(word, "inf" | "infinity" | "nan") {
+        return Some(None);
+    }
+    let looks = tok.starts_with(|c: char| c.is_ascii_digit() || matches!(c, '+' | '-' | '.'))
+        && tok.chars().any(|c| c.is_ascii_digit())
+        && tok
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E'));
+    if !looks {
+        return None;
+    }
+    let n: f64 = tok.parse().ok()?;
+    Some(n.is_finite().then_some(n))
+}
+
+/// `true`/`false` → boolean; an integer or float literal → number; text in single or double
+/// quotes → the text without them; anything else (tuples, typed values, units) → the trimmed
+/// text.
+pub fn typed(text: &str) -> Typed {
+    let t = text.trim();
+    match t {
+        "true" => return Typed::Bool(true),
+        "false" => return Typed::Bool(false),
+        _ => {}
+    }
+    if let Some(Some(n)) = number(t) {
+        return match t.parse::<i64>() {
+            Ok(i) => Typed::Integer(i),
+            Err(_) => Typed::Number(n),
+        };
+    }
+    for q in ['\'', '"'] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+            return Typed::Text(t[1..t.len() - 1].to_string());
+        }
+    }
+    Typed::Text(t.to_string())
+}
+
+/// Some of what sigrok printed, for an error message.
+fn excerpt(text: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return "nothing".into();
+    }
+    let mut cut = t.len().min(500);
+    while !t.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let more = if cut < t.len() { "…" } else { "" };
+    format!("{:?}{more}", &t[..cut])
+}
+
+/// `--get`'s stdout: exactly one line per key, in order (blank lines don't count).
+pub fn parse_get(
+    keys: &[String],
+    stdout: &str,
+) -> std::result::Result<Vec<(String, Typed)>, String> {
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() != keys.len() {
+        return Err(format!(
+            "asked for {} key(s) ({}) but sigrok printed {} line(s), one per key was expected: {}",
+            keys.len(),
+            keys.join(", "),
+            lines.len(),
+            excerpt(stdout)
+        ));
+    }
+    Ok(keys
+        .iter()
+        .cloned()
+        .zip(lines.into_iter().map(typed))
+        .collect())
+}
+
+/// One analog reading from sigrok's default output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reading {
+    pub channel: String,
+    /// In `unit`; `None` when sigrok printed no finite number (an overload).
+    pub value: Option<f64>,
+    /// The base unit when the unit table knows it (`mV` → `V`), else as printed.
+    pub unit: Option<String>,
+    pub flags: Vec<String>,
+    /// Everything after `<channel>: `.
+    pub text: String,
+}
+
+/// The flags sigrok prints after a reading's unit.
+const FLAGS: &[&str] = &[
+    "AC", "DC", "RMS", "DIODE", "HOLD", "MAX", "MIN", "AUTO", "REL", "AVG", "REF", "UNSTABLE",
+    "4WIRE",
+];
+
+/// `<channel>: <number> <unit> [flags…]`, e.g. `A1: 3.0902 V DC` or `P1: 0.0 mV DC`. A line
+/// whose number isn't one (`OL`) still is a reading when a known unit follows it. Anything else
+/// (headers, logic channels like `D0:100`) is `None`.
+pub fn parse_reading(line: &str) -> Option<Reading> {
+    let (channel, rest) = line.trim_end().split_once(": ")?;
+    check_channel(channel).ok()?;
+    let mut tokens = rest.split_whitespace();
+    let first = tokens.next()?;
+    let mut unit = None;
+    let mut flags = Vec::new();
+    for t in tokens {
+        if unit.is_none() && flags.is_empty() && !FLAGS.contains(&t) {
+            unit = Some(t);
+        } else {
+            flags.push(t.to_string());
+        }
+    }
+    let known = unit.and_then(crate::units::printed);
+    let value = match number(first) {
+        Some(v) => v,
+        None if known.is_some() => None,
+        None => return None,
+    };
+    let (value, unit) = match (known, unit) {
+        (Some((symbol, exp)), _) => (
+            value
+                .map(|n| scaled(first, n, exp))
+                .filter(|n| n.is_finite()),
+            Some(symbol.to_string()),
+        ),
+        (None, u) => (value, u.map(str::to_string)),
+    };
+    Some(Reading {
+        channel: channel.to_string(),
+        value,
+        unit,
+        flags,
+        text: rest.trim().to_string(),
+    })
+}
+
+/// `n` (printed as `text`) times 10^`exp`, without the noise of a float multiplication when
+/// the text allows it (`3.3` kΩ is 3300, not 3299.9999999999995).
+fn scaled(text: &str, n: f64, exp: i32) -> f64 {
+    if exp == 0 {
+        return n;
+    }
+    if !text.contains(['e', 'E'])
+        && let Ok(v) = format!("{text}e{exp}").parse::<f64>()
+    {
+        return v;
+    }
+    if exp < 0 {
+        n / 10f64.powi(-exp)
+    } else {
+        n * 10f64.powi(exp)
+    }
+}
+
+/// Run one short call (`get`, `set`, `measure`) to its end and return its stdout. Its own
+/// `timeout`, or the backend's query timeout.
+async fn run_short(
+    configs: &indexmap::IndexMap<String, ProviderConfig>,
+    base_dir: &Path,
+    device: &str,
+    spec: &SigrokSpec,
+    args: &[OsString],
+    timeout: Option<Duration>,
+    what: &str,
+) -> Result<String> {
+    let backend = resolve(configs, base_dir, spec).await?;
+    let cmd = backend.command(args)?;
+    let timeout = timeout.unwrap_or(backend.timeout);
+    match run(cmd, &backend, timeout, None).await {
+        Ok(ran) if ran.ok => Ok(ran.stdout),
+        Ok(ran) => Err(failed(&backend, device, spec, ran.error_text())),
+        Err(Stop::Timeout) => Err(DeskError::Timeout {
+            what: format!("sigrok-cli's {what} for `{device}`"),
+            after: timeout,
+        }),
+        Err(Stop::Failed(e)) => Err(e),
+    }
+}
+
+/// Read config keys (`ctx.sigrok.get`), in the order asked for.
+pub async fn get(
+    configs: &indexmap::IndexMap<String, ProviderConfig>,
+    base_dir: &Path,
+    device: &str,
+    spec: &SigrokSpec,
+    req: &Get,
+) -> Result<Vec<(String, Typed)>> {
+    let out = run_short(
+        configs,
+        base_dir,
+        device,
+        spec,
+        &req.args(spec),
+        req.timeout,
+        "get",
+    )
+    .await?;
+    parse_get(&req.keys, &out)
+        .map_err(|m| DeskError::ScriptFailed(format!("sigrok-cli --get for `{device}`: {m}")))
+}
+
+/// Change config keys (`ctx.sigrok.set`). desk keeps nothing: a driver's read() reads back.
+pub async fn set(
+    configs: &indexmap::IndexMap<String, ProviderConfig>,
+    base_dir: &Path,
+    device: &str,
+    spec: &SigrokSpec,
+    req: &Set,
+) -> Result<()> {
+    run_short(
+        configs,
+        base_dir,
+        device,
+        spec,
+        &req.args(spec),
+        req.timeout,
+        "set",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Take readings (`ctx.sigrok.measure`), in the order sigrok printed them. No readings at all is
+/// `endpoint_unavailable`.
+pub async fn measure(
+    configs: &indexmap::IndexMap<String, ProviderConfig>,
+    base_dir: &Path,
+    device: &str,
+    spec: &SigrokSpec,
+    req: &Measure,
+) -> Result<Vec<Reading>> {
+    let what = "measurement";
+    let out = run_short(
+        configs,
+        base_dir,
+        device,
+        spec,
+        &req.args(spec),
+        req.timeout,
+        what,
+    )
+    .await?;
+    let readings: Vec<Reading> = out.lines().filter_map(parse_reading).collect();
+    if readings.is_empty() {
+        return Err(DeskError::EndpointUnavailable {
+            endpoint: device_arg(&spec.driver, spec.conn.as_deref()),
+            message: format!(
+                "the device sent no readings for {} (sigrok printed {})",
+                req.channels.join(","),
+                excerpt(&out)
+            ),
+        });
+    }
+    Ok(readings)
 }
 
 #[cfg(test)]
@@ -1023,6 +1394,200 @@ mod tests {
             ..req()
         };
         assert!(text(frames.args(&spec(None), path)).contains(&"--frames".to_string()));
+    }
+
+    #[test]
+    fn get_set_and_measure_are_one_argument_per_element() {
+        let get = Get {
+            keys: vec!["voltage".into(), "enabled".into()],
+            group: None,
+            timeout: None,
+        };
+        assert_eq!(
+            text(get.args(&spec(None))),
+            ["-d", "demo", "--get", "voltage", "--get", "enabled"]
+        );
+        let get = Get {
+            group: Some("CH1".into()),
+            ..get
+        };
+        assert_eq!(
+            text(get.args(&spec(Some("/dev/ttyUSB0")))),
+            [
+                "-d",
+                "demo:conn=/dev/ttyUSB0",
+                "-g",
+                "CH1",
+                "--get",
+                "voltage",
+                "--get",
+                "enabled"
+            ]
+        );
+        let set = Set {
+            config: vec![
+                ("enabled".into(), "true".into()),
+                ("voltage_target".into(), "5".into()),
+            ],
+            group: Some("CH1".into()),
+            timeout: None,
+        };
+        assert_eq!(
+            text(set.args(&spec(None))),
+            [
+                "-d",
+                "demo",
+                "-g",
+                "CH1",
+                "--config",
+                "enabled=true:voltage_target=5",
+                "--set"
+            ]
+        );
+        let m = Measure {
+            channels: vec!["A0".into(), "A1".into()],
+            length: Length::Samples(1),
+            config: vec![],
+            group: None,
+            timeout: None,
+        };
+        assert_eq!(
+            text(m.args(&spec(None))),
+            ["-d", "demo", "--channels", "A0,A1", "--samples", "1"]
+        );
+        let m = Measure {
+            length: Length::Time(500),
+            config: vec![("amplitude".into(), "2".into())],
+            group: Some("A0".into()),
+            ..m
+        };
+        let args = text(m.args(&spec(Some("1.2"))));
+        assert_eq!(
+            args,
+            [
+                "-d",
+                "demo:conn=1.2",
+                "-g",
+                "A0",
+                "--config",
+                "amplitude=2",
+                "--channels",
+                "A0,A1",
+                "--time",
+                "500"
+            ]
+        );
+        assert!(!args.iter().any(|a| a == "-O" || a == "-o"));
+        for g in ["CH1", "A0", "Logic", "ch_1.x-2"] {
+            assert!(check_group(g).is_ok(), "{g}");
+        }
+        for g in ["", "-g", "CH 1", "CH1:x", "a=b", "a/b", "CH1\n"] {
+            assert!(check_group(g).is_err(), "{g:?}");
+        }
+    }
+
+    #[test]
+    fn get_values_are_typed() {
+        assert_eq!(typed("200000"), Typed::Integer(200000));
+        assert_eq!(typed("-3"), Typed::Integer(-3));
+        assert_eq!(typed("10.0"), Typed::Number(10.0));
+        assert_eq!(typed(" 1.5e-3 \r"), Typed::Number(0.0015));
+        assert_eq!(typed("true"), Typed::Bool(true));
+        assert_eq!(typed("false"), Typed::Bool(false));
+        assert_eq!(typed("'square'"), Typed::Text("square".into()));
+        assert_eq!(typed("\"x y\""), Typed::Text("x y".into()));
+        assert_eq!(typed("''"), Typed::Text(String::new()));
+        assert_eq!(typed("(1, 2)"), Typed::Text("(1, 2)".into()));
+        assert_eq!(typed("5 V"), Typed::Text("5 V".into()));
+        assert_eq!(typed("inf"), Typed::Text("inf".into()));
+        assert_eq!(typed("'"), Typed::Text("'".into()));
+        assert_eq!(typed("1.2.3"), Typed::Text("1.2.3".into()));
+        assert_eq!(typed("True"), Typed::Text("True".into()));
+
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let got = parse_get(&keys, "20\n'x'\n").unwrap();
+        assert_eq!(
+            got,
+            [
+                ("a".to_string(), Typed::Integer(20)),
+                ("b".to_string(), Typed::Text("x".into()))
+            ]
+        );
+        assert!(
+            parse_get(&keys, "20\n\n'x'\n\n").is_ok(),
+            "blank lines don't count"
+        );
+        let e = parse_get(&keys, "20\n").unwrap_err();
+        assert!(
+            e.contains("2 key(s)") && e.contains("1 line(s)") && e.contains("20"),
+            "{e}"
+        );
+        assert!(parse_get(&keys, "1\n2\n3\n").is_err());
+        assert!(parse_get(&keys, "").unwrap_err().contains("nothing"));
+    }
+
+    #[test]
+    fn readings_are_parsed_into_base_units() {
+        let r = parse_reading("A1: 3.0902 V DC").unwrap();
+        assert_eq!(r.channel, "A1");
+        assert_eq!(r.value, Some(3.0902));
+        assert_eq!(r.unit.as_deref(), Some("V"));
+        assert_eq!(r.flags, ["DC"]);
+        assert_eq!(r.text, "3.0902 V DC");
+        let r = parse_reading("A0: -10.0000 V DC").unwrap();
+        assert_eq!(r.value, Some(-10.0));
+        let r = parse_reading("A1: 0.0 mV DC").unwrap();
+        assert_eq!((r.value, r.unit.as_deref()), (Some(0.0), Some("V")));
+        let r = parse_reading("P1: 2.4 mV DC").unwrap();
+        assert_eq!(r.value, Some(0.0024));
+        let r = parse_reading("P1: 3.3 kΩ").unwrap();
+        assert_eq!((r.value, r.unit.as_deref()), (Some(3300.0), Some("Ω")));
+        assert!(r.flags.is_empty());
+        let r = parse_reading("P1: 4.7 k\u{2126} AUTO").unwrap();
+        assert_eq!((r.value, r.unit.as_deref()), (Some(4700.0), Some("Ω")));
+        let r = parse_reading("P1: 12.5 µA AC RMS AUTO HOLD").unwrap();
+        assert_eq!((r.value, r.unit.as_deref()), (Some(12.5e-6), Some("A")));
+        assert_eq!(r.flags, ["AC", "RMS", "AUTO", "HOLD"]);
+        let r = parse_reading("P1: 25.3 uA DC").unwrap();
+        assert_eq!(r.value, Some(25.3e-6));
+        let r = parse_reading("P1: 1.2e3 mV DC").unwrap();
+        assert_eq!(r.value, Some(1.2));
+        let r = parse_reading("T1: 21.5 °C").unwrap();
+        assert_eq!((r.value, r.unit.as_deref()), (Some(21.5), Some("°C")));
+        // A unit the table doesn't know: kept as printed.
+        let r = parse_reading("P1: 70.1 °F").unwrap();
+        assert_eq!((r.value, r.unit.as_deref()), (Some(70.1), Some("°F")));
+        let r = parse_reading("P1: -3.5 dBm").unwrap();
+        assert_eq!((r.value, r.unit.as_deref()), (Some(-3.5), Some("dBm")));
+        // No unit: flags right after the number.
+        let r = parse_reading("P1: 42 DC").unwrap();
+        assert_eq!((r.value, r.unit), (Some(42.0), None));
+        assert_eq!(r.flags, ["DC"]);
+        let r = parse_reading("P1: 42").unwrap();
+        assert_eq!((r.value, r.unit), (Some(42.0), None));
+        // Overloads: no value, the text tells.
+        for line in ["P1: inf V DC", "P1: -inf mV", "P1: nan Ω", "P1: OL kΩ AUTO"] {
+            let r = parse_reading(line).unwrap_or_else(|| panic!("{line}"));
+            assert_eq!(r.value, None, "{line}");
+            assert!(r.unit.is_some(), "{line}");
+            assert_eq!(r.text, line["P1: ".len()..], "{line}");
+        }
+        // Not readings.
+        for junk in [
+            "libsigrok 0.5.2-git-9ffa3638",
+            "Acquisition with 1/13 channels at 10 Hz",
+            "D0:100",
+            "D0:10101010 11110000",
+            "",
+            "A0: ",
+            "A0: OL",
+            "A0: OL junk",
+            "bad channel: 3 V",
+            "-x: 3 V",
+            "  A0 3 V",
+        ] {
+            assert_eq!(parse_reading(junk), None, "{junk:?}");
+        }
     }
 
     #[test]

@@ -1,8 +1,10 @@
-# A sample bench with a logic analyzer reached through sigrok: stock sigrok's `demo` driver, so it
-# needs no hardware, only sigrok-cli on PATH (see docs/sigrok.md).
+# A sample bench with a logic analyzer and a meter reached through sigrok: stock sigrok's `demo`
+# driver, so it needs no hardware, only sigrok-cli on PATH (see docs/sigrok.md).
 #
 #   desk --config examples/sigrok/desk.toml do la capture duration=200ms
 #   desk --config examples/sigrok/desk.toml do la capture duration=1s samplerate=100khz format=binary
+#   desk --config examples/sigrok/desk.toml get dmm
+#   desk --config examples/sigrok/desk.toml watch dmm --count 5
 #
 # Captures go to the state folder (`[captures] dir` or $DESK_CAPTURE_DIR change that).
 
@@ -26,3 +28,18 @@ samplerate = { type = "number", unit = "Hz", min = 1000, max = 100e6, default = 
 channels   = { type = "string", default = "D0,D1,D2,D3", doc = "comma-separated, e.g. D0,D1" }
 format     = { type = "choice", choices = ["srzip", "binary", "csv", "vcd"], default = "srzip" }
 trigger    = { type = "string", optional = true, doc = "sigrok triggers, e.g. D0=r" }
+
+# The demo device's analog channels as a meter: sigrok-cli runs once per reading.
+[devices.dmm]
+name = "sigrok demo meter"
+
+[devices.dmm.meter]
+script  = "demo_meter.lua"
+sigrok  = { driver = "demo" }
+timeout = "5s"
+
+[devices.dmm.meter.values]
+a0        = { type = "number", unit = "V", doc = "analog channel A0 (a square wave by default)" }
+a1        = { type = "number", unit = "V", doc = "analog channel A1 (a sine wave by default)" }
+# A value, not a setting: the demo device forgets its config between runs.
+amplitude = { type = "number", unit = "V", doc = "the amplitude of A0's pattern, read with get" }

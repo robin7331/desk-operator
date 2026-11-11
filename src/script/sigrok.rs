@@ -9,10 +9,11 @@ use super::output_of;
 use crate::deadline;
 use crate::error::DeskError;
 use crate::providers::Registry;
-use crate::sigrok::{self, Acquire, Length, SigrokSpec};
+use crate::sigrok::{self, Acquire, Get, Length, Measure, Set, SigrokSpec, Typed};
 
-/// `ctx.sigrok`: `driver`, `conn` and `acquire{ … }` for the binding's sigrok device (and only
-/// that one). Without a `sigrok = { … }` binding, `acquire` fails with a config error.
+/// `ctx.sigrok`: `driver`, `conn`, `acquire{ … }`, `measure{ … }`, `get{ … }` and `set{ … }` for
+/// the binding's sigrok device (and only that one). Without a `sigrok = { … }` binding, the
+/// functions fail with a config error.
 pub(super) fn sigrok_api(
     lua: &Lua,
     device: &str,
@@ -24,32 +25,31 @@ pub(super) fn sigrok_api(
         t.set("driver", s.driver.as_str())?;
         t.set("conn", s.conn.as_deref())?;
     }
-    let device = device.to_string();
+    let call = Call {
+        device: device.to_string(),
+        spec,
+        providers,
+    };
+
+    let c = call.clone();
     let acquire = lua.create_async_function(move |lua, req: Value| {
-        let spec = spec.clone();
-        let providers = providers.clone();
-        let device = device.clone();
+        let c = c.clone();
         async move {
-            let Some(spec) = spec else {
-                return Err(mlua::Error::external(DeskError::ConfigInvalid(
-                    "ctx.sigrok.acquire: this binding has no `sigrok = { driver = \"…\" }`".into(),
-                )));
-            };
-            let Value::Table(req) = req else {
-                return Err(mlua::Error::runtime(
-                    "ctx.sigrok.acquire expects a table, e.g. ctx.sigrok.acquire{ samples = 1000, \
-                     into = ctx.output, timeout = \"5s\" }",
-                ));
-            };
-            let acquire = acquire_request(&req)
-                .map_err(|m| mlua::Error::runtime(format!("ctx.sigrok.acquire: {m}")))?;
-            let out = output_of(&req, "ctx.sigrok.acquire")?;
+            let f = "ctx.sigrok.acquire";
+            let spec = c.binding(f)?;
+            let req = table(
+                req,
+                f,
+                "ctx.sigrok.acquire{ samples = 1000, into = ctx.output, timeout = \"5s\" }",
+            )?;
+            let acquire = acquire_request(&req).map_err(|m| runtime(f, m))?;
+            let out = output_of(&req, f)?;
             // Its own timeout instead of the script's and the session's.
             let _suspended = deadline::suspend();
             let bytes = sigrok::acquire(
-                providers.configs(),
-                providers.base_dir(),
-                &device,
+                c.providers.configs(),
+                c.providers.base_dir(),
+                &c.device,
                 &spec,
                 &acquire,
                 &out,
@@ -62,7 +62,107 @@ pub(super) fn sigrok_api(
         }
     })?;
     t.set("acquire", acquire)?;
+
+    let c = call.clone();
+    let measure = lua.create_async_function(move |lua, req: Value| {
+        let c = c.clone();
+        async move {
+            let f = "ctx.sigrok.measure";
+            let spec = c.binding(f)?;
+            let req = table(req, f, "ctx.sigrok.measure{ channels = { \"P1\" } }")?;
+            let m = measure_request(&req).map_err(|m| runtime(f, m))?;
+            let (cfg, dir) = (c.providers.configs(), c.providers.base_dir());
+            let readings = sigrok::measure(cfg, dir, &c.device, &spec, &m)
+                .await
+                .map_err(mlua::Error::external)?;
+            let list = lua.create_table()?;
+            for r in readings {
+                let t = lua.create_table()?;
+                t.set("channel", r.channel)?;
+                t.set("value", r.value)?;
+                t.set("unit", r.unit)?;
+                t.set("flags", lua.create_sequence_from(r.flags)?)?;
+                t.set("text", r.text)?;
+                list.push(t)?;
+            }
+            Ok(list)
+        }
+    })?;
+    t.set("measure", measure)?;
+
+    let c = call.clone();
+    let get = lua.create_async_function(move |lua, req: Value| {
+        let c = c.clone();
+        async move {
+            let f = "ctx.sigrok.get";
+            let spec = c.binding(f)?;
+            let req = table(req, f, "ctx.sigrok.get{ keys = { \"voltage\" } }")?;
+            let g = get_request(&req).map_err(|m| runtime(f, m))?;
+            let (cfg, dir) = (c.providers.configs(), c.providers.base_dir());
+            let values = sigrok::get(cfg, dir, &c.device, &spec, &g)
+                .await
+                .map_err(mlua::Error::external)?;
+            let out = lua.create_table()?;
+            for (k, v) in values {
+                match v {
+                    Typed::Bool(b) => out.set(k, b)?,
+                    Typed::Integer(i) => out.set(k, i)?,
+                    Typed::Number(n) => out.set(k, n)?,
+                    Typed::Text(s) => out.set(k, s)?,
+                }
+            }
+            Ok(out)
+        }
+    })?;
+    t.set("get", get)?;
+
+    let c = call;
+    let set = lua.create_async_function(move |_, req: Value| {
+        let c = c.clone();
+        async move {
+            let f = "ctx.sigrok.set";
+            let spec = c.binding(f)?;
+            let req = table(req, f, "ctx.sigrok.set{ config = { voltage_target = 5 } }")?;
+            let s = set_request(&req).map_err(|m| runtime(f, m))?;
+            let (cfg, dir) = (c.providers.configs(), c.providers.base_dir());
+            sigrok::set(cfg, dir, &c.device, &spec, &s)
+                .await
+                .map_err(mlua::Error::external)
+        }
+    })?;
+    t.set("set", set)?;
     Ok(t)
+}
+
+/// What every `ctx.sigrok` function needs: the device, its binding and the backends.
+#[derive(Clone)]
+struct Call {
+    device: String,
+    spec: Option<SigrokSpec>,
+    providers: Arc<Registry>,
+}
+
+impl Call {
+    fn binding(&self, function: &str) -> mlua::Result<SigrokSpec> {
+        self.spec.clone().ok_or_else(|| {
+            mlua::Error::external(DeskError::ConfigInvalid(format!(
+                "{function}: this binding has no `sigrok = {{ driver = \"…\" }}`"
+            )))
+        })
+    }
+}
+
+fn runtime(function: &str, message: String) -> mlua::Error {
+    mlua::Error::runtime(format!("{function}: {message}"))
+}
+
+fn table(req: Value, function: &str, example: &str) -> mlua::Result<Table> {
+    match req {
+        Value::Table(t) => Ok(t),
+        _ => Err(mlua::Error::runtime(format!(
+            "{function} expects a table, e.g. {example}"
+        ))),
+    }
 }
 
 /// A duration from Lua: milliseconds (number) or a string like "2s".
@@ -97,25 +197,16 @@ fn lua_count(what: &str, v: &Value) -> std::result::Result<u64, String> {
     }
 }
 
-/// Check the table a driver passes to `ctx.sigrok.acquire` (everything but `into`).
-fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
-    const KEYS: &[&str] = &[
-        "config",
-        "channels",
-        "time",
-        "samples",
-        "frames",
-        "triggers",
-        "wait_trigger",
-        "format",
-        "into",
-        "timeout",
-    ];
-    let lua_err = |e: mlua::Error| e.to_string();
+fn lua_err(e: mlua::Error) -> String {
+    e.to_string()
+}
+
+/// Refuse keys that aren't in `keys`.
+fn only(t: &Table, keys: &[&str]) -> std::result::Result<(), String> {
     for pair in t.pairs::<Value, Value>() {
         let (k, _) = pair.map_err(lua_err)?;
         let known = match &k {
-            Value::String(s) => s.to_str().is_ok_and(|s| KEYS.contains(&&*s)),
+            Value::String(s) => s.to_str().is_ok_and(|s| keys.contains(&&*s)),
             _ => false,
         };
         if !known {
@@ -125,14 +216,17 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
                     Value::String(s) => format!("`{}`", s.to_string_lossy()),
                     other => format!("of type {}", other.type_name()),
                 },
-                KEYS.join(", ")
+                keys.join(", ")
             ));
         }
     }
-    let get = |k: &str| t.get::<Value>(k).map_err(lua_err);
+    Ok(())
+}
 
+/// `config = { k = v, … }`: checked keys and values as text, sorted by key.
+fn config_of(v: Value) -> std::result::Result<Vec<(String, String)>, String> {
     let mut config = Vec::new();
-    match get("config")? {
+    match v {
         Value::Nil => {}
         Value::Table(c) => {
             for pair in c.pairs::<Value, Value>() {
@@ -174,8 +268,13 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
             ));
         }
     }
+    Ok(config)
+}
 
-    let channels: Vec<String> = match get("channels")? {
+/// `channels = { "D0", "D1" }` or `"D0,D1"`, checked; empty for nil. `empty` says what an empty
+/// list means.
+fn channels_of(v: Value, empty: &str) -> std::result::Result<Vec<String>, String> {
+    let channels: Vec<String> = match v {
         Value::Nil => Vec::new(),
         Value::String(s) => {
             let s = s
@@ -197,7 +296,7 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
                 }
             }
             if v.is_empty() {
-                return Err("`channels` is empty (leave it out for all channels)".into());
+                return Err(format!("`channels` is empty ({empty})"));
             }
             v
         }
@@ -211,6 +310,54 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
     for c in &channels {
         sigrok::check_channel(c)?;
     }
+    Ok(channels)
+}
+
+/// `group = "CH1"`, checked; `None` for nil.
+fn group_of(v: Value) -> std::result::Result<Option<String>, String> {
+    match v {
+        Value::Nil => Ok(None),
+        Value::String(s) => {
+            let s = s.to_str().map_err(|_| "`group` must be text".to_string())?;
+            sigrok::check_group(&s)?;
+            Ok(Some(s.to_string()))
+        }
+        other => Err(format!(
+            "`group` must be a channel group name like \"CH1\", not {}",
+            other.type_name()
+        )),
+    }
+}
+
+/// An optional `timeout`.
+fn timeout_of(v: Value) -> std::result::Result<Option<Duration>, String> {
+    match v {
+        Value::Nil => Ok(None),
+        v => lua_duration("timeout", &v).map(Some),
+    }
+}
+
+/// Check the table a driver passes to `ctx.sigrok.acquire` (everything but `into`).
+fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
+    only(
+        t,
+        &[
+            "config",
+            "channels",
+            "time",
+            "samples",
+            "frames",
+            "triggers",
+            "wait_trigger",
+            "format",
+            "into",
+            "timeout",
+        ],
+    )?;
+    let get = |k: &str| t.get::<Value>(k).map_err(lua_err);
+
+    let config = config_of(get("config")?)?;
+    let channels = channels_of(get("channels")?, "leave it out for all channels")?;
 
     let mut lengths = Vec::new();
     for k in ["time", "samples", "frames"] {
@@ -219,12 +366,7 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
             continue;
         }
         lengths.push(match k {
-            "time" => {
-                let d = lua_duration("time", &v)?;
-                // Whole milliseconds, never shorter than asked.
-                let ms = d.as_nanos().div_ceil(1_000_000);
-                Length::Time(u64::try_from(ms).map_err(|_| "`time` is too long".to_string())?)
-            }
+            "time" => time_of(&v)?,
             "samples" => Length::Samples(lua_count(k, &v)?),
             _ => Length::Frames(lua_count(k, &v)?),
         });
@@ -297,5 +439,92 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
         wait_trigger,
         format,
         timeout,
+    })
+}
+
+/// `time`: whole milliseconds, never shorter than asked.
+fn time_of(v: &Value) -> std::result::Result<Length, String> {
+    let d = lua_duration("time", v)?;
+    let ms = d.as_nanos().div_ceil(1_000_000);
+    Ok(Length::Time(
+        u64::try_from(ms).map_err(|_| "`time` is too long".to_string())?,
+    ))
+}
+
+/// Check the table a driver passes to `ctx.sigrok.measure`.
+fn measure_request(t: &Table) -> std::result::Result<Measure, String> {
+    only(
+        t,
+        &["channels", "samples", "time", "config", "group", "timeout"],
+    )?;
+    let get = |k: &str| t.get::<Value>(k).map_err(lua_err);
+    let channels = channels_of(get("channels")?, "name the channels to read")?;
+    if channels.is_empty() {
+        return Err("`channels` is required: the channels to read, e.g. { \"P1\" }".into());
+    }
+    let length = match (get("samples")?, get("time")?) {
+        (Value::Nil, Value::Nil) => Length::Samples(1),
+        (s, Value::Nil) => Length::Samples(lua_count("samples", &s)?),
+        (Value::Nil, t) => time_of(&t)?,
+        _ => return Err("give only one of `samples` and `time`".into()),
+    };
+    Ok(Measure {
+        channels,
+        length,
+        config: config_of(get("config")?)?,
+        group: group_of(get("group")?)?,
+        timeout: timeout_of(get("timeout")?)?,
+    })
+}
+
+/// Check the table a driver passes to `ctx.sigrok.get`.
+fn get_request(t: &Table) -> std::result::Result<Get, String> {
+    only(t, &["keys", "group", "timeout"])?;
+    let get = |k: &str| t.get::<Value>(k).map_err(lua_err);
+    let mut keys: Vec<String> = Vec::new();
+    match get("keys")? {
+        Value::Table(list) => {
+            for item in list.sequence_values::<Value>() {
+                let Value::String(k) = item.map_err(lua_err)? else {
+                    return Err("`keys` lists sigrok config names like \"voltage\"".into());
+                };
+                let k = k.to_string_lossy();
+                sigrok::check_config_key(&k)?;
+                if keys.contains(&k) {
+                    return Err(format!("`keys` names `{k}` twice"));
+                }
+                keys.push(k);
+            }
+        }
+        Value::Nil => {}
+        other => {
+            return Err(format!(
+                "`keys` must be a list like {{ \"voltage\", \"enabled\" }}, not {}",
+                other.type_name()
+            ));
+        }
+    }
+    if keys.is_empty() {
+        return Err("`keys` is required: at least one sigrok config key to read".into());
+    }
+    Ok(Get {
+        keys,
+        group: group_of(get("group")?)?,
+        timeout: timeout_of(get("timeout")?)?,
+    })
+}
+
+/// Check the table a driver passes to `ctx.sigrok.set`.
+fn set_request(t: &Table) -> std::result::Result<Set, String> {
+    only(t, &["config", "group", "timeout"])?;
+    let get = |k: &str| t.get::<Value>(k).map_err(lua_err);
+    let config = config_of(get("config")?)?;
+    if config.is_empty() {
+        return Err("`config` is required: at least one sigrok config key and its value".into());
+    }
+    Ok(Set {
+        config,
+        group: group_of(get("group")?)?,
+        timeout: timeout_of(get("timeout")?)?,
     })
 }

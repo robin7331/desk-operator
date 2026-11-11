@@ -965,8 +965,8 @@ local r = ctx.sigrok.acquire{
   is killed on timeout, cancel and drop, and its stderr (bounded) becomes the error message.
   Stock sigrok prints decoder warnings on stderr even on success: stderr never decides success.
 - `ctx.sigrok.driver`, `ctx.sigrok.conn`: what the binding says.
-- Not yet: `get`/`set`/readings through sigrok (multimeters and supplies sigrok drives). The
-  binding works on any capability so those can follow without a redesign.
+- The binding works on any capability, so readings and settings could follow without a
+  redesign (they did: M8.1).
 
 **Errors:** program not found (`provider_unreachable`, hint: install sigrok or set `program`);
 no backend has the driver (hint names driver and `build`); device not found and device busy
@@ -1008,6 +1008,52 @@ unchanged.
 - Downloading or bundling sigrok builds (`build` leaves room for URL + SHA-256 per platform).
 - Protocol decoders, a viewer, a `list` argument type, retention of old captures, a free-disk
   check, keeping a cancelled capture's partial file, moving bytes from a serial port into a sink.
+
+## M8.1 — Readings and settings through sigrok (2026-11-11)
+
+**Goal:** many sigrok drivers are for multimeters, power supplies and loads. With three more host
+functions next to `acquire`, a Lua driver implements the ordinary `read()` and `set()` of a
+declared capability (or of `source`) on a sigrok device, and `desk get|set|watch` work for it like
+for any other device. No new commands, no new model-format keys.
+
+```lua
+local r = ctx.sigrok.measure{ channels = { "P1" }, samples = 1, config = { … }, group = "A0", timeout = "3s" }
+-- { { channel = "P1", value = 4.98, unit = "V", flags = { "DC" }, text = "4.98 V DC" }, … }
+local v = ctx.sigrok.get{ keys = { "voltage", "enabled" }, group = "CH1" }   -- { voltage = 4.98, enabled = true }
+ctx.sigrok.set{ config = { voltage_target = 5, enabled = true }, group = "CH1" }
+```
+
+- **Command lines**, built in one place with `acquire`'s device argument and config rendering:
+  `get` → `-d … [-g <group>] --get <k1> --get <k2> …` (one flag per key: sigrok prints the keys
+  of one `--get a:b` in an order of its own); `set` → `-d … [-g <group>] --config k=v:k=v --set`;
+  `measure` → `-d … [-g <group>] [--config …] --channels a,b --samples <n>` or `--time <ms>`,
+  never `-O` (`-O analog` fails on stock 0.7.2 after printing) and never `-o`.
+- **`get`:** exactly one stdout line per key, in order, or an error that shows what sigrok
+  printed. `true`/`false`, numbers and quoted text are typed; anything else is the text.
+- **`measure`:** lines `<channel>: <number> <unit> [flags…]` are readings, other lines are
+  skipped. Numbers and SI-prefixed units become the unit table's base unit (`0.0 mV` → 0 V), so
+  they match what a model declares; unknown units stay as printed; an overload has no `value`.
+  No reading at all is `endpoint_unavailable`.
+- **Timeouts:** optional, default the backend's query timeout. These are short calls inside a
+  normal `read()`/`set()`: they don't suspend the call's own timeout.
+- **No state in the core.** A device that keeps its settings is read back by `read()` with
+  `get`; desk's generic rules confirm or report it. A device that forgets them between runs
+  (sigrok's `demo`) declares no settings.
+
+- [x] `Get`, `Set`, `Measure` in `src/sigrok.rs` with `acquire`'s device argument, config and
+      runner; value typing and the reading parser; `units::printed`
+- [x] `ctx.sigrok.measure|get|set` in `src/script/sigrok.rs` (the request checks shared with
+      `acquire`)
+- [x] The fake learns `--get`, `--set`, `-g`, unknown keys and groups, readings, `forget`, `slow`;
+      the helper gets `device_config`, `groups`, `readings`, `kept`, `gets`, `sets`, `measures`
+- [x] `tests/sigrok_values.rs`: a meter (`units = [...]`), a supply confirmed by its read-back
+      and one that forgets, exact command lines, checks, failures, timeouts, `watch` through the
+      daemon, the real `demo` meter where sigrok is installed
+- [x] `examples/sigrok/`: the `dmm` meter on the demo device
+- [x] `docs/scripting.md`, `docs/sigrok.md`, `models/README.md`, skills, `AGENTS.md`, README
+
+Not in M8.1: long-running sigrok sessions (one process per call, so `watch` is slower than on a
+serial device), parsing `--show`, caching values.
 
 ## After M6 (rough order, re-evaluate each time)
 

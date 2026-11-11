@@ -81,14 +81,15 @@ pack the folder for the user at the end (step 11).
   Bluetooth. desk drivers reach a device in one of two ways:
   - **serial** (`port = { … }`, `ctx.serial`): the driver speaks the protocol itself;
   - **sigrok** (`sigrok = { driver = … }`, `ctx.sigrok`): sigrok already supports the device
-    (stock `sigrok-cli`, or a vendor's sigrok build), and desk runs `sigrok-cli` for captures.
-    Check `desk sigrok drivers --json` and sigrok's device list at https://sigrok.org. Today the
-    driver can only capture through sigrok (`acquire`); reading values or changing settings
-    through sigrok isn't there yet.
+    (stock `sigrok-cli`, or a vendor's sigrok build), and desk runs `sigrok-cli` for it:
+    captures (`acquire`), readings (`measure`) and config keys (`get`, `set`). Check `desk
+    sigrok drivers --json` and sigrok's device list at https://sigrok.org.
 
-  Prefer sigrok when it supports the device and the job is a capture: no protocol work. Any
-  other connection (HID, USBTMC, LAN, Bluetooth, or values and settings through sigrok) is a gap
-  in desk itself: see *When desk itself is missing something*.
+  Prefer sigrok when it supports the device: no protocol work, for a logic analyzer as for a
+  meter, supply or load (see *Captures* and *Meters and supplies*). Each reading or setting
+  starts `sigrok-cli` once, so a serial driver is faster for `desk watch`; say so when the user
+  cares. Any other connection (HID, USBTMC, LAN, Bluetooth) is a gap in desk itself: see *When
+  desk itself is missing something*.
 
 ### 2. Check the existing models first
 
@@ -168,9 +169,10 @@ identify the model (name query) before it sends anything else, and the user bind
 
 **A sigrok device:** `desk sigrok show <driver> [--conn …] --json` prints sigrok's own
 description: channels, channel groups, config keys (`samplerate`, …) with their ranges or choices,
-and trigger types. That is what the driver may put in `acquire{ config = … }`. It opens the
-device but changes nothing. Then a short test capture is step 9. The rest of this step is for
-serial devices.
+and trigger types. That is what the driver may put in `acquire{ config = … }`, `get{ keys = … }`
+and `set{ config = … }`, and which channels `measure` reads. It opens the device but changes
+nothing. Then a short test capture or `desk get` is step 9. The rest of this step is for serial
+devices.
 
 Confirm with the user that nothing is connected to the outputs, then send documented queries:
 
@@ -336,10 +338,60 @@ end
   another program), `script_failed` with sigrok's message (a config key or channel the device
   doesn't have).
 
+## Meters and supplies (through sigrok)
+
+A meter, supply or load that sigrok drives is a declared capability (or `source` for a supply)
+whose `read()` and `set()` call sigrok. Find the channel names, channel groups and config keys
+with `desk sigrok show <driver> [--conn …] --json`.
+
+```toml
+[meter]
+script = "driver.lua"
+sigrok = { driver = "vendor-dmm" }
+
+[meter.values]
+reading = { type = "number", units = ["V", "A", "Ω"], doc = "main display" }
+```
+
+```lua
+PARAMS = {}
+function read(ctx)
+  local r = ctx.sigrok.measure{ channels = { "P1" } }[1]   -- { channel, value, unit, flags, text }
+  if r == nil or r.value == nil then return {} end         -- an overload has no value
+  return { reading = { value = r.value, unit = r.unit } }  -- unit in the base unit: V, not mV
+end
+```
+
+A supply's `read()` reads its config keys back, and `set()` changes them:
+
+```lua
+function read(ctx)
+  local v = ctx.sigrok.get{ keys = { "voltage_target", "enabled" }, group = "CH1" }
+  return { voltage = v.voltage_target, output = v.enabled }
+end
+function set(ctx, name, value)
+  local key = ({ voltage = "voltage_target", output = "enabled" })[name]
+  ctx.sigrok.set{ config = { [key] = value }, group = "CH1" }
+end
+```
+
+- **Declare settings only if the device keeps them** between runs of `sigrok-cli` and `get`
+  reads them back: desk confirms every `desk set` with `read()`. Check it on the bench:
+  `desk set`, then `desk get` in a new command. A device that forgets them (sigrok's `demo`
+  does) declares values only.
+- The key names are sigrok's (`voltage_target`, `enabled`); the model's names are desk's. Map
+  them in the driver, and get the ranges from the sources, not from guesses.
+- **The fake-device test:** `b.fake.device_config("CH1/voltage_target=0.0\nCH1/enabled=false")`
+  (what `--get` answers and `--set` keeps), `b.fake.readings("P1: 4.98 V DC")` (what a
+  measurement prints), `b.fake.behaviour("forget=1")` for a device that forgets; assert
+  `b.fake.gets()`, `b.fake.sets()`, `b.fake.measures()`. `tests/sigrok_values.rs` has examples.
+- **Smoke test:** `desk get <dev> --json` with nothing connected; settings only with the user's
+  OK, with nothing connected to the outputs.
+
 ## When desk itself is missing something
 
 Some devices need more than a model: a connection desk can't open yet (HID, USBTMC, LAN,
-Bluetooth; values and settings through sigrok), a host API function, a kind of declaration desk doesn't have, extra settings or
+Bluetooth), a host API function, a kind of declaration desk doesn't have, extra settings or
 actions on `source`. **Never work around it in the driver** (no side channels in `params`, no
 abusing another capability). Instead:
 

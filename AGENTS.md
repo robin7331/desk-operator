@@ -23,7 +23,8 @@ commands keep working (`docs/streaming.md`). **M7, open capabilities, done** (`p
 `v0.1.0` to `v0.3.1`: CI, release builds, one-line installers and `desk update`. **M8, captures
 and sigrok, done** (`plan.md`, "M8"): actions that produce a file (`produces = "file"`, a sink the
 core owns), and sigrok as a connection kind (`sigrok-cli` run as a separate program,
-`docs/sigrok.md`). Still open:
+`docs/sigrok.md`). **M8.1**: readings and settings through sigrok (`ctx.sigrok.measure|get|set`
+in a driver's `read()`/`set()`). Still open:
 validating the `desk-setup` skill on a real bench, and real installs and serial devices on macOS
 and Windows (roadmap in `plan.md`).
 Keep it lean: build only what the current milestone needs.
@@ -57,7 +58,7 @@ Keep it lean: build only what the current milestone needs.
 | **Provider** | A configured connection to something that can switch or control many things, such as Home Assistant, a Shelly, a USB relay board, an RF dongle, or a sigrok backend (a `sigrok-cli` program; stock `sigrok-cli` on PATH is the implicit `sigrok`). You configure it once. |
 | **Endpoint** | One thing a provider can list and control, such as an HA entity `switch.desk_outlet_1`. Providers can list their endpoints, which is what makes pickers possible. |
 | **Binding** | A device's power path. It is either **native** (`{ provider = "ha", entity = "…" }`) or **script** (`{ script = "x.lua" }`). |
-| **Host API** | The Rust functions exposed to Lua scripts (providers, `sleep`, `log`, `clock`, serial ports, sigrok captures). This is the real plugin contract, so keep it small and stable. |
+| **Host API** | The Rust functions exposed to Lua scripts (providers, `sleep`, `log`, `clock`, serial ports, sigrok captures, readings and settings). This is the real plugin contract, so keep it small and stable. |
 
 ### Power bindings
 
@@ -144,7 +145,8 @@ src/
                        `desk port probe` (raw hex in/out) lives in cli/port.rs
   sigrok.rs            sigrok as a connection kind: the `sigrok = { … }` binding, backends (the
                        implicit `sigrok-cli` on PATH, `kind = "sigrok"` providers), resolution,
-                       running sigrok-cli (`acquire`'s checked command line); `desk sigrok
+                       running sigrok-cli (the checked command lines of `acquire`, `measure`,
+                       `get`, `set`; parsing readings and values); `desk sigrok
                        drivers|show` lives in cli/sigrok.rs, the provider in providers/sigrok.rs
   models.rs           models: search path, `model.toml` parsing, merge, bundled files
   providers/           Provider trait, lazy Registry, implicit providers, Params helper; mock.rs,
@@ -183,6 +185,8 @@ tests/sigrok.rs        sigrok against a fake sigrok-cli: backends, `desk sigrok`
                        resolution, ctx.sigrok.acquire (exact command lines, checks, failures,
                        timeout, size cap, cancel, one user per device); one test uses the real
                        `sigrok-cli -d demo` when it is installed
+tests/sigrok_values.rs ctx.sigrok.measure|get|set: meters and supplies through `desk get|set|watch`,
+                       exact command lines, checks, failures, timeouts; the real `demo` meter
 tests/update.rs        `desk update` against a fake release (wiremock); swapping the binary on Unix
 tests/models.rs       model = "…", merging, search path, desk model list|show|check
 tests/model_checks.rs       every model passes the check, and the README lists it with its status

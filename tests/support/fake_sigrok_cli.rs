@@ -18,9 +18,27 @@
 //!   * `noisy=1`: decoder warnings on stderr, also on success
 //!   * `stray=1`: also create `<path>.xyz.part` next to the output, like srzip does
 //!
+//!   * `query=ok|busy|fail` for `--get`, `--set` and measurements (default ok); `message=…` and
+//!     `exit=N` for `fail`
+//!   * `slow=N`: `--get`, `--set` and measurements take N ms (holding the device)
+//!   * `forget=1`: `--set` succeeds but keeps nothing, like the demo device (a fresh process
+//!     starts from `config` again)
+//!   * `get_extra=…`: `--get` prints this line after the values (a wrong line count)
+//!   * `per_channel=1`: a measurement prints, per sample and requested channel, the first line
+//!     of `readings` for that channel; otherwise it prints `readings` as it is
+//! * `config`: the device's config values, `key=value` or `GROUP/key=value` per line, the value
+//!   as sigrok prints it (`200000`, `10.0`, `true`, `'square'`). `--get` answers from it (one
+//!   line per key; the keys of one `--get a:b` come back in reverse order, like the real program
+//!   mixes them up), and `--set` accepts only its keys
+//! * `kept`: what `--set` stored, the same format; `--get` prefers it over `config`
+//! * `groups`: channel groups, one per line (groups named in `config` count too). `-g` with any
+//!   other fails like the real program
+//! * `readings`: what a measurement (no `-o`, no `-O`) prints on stdout
+//!
 //! Like real hardware, one device serves one capture at a time (`busy.lock`, held while it
-//! captures): a second one fails with "Unable to claim USB interface". While capturing it watches
-//! stdin: if it reaches end of file, it fails (desk must keep it open).
+//! captures, and during `--get`, `--set` and measurements): a second one fails with "Unable to
+//! claim USB interface". While capturing it watches stdin: if it reaches end of file, it fails
+//! (desk must keep it open).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -122,19 +140,25 @@ fn main() {
         .collect();
 
     let mut device_arg = None;
+    let mut group: Option<String> = None;
+    let mut gets: Vec<String> = Vec::new();
     let mut opts: HashMap<&str, String> = HashMap::new();
     let mut flags: Vec<&str> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--version" | "-L" | "--scan" | "--show" | "--wait-trigger" => flags.push(a),
-            "-d" | "--config" | "--channels" | "--triggers" | "--time" | "--samples"
-            | "--frames" | "-O" | "-o" => {
+            "--version" | "-L" | "--scan" | "--show" | "--wait-trigger" | "--set" => flags.push(a),
+            "-d" | "-g" | "--get" | "--config" | "--channels" | "--triggers" | "--time"
+            | "--samples" | "--frames" | "-O" | "-o" => {
                 let Some(v) = it.next() else {
                     die(2, &format!("fake sigrok-cli: {a} needs a value"));
                 };
                 if *a == "-d" {
                     device_arg = Some(v.clone());
+                } else if *a == "-g" {
+                    group = Some(v.clone());
+                } else if *a == "--get" {
+                    gets.push(v.clone());
                 } else {
                     let key = match a.as_str() {
                         "--config" => "config",
@@ -215,7 +239,200 @@ fn main() {
         print!("{text}");
         exit(0);
     }
+    let values = flags.contains(&"--set")
+        || !gets.is_empty()
+        || !(opts.contains_key("output") || opts.contains_key("format"));
+    if values {
+        let config = Config::load(&dir);
+        if let Some(g) = &group
+            && !config.groups.contains(g)
+        {
+            die(1, &format!("Invalid channel group '{g}'"));
+        }
+        let _lock = query_start(&dir, &b);
+        if flags.contains(&"--set") {
+            set(&dir, &b, &config, group.as_deref(), &opts);
+        } else if !gets.is_empty() {
+            get(&b, &config, group.as_deref(), &gets);
+        } else {
+            measure(&dir, &b, device, &opts);
+        }
+        exit(0);
+    }
     acquire(&dir, &b, device, &opts, &flags);
+}
+
+/// The device's config (`config`, `kept`) and its channel groups.
+struct Config {
+    /// `(group, key) → value`, `kept` over `config`.
+    values: HashMap<(Option<String>, String), String>,
+    /// The keys `config` has (what `--set` accepts).
+    defaults: HashMap<(Option<String>, String), String>,
+    groups: Vec<String>,
+}
+
+fn config_lines(text: &str) -> Vec<((Option<String>, String), String)> {
+    text.lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| {
+            let k = k.trim();
+            let key = match k.split_once('/') {
+                Some((g, k)) => (Some(g.to_string()), k.to_string()),
+                None => (None, k.to_string()),
+            };
+            (key, v.trim().to_string())
+        })
+        .collect()
+}
+
+impl Config {
+    fn load(dir: &Path) -> Config {
+        let defaults: HashMap<_, _> = config_lines(&read(dir, "config").unwrap_or_default())
+            .into_iter()
+            .collect();
+        let mut values = defaults.clone();
+        values.extend(config_lines(&read(dir, "kept").unwrap_or_default()));
+        let mut groups: Vec<String> = read(dir, "groups")
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        groups.extend(defaults.keys().filter_map(|(g, _)| g.clone()));
+        Config {
+            values,
+            defaults,
+            groups,
+        }
+    }
+}
+
+/// `query=busy|fail`, then the device lock and `slow`. The lock is held until the process ends.
+fn query_start(dir: &Path, b: &Behaviour) -> std::fs::File {
+    match b.get("query") {
+        Some("busy") => die(
+            1,
+            "sr: fake: Unable to claim USB interface. Another program or driver has already claimed it.",
+        ),
+        Some("fail") => {
+            let code = b.get("exit").and_then(|e| e.parse().ok()).unwrap_or(1);
+            die(code, b.get("message").unwrap_or("fake failure"));
+        }
+        _ => {}
+    }
+    let lock = match std::fs::File::create(dir.join("busy.lock")) {
+        Ok(f) => f,
+        Err(e) => die(70, &format!("fake sigrok-cli: busy.lock: {e}")),
+    };
+    if lock.try_lock().is_err() {
+        die(
+            1,
+            "sr: fake: Unable to claim USB interface. Another program or driver has already claimed it.",
+        );
+    }
+    if let Some(ms) = b.get("slow").and_then(|v| v.parse().ok()) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    lock
+}
+
+fn get(b: &Behaviour, config: &Config, group: Option<&str>, gets: &[String]) {
+    let mut lines = Vec::new();
+    for g in gets {
+        let mut keys: Vec<&str> = g.split(':').collect();
+        // The real program answers the keys of one `--get a:b` in an order of its own.
+        keys.reverse();
+        for k in keys {
+            match config.values.get(&(group.map(String::from), k.to_string())) {
+                Some(v) => lines.push(v.clone()),
+                None => die(1, &format!("Unknown option '{k}'")),
+            }
+        }
+    }
+    for l in lines {
+        println!("{l}");
+    }
+    if let Some(extra) = b.get("get_extra") {
+        println!("{extra}");
+    }
+}
+
+fn set(
+    dir: &Path,
+    b: &Behaviour,
+    config: &Config,
+    group: Option<&str>,
+    opts: &HashMap<&str, String>,
+) {
+    let Some(pairs) = opts.get("config") else {
+        die(1, "fake sigrok-cli: --set without --config");
+    };
+    let mut kept = read(dir, "kept").unwrap_or_default();
+    for pair in pairs.split(':') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = (group.map(String::from), k.to_string());
+        let Some(default) = config.defaults.get(&key) else {
+            die(1, &format!("Unknown device option '{k}'."));
+        };
+        let v = if default.starts_with('\'') {
+            format!("'{v}'")
+        } else {
+            v.to_string()
+        };
+        let name = match group {
+            Some(g) => format!("{g}/{k}"),
+            None => k.to_string(),
+        };
+        kept = kept
+            .lines()
+            .filter(|l| l.split_once('=').is_none_or(|(n, _)| n.trim() != name))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        kept.push_str(&format!("{name}={v}\n"));
+    }
+    if b.get("forget") != Some("1")
+        && let Err(e) = std::fs::write(dir.join("kept"), kept)
+    {
+        die(70, &format!("fake sigrok-cli: kept: {e}"));
+    }
+}
+
+fn measure(dir: &Path, b: &Behaviour, device: &Device, opts: &HashMap<&str, String>) {
+    let channels: Vec<&str> = opts
+        .get("channels")
+        .map_or(Vec::new(), |c| c.split(',').collect());
+    for c in &channels {
+        if !device.channels.iter().any(|d| d == c) {
+            die(1, &format!("unknown channel '{c}'."));
+        }
+    }
+    let lengths = ["time", "samples", "frames"]
+        .iter()
+        .filter(|k| opts.contains_key(*k))
+        .count();
+    if lengths != 1 {
+        die(
+            1,
+            "fake sigrok-cli: give one of --time, --samples, --frames",
+        );
+    }
+    let readings = read(dir, "readings").unwrap_or_default();
+    if b.get("per_channel") != Some("1") {
+        print!("{readings}");
+        return;
+    }
+    let n: u64 = opts
+        .get("samples")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    for _ in 0..n {
+        for c in &channels {
+            let prefix = format!("{c}: ");
+            if let Some(l) = readings.lines().find(|l| l.starts_with(&prefix)) {
+                println!("{l}");
+            }
+        }
+    }
 }
 
 struct Behaviour(HashMap<String, String>);

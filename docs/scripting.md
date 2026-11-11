@@ -122,8 +122,11 @@ capture = { script = "drivers/la.lua", sigrok = { driver = "demo" } }
 | `ctx.sigrok.driver` | The binding's `driver` |
 | `ctx.sigrok.conn` | The binding's `conn`, or `nil` |
 | `ctx.sigrok.acquire{ … }` | Capture into the file of an action that produces one. Returns `{ bytes = n }` |
+| `ctx.sigrok.measure{ … }` | Take readings from analog channels (a meter's display, a supply's output). Returns a list of readings |
+| `ctx.sigrok.get{ … }` | Read config keys (a supply's setpoint, a meter's mode). Returns `{ key = value, … }` |
+| `ctx.sigrok.set{ … }` | Change config keys. Returns nothing |
 
-Without a `sigrok = { … }` binding, `acquire` fails with `config_invalid`.
+Without a `sigrok = { … }` binding, each of them fails with `config_invalid`.
 
 ```lua
 local r = ctx.sigrok.acquire{
@@ -157,6 +160,82 @@ sigrok's stdin stays open until it exits, and its warnings on stderr never fail 
 its exit code does. Failures: device busy or not found (`endpoint_unavailable`), no backend has
 the driver (`config_invalid`), no `sigrok-cli` (`provider_unreachable`), and anything else as
 `script_failed` with sigrok's own message.
+
+### Readings and settings through sigrok
+
+`measure`, `get` and `set` are short calls for the `read()` and `set()` of a declared capability
+(or of `source`). Each one runs `sigrok-cli` once. They don't suspend the call's own timeout: the
+`timeout` they take is for that one run of sigrok, and the call's timeout still covers the whole
+`read()` or `set()`.
+
+```lua
+function read(ctx)
+  local out = {}
+  for _, r in ipairs(ctx.sigrok.measure{ channels = { "P1" } }) do
+    if r.value then out.reading = { value = r.value, unit = r.unit } end   -- `units = [...]`
+  end
+  local v = ctx.sigrok.get{ keys = { "voltage_target", "enabled" }, group = "CH1" }
+  out.voltage, out.output = v.voltage_target, v.enabled
+  return out
+end
+
+function set(ctx, name, value)
+  local key = ({ voltage = "voltage_target", output = "enabled" })[name]
+  ctx.sigrok.set{ config = { [key] = value }, group = "CH1" }
+end
+```
+
+`ctx.sigrok.measure{ … }`:
+
+| Key | | Becomes |
+|---|---|---|
+| `channels` | Required: a list of names, or one comma-separated string (checked like `acquire`'s) | one `--channels a,b` |
+| `samples` / `time` | At most one. `samples` a whole number above 0, default `1`; `time` in ms or a duration string | `--samples <n>`, `--time <ms>` |
+| `config` | Optional, like `acquire`'s: applied in the same run | one `--config k=v:k=v` (keys sorted) |
+| `group` | Optional channel group for `config`: letters, digits, `_`, `.`, `-`, not starting with `-` | `-g <group>` |
+| `timeout` | Optional: ms or a duration string. Default: the backend's `timeout` (10 s) | desk stops sigrok after it |
+
+It returns the readings in the order sigrok printed them, one table each:
+
+| Field | |
+|---|---|
+| `channel` | `"P1"` |
+| `value` | The number in the base unit: sigrok's `0.0 mV` is `0` V, `3.3 kΩ` is `3300` Ω. `nil` when sigrok printed no number (an overload) |
+| `unit` | A unit from desk's table (`V`, `A`, `Ω`, `Hz`, `°C`, …, see [`model-format.md`](model-format.md)), so it matches what a model declares. A unit the table doesn't know (`°F`, `dBm`) stays as printed, with the number as printed. `nil` without a unit |
+| `flags` | What sigrok printed after the unit, e.g. `{ "DC" }` or `{ "AC", "RMS", "AUTO" }` |
+| `text` | Everything sigrok printed after `<channel>: `, e.g. `"4.98 V DC"` |
+
+sigrok prints one line per channel and sample. Lines that aren't readings (headers, logic
+channels) are skipped; a channel that never printed is missing from the list; no reading at all is
+`endpoint_unavailable`. desk runs sigrok without `-O`: its default output prints the readings.
+
+`ctx.sigrok.get{ … }`:
+
+| Key | | Becomes |
+|---|---|---|
+| `keys` | Required: a list of config keys (`[a-z0-9_]+`), each once | one `--get <key>` per key, in order |
+| `group` | Optional channel group, as for `measure` | `-g <group>` |
+| `timeout` | Optional, as for `measure` | |
+
+sigrok prints one line per key; any other number of lines is `script_failed` with what it
+printed. Values are typed: `true`/`false` become booleans, numbers become numbers, text in quotes
+(`'square'`) becomes the text without them, and anything else (tuples, values with a unit) the
+text as printed.
+
+`ctx.sigrok.set{ … }`:
+
+| Key | | Becomes |
+|---|---|---|
+| `config` | Required: at least one key, like `acquire`'s `config` | one `--config k=v:k=v` (keys sorted), then `--set` |
+| `group` | Optional channel group, as for `measure` | `-g <group>` |
+| `timeout` | Optional, as for `measure` | |
+
+desk remembers nothing between calls. After a `set`, desk calls `read()` and compares, as for
+every device: a driver whose `read()` reads the setting back with `get` gets it confirmed, and a
+device that forgot it is reported (`verify_failed`, or "not confirmed" when `read()` leaves it
+out). A sigrok device that forgets its config between runs of `sigrok-cli` should not declare
+settings at all. Failures are the same as for `acquire`; an unknown key, a group the device
+doesn't have and every other refusal come as `script_failed` with sigrok's own text.
 
 ## Drivers of declared capabilities
 
@@ -328,5 +407,7 @@ loops written in Lua.
 - [`examples/sigrok/demo.lua`](../examples/sigrok/demo.lua): a capture action on stock sigrok's
   `demo` driver (`desk --config examples/sigrok/desk.toml do la capture duration=200ms`, needs
   sigrok-cli)
+- [`examples/sigrok/demo_meter.lua`](../examples/sigrok/demo_meter.lua): a meter on the same
+  device, with `measure` and `get` (`desk --config examples/sigrok/desk.toml get dmm`)
 
 Try them without hardware: `desk --config examples/desk.toml power on station`.
