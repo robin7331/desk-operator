@@ -110,6 +110,30 @@ impl Catalog {
         out
     }
 
+    /// How a name is written in what desk reports (readings, `requested`, `verified`):
+    /// `setpoint`, or `heater.setpoint` when another capability of the device declares that name
+    /// too. `schema` and `device show` list names by the same rule.
+    pub fn shown(&self, entry: usize, name: &str) -> String {
+        let clashes = self
+            .entries
+            .iter()
+            .filter(|e| e.decls.names().any(|m| m == name) || e.decls.streams.contains_key(name))
+            .count()
+            > 1;
+        match self.entries.get(entry) {
+            Some(e) if clashes => format!("{}.{name}", e.key),
+            _ => name.to_string(),
+        }
+    }
+
+    /// Readings of one capability, with every name as it is shown.
+    fn shown_readings(&self, entry: usize, readings: Readings) -> Readings {
+        readings
+            .into_iter()
+            .map(|(n, v)| (self.shown(entry, &n), v))
+            .collect()
+    }
+
     /// Find a name (`setpoint` or `heater.setpoint`): the entry's index and the bare name.
     pub fn resolve(&self, query: &str) -> Result<(usize, String)> {
         let (cap, name) = match query.split_once('.') {
@@ -171,8 +195,16 @@ impl Catalog {
         }
     }
 
-    /// The declaration of a readable name (for display and `--changes`), any capability.
+    /// The declaration of a readable name (for display and `--changes`): a shown name, so
+    /// `setpoint` in any capability, or `heater.setpoint`.
     pub fn readable_decl(&self, name: &str) -> Option<&Decl> {
+        if let Some((cap, n)) = name.split_once('.') {
+            return self
+                .entries
+                .iter()
+                .find(|e| e.key == cap)
+                .and_then(|e| e.decls.readable_decl(n));
+        }
         self.entries
             .iter()
             .find_map(|e| e.decls.readable_decl(name))
@@ -323,11 +355,17 @@ pub fn source_decls(ratings: SourceInfo, channels: Option<Vec<String>>) -> Decla
     let mut settings = IndexMap::new();
     settings.insert(
         "voltage".into(),
-        num("V", ratings.max_voltage, "voltage setpoint", true),
+        Decl {
+            tolerance: ratings.voltage_tolerance,
+            ..num("V", ratings.max_voltage, "voltage setpoint", true)
+        },
     );
     settings.insert(
         "current".into(),
-        num("A", ratings.max_current, "current limit", true),
+        Decl {
+            tolerance: ratings.current_tolerance,
+            ..num("A", ratings.max_current, "current limit", true)
+        },
     );
     settings.insert(
         "output".into(),
@@ -514,7 +552,7 @@ pub fn plan_get(
                     cat.device
                 )));
             }
-            out.push(name);
+            out.push(cat.shown(i, &name));
         }
         Some(out)
     };
@@ -839,7 +877,7 @@ async fn read_entry(
         (Some(chs), None) => chs.iter().cloned().map(Some).collect(),
     };
     for ch in channels {
-        let r = read_one(e, drv, ch.as_deref(), warnings).await?;
+        let r = cat.shown_readings(i, read_one(e, drv, ch.as_deref(), warnings).await?);
         match (&e.decls.channels, channel, ch) {
             (Some(_), None, Some(ch)) => into.channels.entry(ch).or_default().extend(r),
             _ => into.values.extend(r),
@@ -918,19 +956,27 @@ pub async fn run(cat: &Catalog, drivers: &Drivers, op: &Op) -> Result<Outcome> {
                         ];
                         for (n, v) in names {
                             if v == Some(true) {
-                                out.verified.insert(n.into(), true);
+                                out.verified.insert(cat.shown(p.entry, n), true);
                             }
                         }
                         out.warnings.extend(r.warnings);
                         out.applied |= r.applied;
-                        out.readings.values.extend(source_readings(&r.reading));
+                        out.readings
+                            .values
+                            .extend(cat.shown_readings(p.entry, source_readings(&r.reading)));
                     }
                     (CapDriver::Declared(drv), None) => {
                         let o =
                             declared::set(drv.as_ref(), &e.decls, ch, &p.values, *dry_run).await?;
-                        out.verified.extend(o.verified);
+                        out.verified.extend(
+                            o.verified
+                                .into_iter()
+                                .map(|(n, ok)| (cat.shown(p.entry, &n), ok)),
+                        );
                         out.applied |= o.applied;
-                        out.readings.values.extend(o.values);
+                        out.readings
+                            .values
+                            .extend(cat.shown_readings(p.entry, o.values));
                     }
                     _ => return Err(DeskError::Internal(format!("`{}`: kind mismatch", e.key))),
                 }
@@ -990,7 +1036,10 @@ pub async fn run(cat: &Catalog, drivers: &Drivers, op: &Op) -> Result<Outcome> {
                 });
             }
             out.applied = o.applied;
-            out.readings.values.extend(o.values);
+            out.warnings.extend(o.warnings);
+            out.readings
+                .values
+                .extend(cat.shown_readings(*entry, o.values));
         }
     }
     Ok(out)
@@ -1025,7 +1074,10 @@ impl Report {
             Op::Get { channel } => (channel.clone(), Readings::new(), None, IndexMap::new()),
             Op::Set { channel, parts, .. } => (
                 channel.clone(),
-                parts.iter().flat_map(|p| p.values.clone()).collect(),
+                parts
+                    .iter()
+                    .flat_map(|p| cat.shown_readings(p.entry, p.values.clone()))
+                    .collect(),
                 None,
                 IndexMap::new(),
             ),
@@ -1100,7 +1152,7 @@ mod tests {
             SourceInfo {
                 max_voltage: Some(30.0),
                 max_current: Some(5.0),
-                max_power: None,
+                ..SourceInfo::default()
             },
             None,
         );
@@ -1122,6 +1174,19 @@ mod tests {
         assert_eq!(r["measured_voltage"], Val::Number(4.99));
         assert_eq!(r["protection"], Val::Text("ocp".into()));
         assert!(!r.contains_key("current"), "unreported stays absent");
+    }
+
+    #[test]
+    fn a_supplys_tolerance_shows_in_its_settings() {
+        let d = source_decls(
+            SourceInfo {
+                voltage_tolerance: Some(0.005),
+                ..SourceInfo::default()
+            },
+            None,
+        );
+        assert_eq!(d.settings["voltage"].tolerance, Some(0.005));
+        assert_eq!(d.settings["current"].tolerance, None);
     }
 
     #[test]

@@ -836,12 +836,23 @@ pub fn confirms(decl: &Decl, want: &Val, got: &Val) -> bool {
 pub fn changed(decl: Option<&Decl>, old: Option<&Val>, new: Option<&Val>) -> bool {
     match (old, new) {
         (Some(o), Some(n)) => match (decl, o.as_f64(), n.as_f64()) {
-            (Some(d), Some(_), Some(_)) => !confirms(d, o, n) || unit_of(o) != unit_of(n),
+            (Some(d), Some(a), Some(b)) => moved(d, a, b) || unit_of(o) != unit_of(n),
             _ => o != n,
         },
         (None, None) => false,
         _ => true,
     }
+}
+
+/// Whether a number moved enough to count as changed: by more than its declared `tolerance`, or
+/// without one by more than 0.5 % of its size. That keeps measurement noise quiet at any scale.
+/// The fixed floor used for confirming a setting has no place here: it would hide every change
+/// of a small reading (millivolts, microamps, nanofarads).
+fn moved(decl: &Decl, old: f64, new: f64) -> bool {
+    let tolerance = decl
+        .tolerance
+        .unwrap_or_else(|| old.abs().max(new.abs()) * TOLERANCE_REL);
+    (old - new).abs() > tolerance
 }
 
 fn unit_of(v: &Val) -> Option<&str> {
@@ -1008,11 +1019,20 @@ pub async fn act(
             }
         }
     }
-    let outcome = Outcome {
-        values: read(drv, decls, channel).await?,
+    // The action is done: a read that fails now must not undo that. Its result (a file, something
+    // that switched) is reported, with the read's error as a warning. A dry run did nothing, so
+    // there the read is all there is.
+    let mut outcome = Outcome {
         applied: !dry_run,
         ..Outcome::default()
     };
+    match read(drv, decls, channel).await {
+        Ok(values) => outcome.values = values,
+        Err(e) if dry_run => return Err(e),
+        Err(e) => outcome.warnings.push(format!(
+            "`{name}` is done, but reading the device afterwards failed: {e}"
+        )),
+    }
     Ok((outcome, produced))
 }
 
@@ -1238,5 +1258,17 @@ mod tests {
             Some(&Val::Number(310.0))
         ));
         assert!(changed(t, None, Some(&Val::Number(300.0))));
+        // A small reading that moves is a change: no fixed floor, only 0.5 % of its size.
+        let mv = |v: f64| Val::Number(v);
+        assert!(changed(t, Some(&mv(0.012)), Some(&mv(0.020))));
+        assert!(changed(t, Some(&mv(4.7e-8)), Some(&mv(4.8e-8))));
+        assert!(changed(t, Some(&mv(0.0)), Some(&mv(1e-6))));
+        // Noise stays quiet at any size, and the same value is never a change.
+        assert!(!changed(t, Some(&mv(4.98)), Some(&mv(4.99))));
+        assert!(!changed(t, Some(&mv(4.7e-8)), Some(&mv(4.701e-8))));
+        assert!(!changed(t, Some(&mv(0.0)), Some(&mv(0.0))));
+        // A declared tolerance still decides (`setpoint` declares one).
+        assert!(!changed(Some(sp), Some(&mv(330.0)), Some(&mv(331.0))));
+        assert!(changed(Some(sp), Some(&mv(330.0)), Some(&mv(340.0))));
     }
 }

@@ -534,6 +534,7 @@ fn ips3608_confirms_setpoints_and_output_from_the_status() {
             "query status", // core: output on + bench limits -> check the existing setpoints first
             "vset 5",
             "iset 1",
+            "query status", // core: the device took the setpoints, before the output goes on
             "output 1",
             "query status", // read back and verify
             "disconnect",

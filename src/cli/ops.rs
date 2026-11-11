@@ -220,7 +220,7 @@ async fn describe_setting(
     // Which channel's value? Without one there's no single answer.
     let read = match (channels, channel) {
         (Some(_), None) => None,
-        _ => Some(read_setting(bench, device, cat, channel, &name).await),
+        _ => Some(read_setting(bench, device, cat, channel, &cat.shown(i, &name)).await),
     };
     let current = match &read {
         None => "address a channel to read it".to_string(),

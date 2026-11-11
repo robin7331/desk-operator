@@ -722,3 +722,65 @@ fn a_client_that_leaves_the_daemon_cancels_its_capture() {
     let _ = daemon.kill();
     let _ = daemon.wait();
 }
+
+/// The action ran and its file is complete; the read afterwards fails. The result is kept and
+/// the read error is a warning: a failure would invite a second run, and would drop the file.
+#[test]
+fn a_failing_read_after_an_action_keeps_its_result() {
+    let b = Bench::with(
+        r#"
+[devices.dev.capture]
+script = "after.lua"
+values = { state = { type = "string" } }
+actions = { grab = { switches = false, produces = "file" }, poke = { switches = true } }
+"#,
+    );
+    std::fs::write(
+        b.path("after.lua"),
+        r#"
+local acted = false
+function read(ctx)
+  if acted then error("the device stopped answering") end
+  return { state = "idle" }
+end
+function action(ctx, name, args)
+  acted = true
+  if name == "grab" then
+    ctx.append{ into = ctx.output, data = "hello world" }
+    return { format = "txt" }
+  end
+end
+"#,
+    )
+    .unwrap();
+    let warned = |d: &Value| {
+        d["warnings"].as_array().is_some_and(|ws| {
+            ws.iter()
+                .filter_map(|w| w.as_str())
+                .any(|w| w.contains("reading the device afterwards failed"))
+        })
+    };
+
+    let out = b.run(&["--json", "do", "dev", "grab"]);
+    assert_eq!(out.code, 0, "{} {}", out.stdout, out.stderr);
+    let d = out.data();
+    assert_eq!(d["applied"], true, "{d}");
+    assert_eq!(d["bytes"], 11, "{d}");
+    let file = PathBuf::from(d["file"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello world");
+    assert_eq!(files(&b.captures()).len(), 1, "the capture is kept");
+    assert!(warned(&d), "{d}");
+
+    // An action without a file: done, with the same warning.
+    let out = b.run(&["--json", "do", "dev", "poke"]);
+    assert_eq!(out.code, 0, "{} {}", out.stdout, out.stderr);
+    let d = out.data();
+    assert_eq!(d["applied"], true, "{d}");
+    assert!(warned(&d), "{d}");
+
+    // People see it too.
+    let out = b.run(&["do", "dev", "poke"]);
+    assert_eq!(out.code, 0, "{} {}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("warning: "), "{}", out.stdout);
+    assert!(out.stdout.contains("stopped answering"), "{}", out.stdout);
+}

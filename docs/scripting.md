@@ -285,7 +285,9 @@ function close(ctx) end              -- optional: end of a session (always calle
 - `set` and `action` get values that desk already parsed (units), converted (to the declared
   unit) and checked (range, bench limits). Several settings of one command arrive one by one, in
   declaration order, except that a boolean setting with `switches` that is set to off/false is
-  sent first; desk calls `read()` afterwards to verify them.
+  sent first; desk calls `read()` afterwards to verify them. After an action, desk calls `read()`
+  too; if that fails, the action still counts as done (its file is kept) and the error is
+  reported as a warning.
 - With `channels`, every call sees `ctx.channel`.
 - Arguments with a `default` arrive filled in; `optional` ones that weren't given are `nil`.
 
@@ -442,7 +444,10 @@ every driver:
   right after switching on, that's reported as `protection_tripped` too.
 - **Verification:** after the steps, `read()` is compared with the request. Fields `read()` doesn't
   return are reported as *not confirmed*, never as confirmed. Return only what the device really
-  reports.
+  reports. When a command sets a voltage or current and switches the output on, desk also calls
+  `read()` before switching on: if the device reports a different setpoint, the command ends with
+  `verify_failed` and the output stays off. So `read()` must report a new setpoint as soon as the
+  `set_…` call has returned.
 - **`timeout`** (default `10s`) covers the whole session of one command.
 
 ## Sandbox

@@ -212,10 +212,17 @@ Fields of a capability table:
 | `max_voltage` | **yes** | V, > 0 |
 | `max_current` | **yes** | A, > 0 |
 | `max_power` | no | W, > 0 (informational) |
+| `voltage_tolerance` | no | V, > 0: how far a read-back voltage setpoint may differ and still count as confirmed |
+| `current_tolerance` | no | A, > 0: the same for the current setpoint |
 
 desk refuses anything above the ratings before the driver is called (`limit_exceeded`). If a driver
 also reports maximums from the device (`info()`), the stricter value wins. Only state what you
 know: leave `max_power` out rather than guess.
+
+Without a tolerance, a setpoint counts as confirmed within 0.5 % or 0.011, whichever is larger.
+That is generous for small setpoints (5 mA is "confirmed" at 15 mA), so state the tolerance when
+the device's documentation gives its resolution or accuracy: for a supply that resolves 1 mA,
+`current_tolerance = 0.001`. A driver may report both from `info()` as well; the stricter wins.
 
 ### Driver params (`PARAMS`)
 

@@ -647,6 +647,34 @@ fn a_failing_close_does_not_hide_a_finished_command() {
 }
 
 #[test]
+fn a_dropped_setpoint_keeps_the_output_off() {
+    // The supply holds 24 V and ignores the new voltage.
+    let driver = SIM_DRIVER
+        .replace(
+            "local s = { v = 0, a = 0, out = false }",
+            "local s = { v = 24, a = 0, out = false }",
+        )
+        .replace(
+            r#"function set_voltage(ctx, v) ctx.log("set_voltage", v); s.v = v end"#,
+            r#"function set_voltage(ctx, v) ctx.log("set_voltage", v) end"#,
+        );
+    assert!(driver.contains("v = 24") && !driver.contains("s.v = v"));
+    let b = source_bench(&driver, "", "");
+    let out = b.run(&[
+        "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+    ]);
+    assert_eq!(out.error_code(), "verify_failed", "{}", out.stdout);
+    assert!(
+        out.error_message().contains("not switched on"),
+        "{}",
+        out.error_message()
+    );
+    let log = out.json()["data"]["log"].to_string();
+    assert!(log.contains("set_voltage"), "{log}");
+    assert!(!log.contains("set_output"), "the output stayed off: {log}");
+}
+
+#[test]
 fn lua_driver_limits_come_from_info_and_bench() {
     let b = source_bench(
         SIM_DRIVER,
