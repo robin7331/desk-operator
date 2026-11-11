@@ -2,7 +2,8 @@
 //! itself. Replacing it is tested on Unix, where a shell script can stand in for the new desk.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -10,6 +11,29 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
+
+/// Copying desk and starting a process never overlap. A process started while another test's copy
+/// is still open for writing inherits that handle until it has become its program, and starting
+/// the copy in that moment fails with "Text file busy". (Test-only: desk itself never runs a file
+/// it has just written.)
+static FORK_LOCK: Mutex<()> = Mutex::new(());
+
+fn fork_lock() -> MutexGuard<'static, ()> {
+    FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `Command::output`, with the start under `FORK_LOCK` and the wait outside it.
+fn output(cmd: &mut Command) -> Output {
+    let child = {
+        let _guard = fork_lock();
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    child.wait_with_output().unwrap()
+}
 
 struct Install {
     dir: TempDir,
@@ -34,7 +58,9 @@ impl Install {
         std::fs::create_dir_all(dir.path().join("bin")).unwrap();
         std::fs::create_dir_all(dir.path().join("home")).unwrap();
         let install = Install { dir };
+        let guard = fork_lock();
         std::fs::copy(env!("CARGO_BIN_EXE_desk"), install.exe()).unwrap();
+        drop(guard);
         install
     }
 
@@ -53,7 +79,7 @@ impl Install {
             .env("DESK_RELEASE_URL", server.uri())
             .env("HOME", self.home())
             .env("DESK_CONFIG", self.dir.path().join("desk.toml"));
-        let out = tokio::task::spawn_blocking(move || cmd.output().unwrap())
+        let out = tokio::task::spawn_blocking(move || output(&mut cmd))
             .await
             .unwrap();
         Out {
@@ -214,15 +240,15 @@ fn fake_release(dir: &std::path::Path, asset: &str, reports: &str) -> (Vec<u8>, 
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let archive = dir.join(asset);
-    let status = Command::new("tar")
-        .arg("-czf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&pkg)
-        .arg("desk")
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let tar = output(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&pkg)
+            .arg("desk"),
+    );
+    assert!(tar.status.success());
     let bytes = std::fs::read(&archive).unwrap();
     let hash: String = Sha256::digest(&bytes)
         .iter()
@@ -248,10 +274,7 @@ async fn force_replaces_the_binary_with_the_verified_release() {
         data.get("skills").is_none(),
         "no skills were installed: {data}"
     );
-    let version = Command::new(install.exe())
-        .arg("--version")
-        .output()
-        .unwrap();
+    let version = output(Command::new(install.exe()).arg("--version"));
     assert_eq!(
         String::from_utf8_lossy(&version.stdout).trim(),
         "desk 99.0.0"
@@ -347,10 +370,7 @@ async fn globally_installed_skills_are_updated_too() {
         .unwrap()
         .clone();
     assert_eq!(operator["action"], "updated", "{skills}");
-    let current = Command::new(env!("CARGO_BIN_EXE_desk"))
-        .args(["skill", "desk-operator"])
-        .output()
-        .unwrap();
+    let current = output(Command::new(env!("CARGO_BIN_EXE_desk")).args(["skill", "desk-operator"]));
     assert_eq!(
         std::fs::read_to_string(&skill).unwrap(),
         String::from_utf8_lossy(&current.stdout)
