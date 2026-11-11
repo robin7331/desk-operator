@@ -1008,11 +1008,20 @@ pub async fn act(
             }
         }
     }
-    let outcome = Outcome {
-        values: read(drv, decls, channel).await?,
+    // The action is done: a read that fails now must not undo that. Its result (a file, something
+    // that switched) is reported, with the read's error as a warning. A dry run did nothing, so
+    // there the read is all there is.
+    let mut outcome = Outcome {
         applied: !dry_run,
         ..Outcome::default()
     };
+    match read(drv, decls, channel).await {
+        Ok(values) => outcome.values = values,
+        Err(e) if dry_run => return Err(e),
+        Err(e) => outcome.warnings.push(format!(
+            "`{name}` is done, but reading the device afterwards failed: {e}"
+        )),
+    }
     Ok((outcome, produced))
 }
 

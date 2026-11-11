@@ -990,6 +990,7 @@ pub async fn run(cat: &Catalog, drivers: &Drivers, op: &Op) -> Result<Outcome> {
                 });
             }
             out.applied = o.applied;
+            out.warnings.extend(o.warnings);
             out.readings.values.extend(o.values);
         }
     }
