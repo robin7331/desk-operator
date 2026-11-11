@@ -444,7 +444,10 @@ every driver:
   right after switching on, that's reported as `protection_tripped` too.
 - **Verification:** after the steps, `read()` is compared with the request. Fields `read()` doesn't
   return are reported as *not confirmed*, never as confirmed. Return only what the device really
-  reports.
+  reports. When a command sets a voltage or current and switches the output on, desk also calls
+  `read()` before switching on: if the device reports a different setpoint, the command ends with
+  `verify_failed` and the output stays off. So `read()` must report a new setpoint as soon as the
+  `set_…` call has returned.
 - **`timeout`** (default `10s`) covers the whole session of one command.
 
 ## Sandbox

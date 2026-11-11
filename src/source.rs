@@ -332,6 +332,16 @@ pub async fn apply(
         src.set_current(a).await?;
     }
     if req.output == Some(true) {
+        // New setpoints go live with the output, so the device must have taken them first: a
+        // write it dropped would switch on at the setpoint it still holds, which nothing checked.
+        if req.voltage.is_some() || req.current.is_some() {
+            let held = src.read().await?;
+            let setpoints = Request {
+                output: None,
+                ..req
+            };
+            verify(&setpoints, &held).map_err(not_switched_on)?;
+        }
         src.set_output(true).await?;
     }
 
@@ -342,6 +352,21 @@ pub async fn apply(
     {
         return Err(DeskError::ProtectionTripped(p.name().to_string()));
     }
+    let verified = verify(&req, &reading)?;
+    protection_warning(&reading, &mut warnings);
+    Ok(Report {
+        requested: req,
+        reading,
+        verified,
+        info,
+        warnings,
+        applied: !req.is_empty(),
+    })
+}
+
+/// Compare a request with what the device reports. The first value it reports differently is
+/// `verify_failed`; what it doesn't report stays unconfirmed (`None`).
+fn verify(req: &Request, reading: &Reading) -> Result<Verified> {
     let verified = Verified {
         voltage: req
             .voltage
@@ -378,15 +403,18 @@ pub async fn apply(
             });
         }
     }
-    protection_warning(&reading, &mut warnings);
-    Ok(Report {
-        requested: req,
-        reading,
-        verified,
-        info,
-        warnings,
-        applied: !req.is_empty(),
-    })
+    Ok(verified)
+}
+
+/// A setpoint the device didn't take, found before switching on: say that the output is still off.
+fn not_switched_on(e: DeskError) -> DeskError {
+    match e {
+        DeskError::VerifyFailed { expected, actual } => DeskError::VerifyFailed {
+            expected,
+            actual: format!("{actual} (the output was not switched on)"),
+        },
+        other => other,
+    }
 }
 
 /// Read the device (one query: no `info()`), with the warning for a tripped protection.
@@ -623,6 +651,29 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(e.code(), "verify_failed");
+    }
+
+    #[test]
+    fn a_dropped_setpoint_never_reaches_a_live_output() {
+        let f = Fake {
+            readback: true,
+            ignore_voltage: true,
+            ..Fake::default()
+        };
+        // The device still holds an old, higher setpoint and drops the new one.
+        f.state.lock().unwrap().voltage_set = Some(24.0);
+        let e = run(apply(
+            &f,
+            req(Some(5.0), Some(1.0), Some(true)),
+            Limits::default(),
+            SourceInfo::default(),
+            false,
+        ))
+        .unwrap_err();
+        assert_eq!(e.code(), "verify_failed");
+        assert!(e.to_string().contains("not switched on"), "{e}");
+        assert_eq!(f.calls(), ["v=5", "a=1"], "the output is never switched");
+        assert_eq!(f.state.lock().unwrap().output, None);
     }
 
     #[test]
