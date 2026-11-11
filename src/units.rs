@@ -252,9 +252,10 @@ pub fn printed(text: &str) -> Option<(&'static str, i32)> {
     })
 }
 
-/// A value for humans: `4.98 V`, `330 °C`, `0.25 A`. Up to 6 significant digits.
+/// A value for humans: `4.98 V`, `330 °C`, `0.25 A`, `0.000000047 F`. Six decimals, and more for
+/// a small value, so that it keeps six significant digits.
 pub fn format(value: f64, unit: Option<&str>) -> String {
-    let n = format!("{value:.6}");
+    let n = format!("{value:.prec$}", prec = decimals(value));
     let n = n.trim_end_matches('0').trim_end_matches('.');
     let n = if n == "-0" { "0" } else { n };
     match unit {
@@ -262,6 +263,17 @@ pub fn format(value: f64, unit: Option<&str>) -> String {
         Some(u) => format!("{n} {u}"),
         None => n.to_string(),
     }
+}
+
+/// How many decimals [`format`] prints: 6, or as many as six significant digits need (at most 18).
+fn decimals(value: f64) -> usize {
+    let abs = value.abs();
+    if !abs.is_finite() || abs == 0.0 || abs >= 1.0 {
+        return 6;
+    }
+    // 0.047 has the exponent -2: its first significant digit is the second decimal.
+    let exponent = abs.log10().floor();
+    ((5.0 - exponent) as usize).clamp(6, 18)
 }
 
 #[cfg(test)]
@@ -369,5 +381,21 @@ mod tests {
         assert_eq!(format(50.0, Some("%")), "50%");
         assert_eq!(format(0.000_001, None), "0.000001");
         assert_eq!(format(-0.0, Some("A")), "0 A");
+        // From 1 up: six decimals, as always.
+        assert_eq!(format(12345.678, Some("Hz")), "12345.678 Hz");
+        assert_eq!(format(0.25, Some("A")), "0.25 A");
+        assert_eq!(format(0.0125, Some("A")), "0.0125 A");
+        // Small values keep six significant digits instead of rounding to nothing.
+        assert_eq!(format(4.7e-8, Some("F")), "0.000000047 F");
+        assert_eq!(format(-4.7e-8, Some("F")), "-0.000000047 F");
+        assert_eq!(format(2.2e-6, Some("F")), "0.0000022 F");
+        assert_eq!(format(1.234e-4, Some("A")), "0.0001234 A");
+        assert_eq!(format(1e-11, Some("F")), "0.00000000001 F");
+        assert_eq!(format(0.0999999, Some("V")), "0.0999999 V");
+        // Nothing sensible is smaller than 18 decimals; zero and non-numbers stay as they were.
+        assert_eq!(format(1e-30, Some("F")), "0 F");
+        assert_eq!(format(0.0, Some("V")), "0 V");
+        assert_eq!(format(f64::NAN, Some("V")), "NaN V");
+        assert_eq!(format(f64::INFINITY, Some("V")), "inf V");
     }
 }
