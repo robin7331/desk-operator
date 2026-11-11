@@ -34,6 +34,22 @@ jobs:
       - run: cargo test --locked --no-fail-fast
         if: ${{ !cancelled() }}
 
+  msrv:
+    name: Minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The same version as `rust-version` in Cargo.toml (and the README badge).
+      - name: Cargo.toml still says 1.89
+        run: grep -q '^rust-version = "1.89"$' Cargo.toml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+      - uses: Swatinem/rust-cache@v2
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo check --locked --all-targets
+
   lint:
     name: Format and installers
     runs-on: ubuntu-latest

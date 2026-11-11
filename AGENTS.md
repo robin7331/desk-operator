@@ -211,8 +211,9 @@ tests/support/sigrok.rs  a bench with a fake sigrok-cli backend (for tests/sigro
                        models); tests/support/fake_sigrok_cli.rs is that fake, a Cargo example
 build.rs               bundles models/<vendor>/… into the binary (`bundled:<path>`)
 install.sh, install.ps1  one-line installers: download a release, verify it, offer the skills
-.github/workflows/     ci.yml (fmt, clippy, tests on all three OSes); release.yml (builds, runs the
-                       installers against them; a `v*` tag publishes, a manual run only tests);
+.github/workflows/     ci.yml (fmt, clippy, tests on all three OSes, a build with the minimum
+                       Rust); release.yml (runs the tests, builds, runs the installers against
+                       the builds; a `v*` tag publishes, a manual run only tests);
                        badges.yml (counts archive downloads for the README badge, `badges` branch)
 about.toml, about.hbs  `cargo about`: the accepted dependency licenses (a new one fails CI), and the
                        THIRD-PARTY-LICENSES.txt that every release archive carries

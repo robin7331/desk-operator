@@ -144,7 +144,9 @@ Before touching hardware, run the driver against a fake device over a pseudo-ter
 the slave as its port. Cover what the sources say: replies, missing echoes, pushed telemetry,
 garbage before a frame, a silent device, a wrong model. The tests run the clone's own `desk` with
 its files (`harness::desk()`, `harness::root()` from `tests/support/models.rs`). They need Rust
-(`cargo`); without it, say so and skip to step 6. Then:
+(`cargo`); without it, say so and skip to step 6. On Linux the build also needs the libudev
+development files and `pkg-config` (Debian and Ubuntu: the packages `libudev-dev` and
+`pkg-config`); if the build stops at `libudev-sys`, tell the user that. Then:
 
 ```sh
 cd <clone>
