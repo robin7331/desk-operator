@@ -136,6 +136,10 @@ impl Cancel {
         self.0.send_replace(true);
     }
 
+    pub fn is_cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
+
     /// Resolves once cancelled.
     pub async fn cancelled(&self) {
         let mut rx = self.0.subscribe();

@@ -61,6 +61,8 @@ desk watch <device> [<name>...] --count 10 --json   # one JSON line per reading 
 desk get <device>:<channel> --json                  # one channel of a multi-channel device
 desk set <device> [<setting>] --json                # what it takes (see below); changes nothing
 desk do <device> [<action>] --json                  # the same for actions and their arguments
+desk stream <device> --json                         # what it streams; starts nothing
+desk stream <device> <stream> [<arg>=<value>...] --discard --duration 3s --json  # see below
 ```
 
 There's one entry per device: `data.results[]` for `power on|off|toggle`, `data.devices[]` for
@@ -74,10 +76,10 @@ the first failure only.
 | `device_not_found`, `device_ambiguous` | Check `desk schema`; ask the user which device they meant |
 | `no_power_path` | The device has no power binding; tell the user |
 | `provider_unreachable` | Report it (Home Assistant offline, bad token, `sigrok-cli` not installed: the hint says how to get it). Retry at most once |
-| `endpoint_unavailable` | That outlet or entity is offline or unknown, or a sigrok device is not found or busy (another program holds it); report it |
+| `endpoint_unavailable` | That outlet or entity is offline or unknown, or a sigrok device is not found or busy (another program holds it), or the device is busy with a stream (`busy: it is streaming`; other commands work again when it ends). Report it; don't retry in a loop |
 | `state_unknown` | Toggle isn't possible here; ask whether they want `on` or `off` |
 | `verify_failed` | The command was sent but not confirmed. Report it; don't repeat it blindly |
-| `timeout` | Report it with the message; the device may be in an intermediate state, so check `power status` |
+| `timeout` | Report it with the message; the device may be in an intermediate state, so check `power status`. A stream ends with `timeout` when its source sent nothing for 10 s |
 | `script_failed` | Show the message and any `log` lines from the result |
 | `config_invalid` | Show the message (for a sigrok device it may say no sigrok build has the driver, and where to get one). Don't edit the config unless the user asks |
 | `capability_missing` | That device can't do this (e.g. no `source`, nothing to watch); say so |
@@ -85,7 +87,7 @@ the first failure only.
 | `limit_exceeded` | Refused, nothing was sent. Tell the user the limit; never work around it or edit `limits` unasked. For a capture over its size cap, nothing was kept: say so, and raise `--max-size` only if the user asks |
 | `cancelled` | Ctrl-C or a closed connection stopped it; a capture in progress was discarded. Report it; don't retry unasked |
 | `protection_tripped` | A protection (OVP, OCP, …) switched the output off; nothing was sent. Tell the user which one. Use `--clear-protection` only after they found the cause and asked you to switch on again |
-| `daemon_unavailable` | The background daemon behind `watch` failed or stopped. Show the message (it names the daemon's log); don't start `desk serve` yourself unless asked |
+| `daemon_unavailable` | The background daemon behind `watch` and `stream` failed or stopped. Show the message (it names the daemon's log); don't start `desk serve` yourself unless asked |
 | `update_failed` | `desk update` didn't work; the message says whether desk changed. Report it |
 | `update_unsupported` | This desk was built from source; tell the user. Use `--force` only if they ask |
 
@@ -129,6 +131,24 @@ always pass `--count N` (or a timeout) so it ends. `--changes` prints only when 
 last line is `ok: false` if the watch ended with an error, e.g. `device_off` after a mains cut. A
 background daemon holds the device meanwhile, so other `desk` commands keep working. Watching only
 reads; it never switches anything.
+
+## Streams (live binary data)
+
+A device may declare streams (`streams` in `desk schema`, e.g. a logic analyzer's `samples`):
+raw data at full bandwidth for another program, until stopped. `desk stream` writes the payload
+to stdout, so it is for pipes and files (`desk stream la samples | analyzer`), never a terminal.
+An agent rarely needs it: for a bounded window into a file, use a capture (`desk do`) instead.
+To check that a stream works or how fast it is, read it without writing it:
+
+```sh
+desk stream la samples samplerate=10MHz --discard --duration 3s --json
+```
+
+The last JSON line is the summary (`data.bytes`, `units`, `blocks`, `dropped`, `seconds`,
+`mb_per_s`, `ended`) or an error. Always pass `--duration` or `--bytes` so it ends. While a stream
+runs, the device is busy for every other command (`endpoint_unavailable`); a second `desk stream`
+with the same arguments joins it, with other arguments it is refused. A stream only reads; it
+never switches anything.
 
 ## Captures (actions that produce a file)
 

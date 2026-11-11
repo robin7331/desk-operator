@@ -138,7 +138,7 @@ impl Bench {
     }
 
     /// Build the driver of one catalog entry (nothing is opened yet).
-    fn driver(&self, device: &Device, entry: &Entry) -> Result<CapDriver> {
+    pub(crate) fn driver(&self, device: &Device, entry: &Entry) -> Result<CapDriver> {
         let cap = device.caps.get(&entry.key).ok_or_else(|| {
             DeskError::Internal(format!("`{}` has no `{}`", device.id, entry.key))
         })?;
@@ -192,7 +192,7 @@ impl Bench {
     /// Mains first: a device whose power path reads `off` can't be reached, so say that instead
     /// of failing later with "port not found". Unknown or unreadable power doesn't block. Returns
     /// the mains state when it could be read.
-    async fn require_mains(&self, device: &Device) -> Result<Option<Power>> {
+    pub(crate) async fn require_mains(&self, device: &Device) -> Result<Option<Power>> {
         if device.power.is_none() {
             return Ok(None);
         }
@@ -222,6 +222,14 @@ impl Bench {
                 missing: "has no capabilities (no power path, no `source`, nothing declared)"
                     .into(),
             });
+        }
+        // A stream holds the device: fail at once rather than wait behind it.
+        if let Some(e) = self
+            .sessions
+            .as_ref()
+            .and_then(|s| s.stream_busy(&device.id))
+        {
+            return fail(e);
         }
         let mains = match self.require_mains(device).await {
             Ok(m) => m,

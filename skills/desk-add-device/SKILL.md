@@ -72,8 +72,8 @@ pack the folder for the user at the end (step 11).
   sensor, relay board, …) gets a **declared capability**: the model declares its `settings`,
   `values` and `actions`, and desk applies its generic rules to them (see *Declaring what it can
   do*). A capture (a logic analyzer's samples, a screenshot) is an action that **produces a
-  file** (`produces = "file"`, see *Captures*). Streaming large data live isn't supported yet:
-  say so.
+  file** (`produces = "file"`, see *Captures*). Live data for other programs (a logic
+  analyzer's samples while it runs) is a **stream** (`streams`, see *Streams*).
 - **Only switched on/off?** If the user just wants mains on/off (e.g. via a Home Assistant outlet),
   no model is needed: add a `power` binding to their device and you're done
   (`desk provider endpoints <id> --search …` finds the entity).
@@ -337,6 +337,48 @@ end
   backend has it: a vendor build is needed), `endpoint_unavailable` (not found, or busy in
   another program), `script_failed` with sigrok's message (a config key or channel the device
   doesn't have).
+
+## Streams
+
+A stream is live data until it is stopped, which desk hands to every program that runs `desk
+stream <dev> <stream>` (`docs/streaming.md`). A logic analyzer through sigrok declares one next
+to its capture:
+
+```toml
+[capture.streams.samples]
+content = "logic"
+doc     = "live samples"
+
+[capture.streams.samples.args]
+samplerate = { type = "number", unit = "Hz", default = 1e6 }   # the device's real range: min, max
+channels   = { type = "string", default = "D0,D1,D2,D3,D4,D5,D6,D7" }
+```
+
+```lua
+function stream(ctx, name, args)
+  local channels = {}
+  for c in string.gmatch(args.channels, "[^,]+") do channels[#channels + 1] = c end
+  ctx.describe{ into = ctx.output, unit_size = 1,       -- bytes per sample: 1 for up to 8 channels
+                samplerate = args.samplerate, channels = channels }
+  ctx.sigrok.acquire{ config = { samplerate = args.samplerate }, channels = channels,
+                      continuous = true, format = "binary", into = ctx.output }
+end
+```
+
+- `content = "logic"` needs `unit_size`, `samplerate` and `channels` in `ctx.describe`, once
+  before any data. Any other `content` name is the model's own; desk passes its bytes on unread.
+- **`channels` is in bit order: the first is bit 0.** sigrok's `binary` output packs the enabled
+  channels in the order they are enabled (only D3 and D7: D3 is bit 0, D7 bit 1), so describe
+  them in the order you pass them. For more than 8 channels, find out what the device's output
+  gives per sample before you set `unit_size`; don't guess.
+- `continuous = true` only works into a stream; `timeout` is optional there, `format` defaults to
+  `binary`.
+- **Test it with the fake:** with `-O` and no `-o` it writes its pattern (byte `i` is `i % 251`)
+  to stdout, endlessly with `--continuous`. Run `desk stream <dev> samples --bytes 1000` and
+  compare the payload, and assert the command line in `b.fake.streams()`; `tests/sigrok_streams.rs`
+  has examples.
+- **Smoke test:** `desk stream <dev> samples --discard --duration 3s --json`: `data.bytes`
+  plausible for the samplerate, `data.dropped` 0.
 
 ## Meters and supplies (through sigrok)
 

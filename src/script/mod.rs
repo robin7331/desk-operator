@@ -35,6 +35,7 @@ use crate::deadline::{self, Deadline};
 use crate::error::{DeskError, Result};
 use crate::power::{self as power_core, PowerSwitch, Target};
 use crate::providers::Registry;
+use crate::stream::StreamOutput;
 
 pub use declared::ScriptDriver;
 pub use power::ScriptSwitch;
@@ -305,10 +306,19 @@ impl Engine {
 
     /// `ctx.output` for the next call: the handle of a capture's sink, or `nil`.
     pub fn set_output(&self, output: Option<&Output>) -> Result<()> {
-        let v = match output {
-            Some(o) => Value::UserData(
+        self.set_sink(output.map(|o| Sink::File(o.clone())))
+    }
+
+    /// `ctx.output` for the next call: the handle of a stream's sink, or `nil`.
+    pub fn set_stream_output(&self, output: Option<&StreamOutput>) -> Result<()> {
+        self.set_sink(output.map(|o| Sink::Stream(o.clone())))
+    }
+
+    fn set_sink(&self, sink: Option<Sink>) -> Result<()> {
+        let v = match sink {
+            Some(s) => Value::UserData(
                 self.lua
-                    .create_userdata(OutputHandle(o.clone()))
+                    .create_userdata(OutputHandle(s))
                     .map_err(internal)?,
             ),
             None => Value::Nil,
@@ -512,15 +522,56 @@ fn host_api(
     })?;
     ctx.set("power", power)?;
 
-    // ctx.append{ into = ctx.output, data = "…" }: bytes the driver has into the capture.
+    // ctx.append{ into = ctx.output, data = "…" }: bytes the driver has into the capture or stream.
     let append = lua.create_function(|_, spec: Table| {
         let out = output_of(&spec, "ctx.append")?;
         let data: mlua::LuaString = spec
             .get::<Option<mlua::LuaString>>("data")?
             .ok_or_else(|| mlua::Error::runtime("ctx.append: `data` must be a string of bytes"))?;
-        out.write(&data.as_bytes()).map_err(mlua::Error::external)
+        match out {
+            Sink::File(f) => f.write(&data.as_bytes()).map_err(mlua::Error::external),
+            Sink::Stream(s) => {
+                s.write(&data.as_bytes()).map_err(mlua::Error::external)?;
+                // A stream runs as long as data flows: the call's deadline starts again.
+                deadline::restart();
+                Ok(())
+            }
+        }
     })?;
     ctx.set("append", append)?;
+
+    // ctx.describe{ into = ctx.output, unit_size = 1, samplerate = …, channels = { … }, … }: what a
+    // stream's bytes are, once before the first byte.
+    let describe = lua.create_function(|lua, spec: Table| {
+        let f = "ctx.describe";
+        let Sink::Stream(out) = output_of(&spec, f)? else {
+            return Err(mlua::Error::runtime(format!(
+                "{f}: only a stream is described (this ctx.output is a capture's file)"
+            )));
+        };
+        let mut raw = serde_json::Map::new();
+        for pair in spec.pairs::<Value, Value>() {
+            let (k, v) = pair?;
+            let Value::String(k) = k else {
+                return Err(mlua::Error::runtime(format!("{f}: keys must be names")));
+            };
+            let k = k.to_string_lossy();
+            if k == "into" {
+                continue;
+            }
+            let v: serde_json::Value = lua.from_value(v).map_err(|e| {
+                mlua::Error::runtime(format!(
+                    "{f}: `{k}` must be plain data: {}",
+                    lua_message(&e)
+                ))
+            })?;
+            raw.insert(k, v);
+        }
+        out.describe(raw).map_err(mlua::Error::external)?;
+        deadline::restart();
+        Ok(())
+    })?;
+    ctx.set("describe", describe)?;
 
     Ok(ctx)
 }
@@ -542,25 +593,42 @@ fn connection_apis(
     Ok(())
 }
 
-/// What `ctx.output` holds: a capture's sink. Opaque to scripts: no methods, no path.
-struct OutputHandle(Output);
+/// A sink a host function fills: a capture's file or a stream.
+#[derive(Clone)]
+pub(crate) enum Sink {
+    File(Output),
+    Stream(StreamOutput),
+}
+
+/// What `ctx.output` holds: a capture's or a stream's sink. Opaque to scripts: no methods, no
+/// path.
+struct OutputHandle(Sink);
 
 impl mlua::UserData for OutputHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_meta_method(mlua::MetaMethod::ToString, |_, _, ()| Ok("capture output"));
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, h, ()| {
+            Ok(match h.0 {
+                Sink::File(_) => "capture output",
+                Sink::Stream(_) => "stream output",
+            })
+        });
     }
 }
 
 /// The sink a host function fills: `spec.into`, which must be `ctx.output` of the running call.
-pub(crate) fn output_of(spec: &Table, function: &str) -> mlua::Result<Output> {
+pub(crate) fn output_of(spec: &Table, function: &str) -> mlua::Result<Sink> {
     let bad = || mlua::Error::runtime(format!("{function}: `into` must be ctx.output"));
     let Value::UserData(ud) = spec.get::<Value>("into")? else {
         return Err(bad());
     };
     let out = ud.borrow::<OutputHandle>().map_err(|_| bad())?.0.clone();
-    if !out.is_open() {
+    let open = match &out {
+        Sink::File(f) => f.is_open(),
+        Sink::Stream(s) => s.is_open(),
+    };
+    if !open {
         return Err(mlua::Error::external(DeskError::ScriptFailed(format!(
-            "{function}: this ctx.output belongs to an action call that has ended"
+            "{function}: this ctx.output belongs to a call that has ended"
         ))));
     }
     Ok(out)

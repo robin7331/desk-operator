@@ -17,9 +17,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
+use super::hub::{Hub, StreamKey};
 use crate::bench::{Run, close_drivers, take_logs};
 use crate::error::{DeskError, Result};
 use crate::ops::{self, Catalog, DeviceReadings, Drivers, Op, Outcome};
+use crate::stream::Subscription;
 
 /// Readings buffered per watcher. A watcher that falls further behind loses the oldest ones and
 /// is told how many (`dropped`).
@@ -90,6 +92,8 @@ impl Drop for Watcher {
 #[derive(Default)]
 pub struct Sessions {
     live: Mutex<HashMap<String, Arc<Live>>>,
+    /// Device → its running stream (one per device).
+    streams: Mutex<HashMap<String, Arc<Hub>>>,
     ports: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     next_id: AtomicU64,
 }
@@ -112,8 +116,68 @@ impl Sessions {
         lock(&self.live).contains_key(device)
     }
 
+    /// Live sessions and running streams (the daemon doesn't idle out while there are any).
     pub fn count(&self) -> usize {
-        lock(&self.live).len()
+        lock(&self.live).len() + lock(&self.streams).len()
+    }
+
+    /// The error for a command on a device that is streaming (it fails at once instead of
+    /// waiting behind a stream that may run for hours).
+    pub fn stream_busy(&self, device: &str) -> Option<DeskError> {
+        lock(&self.streams).get(device).map(|h| h.busy())
+    }
+
+    /// Subscribe to a stream: join the device's running one with the same key, or start it with
+    /// `start` (spawned; it gets the new hub). Waits for the header. A device that streams
+    /// something else refuses.
+    pub async fn subscribe_stream<F, Fut>(
+        &self,
+        device: &str,
+        key: StreamKey,
+        start: F,
+    ) -> Result<(Subscription, Arc<serde_json::Value>)>
+    where
+        F: FnOnce(Arc<Hub>) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let (hub, sub, fresh) = {
+            let mut all = lock(&self.streams);
+            match all.get(device) {
+                Some(h) if h.key == key => (h.clone(), h.subscribe(), false),
+                Some(h) => return Err(h.refuse(&key)),
+                None => {
+                    let h = Arc::new(Hub::new(device, key));
+                    all.insert(device.to_string(), h.clone());
+                    let sub = h.subscribe();
+                    (h, sub, true)
+                }
+            }
+        };
+        if fresh {
+            tokio::spawn(start(hub.clone()));
+        }
+        let header = hub.header().await?;
+        Ok((sub, header))
+    }
+
+    /// The last subscriber left: remove the hub, unless someone joined meanwhile (joins happen
+    /// under the same lock). Returns whether it was removed.
+    pub fn retire_stream(&self, hub: &Arc<Hub>) -> bool {
+        let mut all = lock(&self.streams);
+        let ours = all.get(&hub.device).is_some_and(|h| Arc::ptr_eq(h, hub));
+        if ours && hub.subscribers() == 0 {
+            all.remove(&hub.device);
+            return true;
+        }
+        false
+    }
+
+    /// The stream ended: nobody joins it any more.
+    pub fn forget_stream(&self, hub: &Arc<Hub>) {
+        let mut all = lock(&self.streams);
+        if all.get(&hub.device).is_some_and(|h| Arc::ptr_eq(h, hub)) {
+            all.remove(&hub.device);
+        }
     }
 
     /// Join the device's session, or start one with `open` (which opens the driver session).
@@ -127,6 +191,9 @@ impl Sessions {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(Catalog, Drivers, Duration)>>,
     {
+        if let Some(e) = self.stream_busy(device) {
+            return Err(e);
+        }
         if let Some(w) = self.join(device, interval) {
             return Ok(w);
         }
@@ -182,6 +249,10 @@ impl Sessions {
     /// End the device's session (if any) for every watcher with `why`, and wait until it is
     /// closed.
     pub async fn stop(&self, device: &str, why: DeskError) {
+        let hub = lock(&self.streams).get(device).cloned();
+        if let Some(hub) = hub {
+            hub.stop(why.clone()).await;
+        }
         let Some(live) = lock(&self.live).get(device).cloned() else {
             return;
         };
@@ -192,7 +263,8 @@ impl Sessions {
     }
 
     pub async fn stop_all(&self, why: DeskError) {
-        let devices: Vec<String> = lock(&self.live).keys().cloned().collect();
+        let mut devices: Vec<String> = lock(&self.live).keys().cloned().collect();
+        devices.extend(lock(&self.streams).keys().cloned());
         for d in devices {
             self.stop(&d, why.clone()).await;
         }

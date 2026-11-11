@@ -163,6 +163,23 @@ impl Fake {
         self.calls().iter().filter(|c| *c == &["-L"]).count()
     }
 
+    /// The calls that streamed to stdout (`-O` without `-o`: a stream's acquisition).
+    pub fn streams(&self) -> Vec<Vec<String>> {
+        self.calls()
+            .into_iter()
+            .filter(|c| c.iter().any(|a| a == "-O") && !c.iter().any(|a| a == "-o"))
+            .collect()
+    }
+
+    /// The pids of the runs that streamed to stdout, in order.
+    pub fn stream_pids(&self) -> Vec<u32> {
+        std::fs::read_to_string(self.dir.join("pids"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    }
+
     /// The calls that captured (they have `-o`).
     pub fn captures(&self) -> Vec<Vec<String>> {
         self.calls()

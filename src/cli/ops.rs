@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use super::device::{self, ActionView, NameView, Names};
+use super::device::{self, ActionView, NameView, Names, StreamView};
 use crate::bench::Bench;
 use crate::config::Device;
 use crate::declared::{Type, Val};
@@ -359,6 +359,81 @@ fn describe_action(
     let data = ActionsList {
         device: &device.id,
         actions: &one,
+    };
+    Ok(listing(&data, human, message))
+}
+
+#[derive(Serialize)]
+struct StreamsList<'a> {
+    device: &'a str,
+    streams: &'a indexmap::IndexMap<String, StreamView>,
+}
+
+/// `desk stream <device>`: every stream and its arguments.
+pub(super) fn list_streams(
+    device: &Device,
+    cat: &Catalog,
+    target: &str,
+    channel: Option<&str>,
+) -> Result<Report> {
+    if let Some(ch) = channel {
+        cat.check_any_channel(ch)?;
+    }
+    let names = Names::of(device, cat, channel);
+    if names.streams.is_empty() {
+        return Err(DeskError::Usage(format!(
+            "device `{}` has no streams (`desk device show {}` shows what it has)",
+            device.id, device.id
+        )));
+    }
+    let human = device::stream_blocks(&names.streams, "") + &channels_text(&names);
+    let has_channels = names
+        .streams
+        .values()
+        .any(|s| names.channels.contains_key(&s.capability));
+    let message = format!(
+        "name a stream (nothing was started): desk stream {} <stream> [<arg>=<value>...]",
+        address(target, channel, has_channels)
+    );
+    let data = StreamsList {
+        device: &device.id,
+        streams: &names.streams,
+    };
+    Ok(listing(&data, human, message))
+}
+
+/// `desk stream <device> <stream>` when the stream needs arguments: what they take.
+pub(super) fn describe_stream(
+    device: &Device,
+    cat: &Catalog,
+    target: &str,
+    channel: Option<&str>,
+    query: &str,
+) -> Result<Report> {
+    let (i, name, stream) = cat.stream(query)?;
+    cat.check_channel(i, channel, false)?;
+    let e = &cat.entries[i];
+    let mut one = indexmap::IndexMap::new();
+    one.insert(
+        name.clone(),
+        StreamView {
+            capability: e.key.clone(),
+            stream: stream.clone(),
+        },
+    );
+    let human = device::stream_blocks(&one, "");
+    let required = || stream.args.iter().filter(|(_, d)| d.required());
+    let needs: Vec<String> = required().map(|(k, _)| format!("`{k}=…`")).collect();
+    let args: Vec<String> = required().map(|(k, _)| format!("{k}=<value>")).collect();
+    let message = format!(
+        "`{name}` needs {} (nothing was started): desk stream {} {query} {}",
+        needs.join(", "),
+        address(target, channel, e.decls.channels.is_some()),
+        args.join(" ")
+    );
+    let data = StreamsList {
+        device: &device.id,
+        streams: &one,
     };
     Ok(listing(&data, human, message))
 }

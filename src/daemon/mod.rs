@@ -10,7 +10,8 @@
 //! `human` and `exit`. A `watch` request turns the connection into a stream: one envelope per
 //! reading, and an `ok: false` envelope if the session ends with an error.
 
-mod ipc;
+pub mod hub;
+pub(crate) mod ipc;
 pub mod session;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ use crate::cli::{self, Cli, Command};
 use crate::error::{DeskError, ErrorJson, Result};
 use crate::ops::{self, DeviceReadings};
 use crate::output::Report;
+use crate::stream::frame;
 use session::{Event, Sessions};
 
 /// How long a client waits for the daemon to come up.
@@ -251,6 +253,11 @@ pub async fn serve(config: Option<&Path>, idle: Option<Duration>) -> Result<Repo
             "the desk daemon was stopped".into(),
         ))
         .await;
+    // Let connections tell their clients why (a stream's end frame, a watch's last line).
+    let drained = Instant::now() + Duration::from_secs(2);
+    while state.connections.load(Ordering::SeqCst) > 0 && Instant::now() < drained {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     ipc::cleanup(&ep.address);
     eprintln!("desk daemon exiting ({why})");
     drop(lock);
@@ -295,6 +302,11 @@ enum Parsed {
         count: Option<u64>,
         changes: bool,
     },
+    Stream {
+        target: String,
+        stream: String,
+        args: Vec<String>,
+    },
     Command(Command),
 }
 
@@ -323,9 +335,20 @@ fn parse(line: &str) -> Result<Parsed> {
             count,
             changes,
         }),
+        Command::Stream(a) => match a.stream {
+            Some(stream) => Ok(Parsed::Stream {
+                target: a.device,
+                stream,
+                args: a.args,
+            }),
+            None => Err(DeskError::Usage(
+                "name the stream: [\"stream\", \"<device>\", \"<stream>\", \"arg=value\", …]"
+                    .into(),
+            )),
+        },
         cmd if cli::routed(&cmd) => Ok(Parsed::Command(cmd)),
         _ => Err(DeskError::Usage(
-            "only `desk power|get|set|do|watch …` run through the daemon".into(),
+            "only `desk power|get|set|do|watch|stream …` run through the daemon".into(),
         )),
     }
 }
@@ -373,6 +396,14 @@ async fn handle(state: Arc<State>, conn: impl ipc::Conn) {
                     changes,
                 };
                 stream(&state, &mut lines, &mut write, &device, want).await;
+                return;
+            }
+            Ok(Parsed::Stream {
+                target,
+                stream,
+                args,
+            }) => {
+                serve_stream(&state, &mut lines, &mut write, &target, &stream, &args).await;
                 return;
             }
             Ok(Parsed::Command(cmd)) => {
@@ -563,6 +594,106 @@ async fn stream<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+/// A `stream` request: subscribe (starting the source if needed), send the header line, then
+/// binary frames until the end frame. The client leaves by closing its connection.
+async fn serve_stream<R: tokio::io::AsyncBufRead + Unpin>(
+    state: &State,
+    lines: &mut tokio::io::Lines<R>,
+    w: &mut (impl AsyncWrite + Unpin),
+    target: &str,
+    stream: &str,
+    args: &[String],
+) {
+    let subscribed = async {
+        let bench = state.bench()?;
+        let (query, channel) = ops::split_channel(target);
+        let device = bench.config.resolve_device(query)?;
+        let cat = ops::Catalog::of(device)?;
+        let op = ops::plan_stream(&cat, channel, stream, args)?;
+        let entry = &cat.entries[op.entry];
+        let content = entry.decls.streams[&op.stream].content.clone();
+        let key = hub::StreamKey {
+            capability: entry.key.clone(),
+            stream: op.stream.clone(),
+            channel: op.channel.clone(),
+            args: op.args.clone(),
+        };
+        let id = device.id.clone();
+        let sessions = state.sessions.clone();
+        let spawned = sessions.clone();
+        sessions
+            .subscribe_stream(&id, key, move |h| hub::run(bench, spawned, h, op, content))
+            .await
+    }
+    .await;
+    let (sub, header) = match subscribed {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = send(w, &error_line(&e)).await;
+            return;
+        }
+    };
+    if send(w, &header).await.is_err() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            item = sub.next() => match item {
+                crate::stream::Item::Block(b, dropped) => {
+                    let h = frame::Header {
+                        kind: frame::Kind::Data,
+                        length: b.data.len() as u32,
+                        seq: b.seq,
+                        offset: b.offset,
+                        dropped: u32::try_from(dropped).unwrap_or(u32::MAX),
+                    };
+                    if write_frame(w, &h, &b.data).await.is_err() {
+                        return;
+                    }
+                }
+                crate::stream::Item::End(end, dropped) => {
+                    let h = frame::Header {
+                        kind: frame::Kind::End,
+                        length: end.envelope.len() as u32,
+                        seq: end.seq,
+                        offset: end.offset,
+                        dropped: u32::try_from(dropped).unwrap_or(u32::MAX),
+                    };
+                    let _ = write_frame(w, &h, &end.envelope).await;
+                    let _ = w.flush().await;
+                    let _ = w.shutdown().await;
+                    return;
+                }
+            },
+            // Input during a stream is ignored; EOF means the subscriber left.
+            line = lines.next_line() => if !matches!(line, Ok(Some(_))) {
+                return;
+            },
+        }
+    }
+}
+
+/// One frame: its header and payload in one vectored write where the socket supports it.
+async fn write_frame(
+    w: &mut (impl AsyncWrite + Unpin),
+    header: &frame::Header,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let head = header.encode();
+    let (mut a, mut b): (&[u8], &[u8]) = (&head, payload);
+    while !a.is_empty() || !b.is_empty() {
+        let bufs = [std::io::IoSlice::new(a), std::io::IoSlice::new(b)];
+        let n = w.write_vectored(&bufs).await?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        let from_a = n.min(a.len());
+        a = &a[from_a..];
+        b = &b[n - from_a..];
+    }
+    Ok(())
+}
+
 fn round_ms(d: Duration) -> f64 {
     (d.as_secs_f64() * 1000.0).round() / 1000.0
 }
@@ -608,6 +739,7 @@ impl Reply {
             human: self.human,
             failure,
             streamed: false,
+            printed: None,
         }
     }
 }
@@ -690,6 +822,38 @@ pub async fn watch(
             print!("{}", printer.row(&reply.data));
         }
     }
+}
+
+/// A stream's connection to the daemon, after the request went out.
+pub struct Link {
+    pub read: BufReader<tokio::io::ReadHalf<Box<dyn ipc::Conn>>>,
+    /// Kept open: closing it leaves the stream.
+    _write: tokio::io::WriteHalf<Box<dyn ipc::Conn>>,
+    log: PathBuf,
+}
+
+impl Link {
+    /// The connection to the daemon broke: `what`, and where its log is.
+    pub fn lost(&self, what: &str) -> DeskError {
+        DeskError::DaemonUnavailable(format!("{what} (daemon log: {})", self.log.display()))
+    }
+}
+
+/// `desk stream`: connect to the daemon (starting it if needed) and send `args`
+/// (`["stream", device, stream, arg=value…]`). The reply (header line, then frames) is read from
+/// [`Link::read`].
+pub async fn stream_link(config: Option<&Path>, args: &[String]) -> Result<Link> {
+    let ep = Endpoint::resolve(config)?;
+    let conn: Box<dyn ipc::Conn> = Box::new(connect_or_start(&ep).await?);
+    let (read, mut write) = tokio::io::split(conn);
+    send(&mut write, &json!({ "args": args }))
+        .await
+        .map_err(|e| lost(&ep, &format!("cannot talk to the desk daemon: {e}")))?;
+    Ok(Link {
+        read: BufReader::with_capacity(256 * 1024, read),
+        _write: write,
+        log: ep.log.clone(),
+    })
 }
 
 async fn connect_or_start(ep: &Endpoint) -> Result<impl ipc::Conn> {

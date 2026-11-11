@@ -35,6 +35,11 @@
 //!   other fails like the real program
 //! * `readings`: what a measurement (no `-o`, no `-O`) prints on stdout
 //!
+//! A capture with `-O <format>` and no `-o` writes the pattern (byte `i` is `i % 251`) to stdout,
+//! like the real program: `bytes` (or `--samples`) of it, or endlessly with `--continuous`
+//! (`bytes` still ends it), at `rate` bytes per second or as fast as the pipe takes it. Its pid
+//! goes to `pids` (one line per run).
+//!
 //! Like real hardware, one device serves one capture at a time (`busy.lock`, held while it
 //! captures, and during `--get`, `--set` and measurements): a second one fails with "Unable to
 //! claim USB interface". While capturing it watches stdin: if it reaches end of file, it fails
@@ -147,7 +152,8 @@ fn main() {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--version" | "-L" | "--scan" | "--show" | "--wait-trigger" | "--set" => flags.push(a),
+            "--version" | "-L" | "--scan" | "--show" | "--wait-trigger" | "--set"
+            | "--continuous" => flags.push(a),
             "-d" | "-g" | "--get" | "--config" | "--channels" | "--triggers" | "--time"
             | "--samples" | "--frames" | "-O" | "-o" => {
                 let Some(v) = it.next() else {
@@ -450,8 +456,12 @@ fn acquire(
     opts: &HashMap<&str, String>,
     flags: &[&str],
 ) {
-    let Some(out) = opts.get("output") else {
-        die(1, "fake sigrok-cli: nothing to do (no -o)");
+    // `-O <format>` without `-o`: the data goes to stdout (a stream).
+    let to_stdout = !opts.contains_key("output") && opts.contains_key("format");
+    let out = match opts.get("output") {
+        Some(o) => o.clone(),
+        None if to_stdout => String::new(),
+        None => die(1, "fake sigrok-cli: nothing to do (no -o)"),
     };
     let format = opts.get("format").map_or("srzip", String::as_str);
     let known = [
@@ -470,15 +480,20 @@ fn acquire(
     if flags.contains(&"--wait-trigger") && !opts.contains_key("triggers") {
         die(1, "fake sigrok-cli: --wait-trigger without --triggers");
     }
+    let continuous = flags.contains(&"--continuous");
     let lengths = ["time", "samples", "frames"]
         .iter()
         .filter(|k| opts.contains_key(*k))
-        .count();
+        .count()
+        + usize::from(continuous);
     if lengths != 1 {
         die(
             1,
             "fake sigrok-cli: give one of --time, --samples, --frames",
         );
+    }
+    if continuous && !to_stdout {
+        die(1, "fake sigrok-cli: --continuous only to stdout here");
     }
     match b.get("acquire") {
         Some("busy") => die(
@@ -530,13 +545,39 @@ fn acquire(
     };
     check_stdin();
 
+    if to_stdout {
+        // Who runs, for tests that check nothing is left behind.
+        if let Ok(mut pids) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("pids"))
+        {
+            let _ = writeln!(pids, "{}", std::process::id());
+        }
+        let limit: Option<u64> =
+            b.get("bytes")
+                .and_then(|v| v.parse().ok())
+                .or_else(|| match continuous {
+                    true => None,
+                    false => Some(
+                        opts.get("samples")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(1000),
+                    ),
+                });
+        let rate: Option<u64> = b.get("rate").and_then(|v| v.parse().ok());
+        stream_out(limit, rate, &check_stdin);
+        drop(lock);
+        exit(0);
+    }
+
     let bytes: u64 = b
         .get("bytes")
         .and_then(|v| v.parse().ok())
         .or_else(|| opts.get("samples").and_then(|s| s.parse().ok()))
         .unwrap_or(1000);
     let rate: Option<u64> = b.get("rate").and_then(|v| v.parse().ok());
-    let path = PathBuf::from(out);
+    let path = PathBuf::from(&out);
     if b.get("stray") == Some("1") {
         let mut stray = path.clone().into_os_string();
         stray.push(".xyz.part");
@@ -569,4 +610,39 @@ fn acquire(
     check_stdin();
     drop(lock);
     exit(0);
+}
+
+/// The pattern (byte `i` is `i % 251`) on stdout: `limit` bytes or endless, at `rate` bytes per
+/// second in 50 ms steps or as fast as the pipe takes it.
+fn stream_out(limit: Option<u64>, rate: Option<u64>, check_stdin: &dyn Fn()) {
+    // 251 * 4177 bytes: about 1 MiB, a whole number of pattern cycles.
+    let cycle: Vec<u8> = (0..251u64 * 4177).map(|i| (i % 251) as u8).collect();
+    let chunk = rate.map_or(cycle.len() as u64, |r| (r / 20).max(1));
+    let mut stdout = std::io::stdout().lock();
+    let mut at = 0u64;
+    loop {
+        let mut n = chunk;
+        if let Some(l) = limit {
+            if at >= l {
+                break;
+            }
+            n = n.min(l - at);
+        }
+        let mut left = n;
+        while left > 0 {
+            let from = (at % 251) as usize;
+            let k = left.min((cycle.len() - from) as u64) as usize;
+            if stdout.write_all(&cycle[from..from + k]).is_err() {
+                // desk went away.
+                exit(1);
+            }
+            at += k as u64;
+            left -= k as u64;
+        }
+        let _ = stdout.flush();
+        if rate.is_some() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        check_stdin();
+    }
 }

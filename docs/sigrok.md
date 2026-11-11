@@ -13,6 +13,7 @@ doesn't bundle sigrok or download it: you install it yourself.
 desk do la capture duration=2s samplerate=10MHz    # a file in the capture folder
 desk get dmm                                       # a meter's reading
 desk set psu voltage 5v                            # a supply's setpoint, read back
+desk stream la samples samplerate=10MHz | my-tool  # live samples for another program
 ```
 
 ## Getting sigrok
@@ -90,6 +91,22 @@ is checked while the file grows.
 sigrok's warnings on stderr (stock builds print Python decoder warnings on every run) never fail
 a capture: only its exit code does. When it fails, its last lines become the error message.
 
+## Streams
+
+A logic analyzer's model can declare a stream (`[capture.streams.samples]`, see
+[`model-format.md`](model-format.md)), and its driver's `stream()` runs
+`ctx.sigrok.acquire{ continuous = true, into = ctx.output }`. desk then runs
+`sigrok-cli … --continuous -O binary` without `-o` and reads its stdout; the daemon passes the samples to
+everyone who runs `desk stream` (see [`streaming.md`](streaming.md)). One `sigrok-cli` serves all
+of them, and it is killed when the last one stops.
+
+- With `-O binary` sigrok writes one byte per sample for up to 8 channels, and packs the enabled
+  channels in the order they were enabled: with only D3 and D7 enabled, D3 is bit 0 and D7 bit 1.
+  The driver describes `channels` in that order.
+- sigrok's stdin stays open: `sigrok-cli --continuous` stops at once when its stdin ends.
+- The `demo` driver at 100 MHz delivers about 94 MB/s into a pipe, and desk passes that on (the
+  measurements are in [`streaming.md`](streaming.md)). A real device is limited by its USB link.
+
 ## Values and settings
 
 Multimeters, power supplies and loads that sigrok drives work like any other device: `desk get`,
@@ -135,4 +152,6 @@ desk --config examples/sigrok/desk.toml do la capture duration=200ms
 desk --config examples/sigrok/desk.toml do la capture duration=1s samplerate=100khz format=binary
 desk --config examples/sigrok/desk.toml get dmm      # the demo device's analog channels
 desk --config examples/sigrok/desk.toml watch dmm --count 5
+desk --config examples/sigrok/desk.toml stream la samples --discard --duration 3s
+cargo run --example stream_edges -- --config examples/sigrok/desk.toml la samples
 ```

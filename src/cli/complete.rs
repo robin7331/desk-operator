@@ -128,7 +128,13 @@ impl Line {
                     line.config = Some(PathBuf::from(path));
                 } else if matches!(
                     w.as_str(),
-                    "--config" | "--interval" | "--count" | "--search" | "-s"
+                    "--config"
+                        | "--interval"
+                        | "--count"
+                        | "--search"
+                        | "-s"
+                        | "--duration"
+                        | "--bytes"
                 ) {
                     if iter.peek().is_some_and(|n| *n == "=") {
                         iter.next();
@@ -173,7 +179,19 @@ fn next(config: Option<&Config>, words: &[&str], typed: &str) -> Vec<Candidate> 
             .collect()
     };
     match words {
-        ["get" | "set" | "do" | "watch"] | ["device", "show"] => devices(config, typed),
+        ["get" | "set" | "do" | "watch" | "stream"] | ["device", "show"] => devices(config, typed),
+        ["stream", target] => device(target).map_or(Vec::new(), |(d, cat)| {
+            Names::of(d, &cat, None)
+                .streams
+                .iter()
+                .map(|(n, s)| (n.clone(), s.stream.doc.clone()))
+                .collect()
+        }),
+        ["stream", target, stream, given @ ..] => device(target).map_or(Vec::new(), |(_, cat)| {
+            cat.stream(stream).map_or(Vec::new(), |(_, _, s)| {
+                arg_candidates(&s.args, given, typed)
+            })
+        }),
         ["power", "on" | "off" | "toggle" | "status", given @ ..] => {
             unused(devices(config, typed), given)
         }
@@ -282,8 +300,17 @@ fn action_args(cat: &Catalog, action: &str, given: &[&str], typed: &str) -> Vec<
     let Ok((_, _, decl)) = cat.action(action) else {
         return Vec::new();
     };
+    arg_candidates(&decl.args, given, typed)
+}
+
+/// `name=` for the arguments not given yet; once a name is typed, its values.
+fn arg_candidates(
+    args: &indexmap::IndexMap<String, crate::declared::Decl>,
+    given: &[&str],
+    typed: &str,
+) -> Vec<Candidate> {
     let values = |name: &str| -> Vec<Candidate> {
-        decl.args.get(name).map_or(Vec::new(), |d| {
+        args.get(name).map_or(Vec::new(), |d| {
             choices_of(d)
                 .into_iter()
                 .map(|(c, h)| (format!("{name}={c}"), h))
@@ -293,8 +320,7 @@ fn action_args(cat: &Catalog, action: &str, given: &[&str], typed: &str) -> Vec<
     if let Some((name, _)) = typed.split_once('=') {
         return values(name);
     }
-    decl.args
-        .iter()
+    args.iter()
         .filter(|(k, _)| {
             !given
                 .iter()

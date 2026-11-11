@@ -595,6 +595,29 @@ pub fn check_tightens(
             }
         }
     }
+    // A stream's content says what its bytes are: only the model knows.
+    if let (Some(m), Some(d)) = (table(model, "streams"), table(device, "streams")) {
+        for (name, ds) in &d {
+            let (Some(toml::Value::Table(ms)), toml::Value::Table(ds)) = (m.get(name), ds) else {
+                continue;
+            };
+            let path = format!("streams.{name}");
+            if let Some(c) = ds.get("content")
+                && ms.get("content") != Some(c)
+            {
+                return Err(model_owned(&format!("{path}.content")));
+            }
+            if let (Some(margs), Some(dargs)) = (table(ms, "args"), table(ds, "args")) {
+                for (arg, dd) in &dargs {
+                    if let (Some(toml::Value::Table(md)), toml::Value::Table(dd)) =
+                        (margs.get(arg), dd)
+                    {
+                        check_decl(&format!("{path}.args.{arg}"), md, dd)?;
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -730,6 +753,22 @@ mod tests {
             &a,
             "actions = { boost = { switches = false } }",
             "actions.boost.switches",
+        );
+
+        let st = t(
+            "[streams.samples]\ncontent = \"logic\"\nargs = { rate = { type = \"number\", unit = \"Hz\", max = 100e6 } }",
+        );
+        ok(&st, "streams = { samples = { doc = \"mine\" } }");
+        ok(&st, "streams = { samples = { content = \"logic\" } }");
+        err(
+            &st,
+            "streams = { samples = { content = \"frames\" } }",
+            "streams.samples.content",
+        );
+        err(
+            &st,
+            "streams = { samples = { args = { rate = { max = 1e9 } } } }",
+            "streams.samples.args.rate.max",
         );
     }
 

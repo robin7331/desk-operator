@@ -96,6 +96,11 @@ meter or supply that sigrok drives works with `desk get|set|watch`. See
 [`docs/sigrok.md`](docs/sigrok.md), and try it with sigrok's demo device:
 `desk --config examples/sigrok/desk.toml do la capture duration=200ms` or `… get dmm`.
 
+Other programs get a device's live data from desk at full bandwidth with `desk stream`, for
+example a logic analyzer's samples for your own analyzer: `desk stream la samples | my-tool`. desk
+keeps owning the device and shares the stream with every program that asks. See
+[`docs/streaming.md`](docs/streaming.md).
+
 ## Supported devices
 
 | Device | Type | Status |

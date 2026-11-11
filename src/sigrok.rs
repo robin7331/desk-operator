@@ -19,7 +19,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -28,6 +28,7 @@ use crate::capture::Output;
 use crate::config::ProviderConfig;
 use crate::error::{DeskError, Result};
 use crate::providers::BuildContext;
+use crate::stream::StreamOutput;
 
 /// The provider kind of a sigrok backend.
 pub const KIND: &str = "sigrok";
@@ -752,13 +753,18 @@ fn args_text(args: &[OsString]) -> String {
 // ---------------------------------------------------------------------------------------------
 // Captures
 
-/// How long a capture runs: `--time <ms>`, `--samples <n>` or `--frames <n>`.
+/// How long a capture runs: `--time <ms>`, `--samples <n>` or `--frames <n>`; a stream may also
+/// run until it is stopped (`--continuous`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Length {
     Time(u64),
     Samples(u64),
     Frames(u64),
+    Continuous,
 }
+
+/// An [`Acquire::timeout`] that means "none" (a stream into a stream sink may leave it out).
+pub const NO_TIMEOUT: Duration = Duration::MAX;
 
 /// What `ctx.sigrok.acquire{ … }` asked for, checked.
 #[derive(Debug, Clone, PartialEq)]
@@ -902,6 +908,11 @@ fn push_config(a: &mut Vec<OsString>, config: &[(String, String)]) {
 impl Acquire {
     /// The command line for this capture into `path`: one argument per element.
     pub fn args(&self, spec: &SigrokSpec, path: &Path) -> Vec<OsString> {
+        self.args_to(spec, Some(path))
+    }
+
+    /// The command line into `path`, or to stdout (no `-o`) for a stream sink.
+    pub fn args_to(&self, spec: &SigrokSpec, path: Option<&Path>) -> Vec<OsString> {
         let mut a = device_args(spec, None);
         push_config(&mut a, &self.config);
         if !self.channels.is_empty() {
@@ -915,18 +926,171 @@ impl Acquire {
         if self.wait_trigger {
             a.push("--wait-trigger".into());
         }
-        let (flag, n) = match self.length {
-            Length::Time(ms) => ("--time", ms),
-            Length::Samples(n) => ("--samples", n),
-            Length::Frames(n) => ("--frames", n),
-        };
-        a.push(flag.into());
-        a.push(n.to_string().into());
+        push_length(&mut a, self.length);
         a.push("-O".into());
         a.push(self.format.clone().into());
-        a.push("-o".into());
-        a.push(path.as_os_str().to_owned());
+        if let Some(path) = path {
+            a.push("-o".into());
+            a.push(path.as_os_str().to_owned());
+        }
         a
+    }
+}
+
+/// How much of the program's stdout a stream reads at once.
+const STREAM_READ: usize = 1 << 20;
+
+/// The program's stdout as a blocking file, for a thread of its own.
+#[cfg(unix)]
+fn blocking_pipe(pipe: tokio::process::ChildStdout) -> std::io::Result<std::fs::File> {
+    pipe.into_owned_fd().map(std::fs::File::from)
+}
+
+/// The program's stdout as a blocking file, for a thread of its own.
+#[cfg(windows)]
+fn blocking_pipe(pipe: tokio::process::ChildStdout) -> std::io::Result<std::fs::File> {
+    pipe.into_owned_handle().map(std::fs::File::from)
+}
+
+/// Copy `pipe` into `out` until its end, an error, or `out` refusing more (the stream stopped).
+fn pump_pipe(mut pipe: std::fs::File, out: &StreamOutput, program: &str) -> Result<u64> {
+    use std::io::Read;
+    let mut delivered = 0u64;
+    let mut buf = vec![0u8; STREAM_READ];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => return Ok(delivered),
+            Ok(n) => {
+                out.write(&buf[..n])?;
+                delivered += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(DeskError::Internal(format!("reading from {program}: {e}"))),
+        }
+    }
+}
+
+/// Run an acquisition into a stream sink: the program writes to its stdout (no `-o`), which the
+/// core reads in large chunks into `out`. Ends when the program does, when `out` is cancelled
+/// (the stream stopped), or at `req.timeout` (unless [`NO_TIMEOUT`]); the program is killed and
+/// reaped on anything but its own end. Returns the bytes it delivered.
+///
+/// The pipe is read by a thread of its own with blocking reads: a reader that waits in `read`
+/// takes the data as soon as it is there, while one woken by the runtime after each pipe-full
+/// left a fast program (800 MB/s) waiting on a full pipe.
+pub async fn stream(
+    configs: &indexmap::IndexMap<String, ProviderConfig>,
+    base_dir: &Path,
+    device: &str,
+    spec: &SigrokSpec,
+    req: &Acquire,
+    out: &StreamOutput,
+) -> Result<u64> {
+    let backend = resolve(configs, base_dir, spec).await?;
+    let args = req.args_to(spec, None);
+    let mut cmd = backend.command(&args)?;
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            backend.missing()
+        } else {
+            DeskError::ProviderUnreachable {
+                provider: backend.id.clone(),
+                message: format!("cannot run {}: {e}", backend.program.display()),
+                hint: None,
+            }
+        }
+    })?;
+    // stdin stays open until the program exits (`--continuous` stops at once on end of file).
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let deadline = Instant::now().checked_add(req.timeout);
+    let program = backend.program.display().to_string();
+    let pump = async {
+        let Some(pipe) = stdout else {
+            return Ok(0);
+        };
+        let pipe = blocking_pipe(pipe)
+            .map_err(|e| DeskError::Internal(format!("reading from {program}: {e}")))?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (sink, name) = (out.clone(), program.clone());
+        // Not joined: it ends with the pipe, or at its next write once the stream is stopped.
+        std::thread::Builder::new()
+            .name("sigrok-stream".into())
+            .spawn(move || {
+                let _ = tx.send(pump_pipe(pipe, &sink, &name));
+            })
+            .map_err(|e| DeskError::Internal(format!("starting the stream reader: {e}")))?;
+        rx.await
+            .unwrap_or_else(|_| Err(DeskError::Internal("the stream reader stopped".into())))
+    };
+    let errors = read_bounded(stderr, MAX_STDERR, true);
+    tokio::pin!(pump, errors);
+    let mut stderr_text: Option<String> = None;
+    let pumped: Result<u64> = loop {
+        tokio::select! {
+            r = &mut pump => break r,
+            t = &mut errors, if stderr_text.is_none() => stderr_text = Some(t),
+            _ = out.cancelled() => {
+                break Err(DeskError::Cancelled(format!("the stream of `{device}` was stopped")));
+            }
+            _ = sleep_until(deadline) => {
+                break Err(DeskError::Timeout {
+                    what: format!("the sigrok stream of `{device}`"),
+                    after: req.timeout,
+                });
+            }
+        }
+    };
+    let delivered = match pumped {
+        Ok(n) => n,
+        Err(e) => {
+            // Killed and reaped before anyone looks for it.
+            let _ = child.kill().await;
+            drop(stdin);
+            return Err(e);
+        }
+    };
+    // Its stdout ended: it is done (or about to be). Wait a little for its exit and stderr.
+    let finish = async {
+        let text = match stderr_text {
+            Some(t) => t,
+            None => errors.await,
+        };
+        (text, child.wait().await)
+    };
+    let ended = tokio::time::timeout(Duration::from_secs(5), finish).await;
+    let (text, status) = match ended {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = child.kill().await;
+            drop(stdin);
+            return Err(DeskError::Timeout {
+                what: format!("sigrok-cli exiting after the stream of `{device}`"),
+                after: Duration::from_secs(5),
+            });
+        }
+    };
+    drop(stdin);
+    let status = status.map_err(|e| {
+        DeskError::Internal(format!("waiting for {}: {e}", backend.program.display()))
+    })?;
+    if status.success() {
+        return Ok(delivered);
+    }
+    let ran = Ran {
+        ok: false,
+        code: status.code(),
+        stdout: String::new(),
+        stderr: text,
+    };
+    Err(failed(&backend, device, spec, ran.error_text()))
+}
+
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1030,15 +1194,24 @@ impl Measure {
         push_config(&mut a, &self.config);
         a.push("--channels".into());
         a.push(self.channels.join(",").into());
-        let (flag, n) = match self.length {
-            Length::Time(ms) => ("--time", ms),
-            Length::Samples(n) => ("--samples", n),
-            Length::Frames(n) => ("--frames", n),
-        };
-        a.push(flag.into());
-        a.push(n.to_string().into());
+        push_length(&mut a, self.length);
         a
     }
+}
+
+/// `--time <ms>`, `--samples <n>`, `--frames <n>` or `--continuous`.
+fn push_length(a: &mut Vec<OsString>, length: Length) {
+    let (flag, n) = match length {
+        Length::Time(ms) => ("--time", ms),
+        Length::Samples(n) => ("--samples", n),
+        Length::Frames(n) => ("--frames", n),
+        Length::Continuous => {
+            a.push("--continuous".into());
+            return;
+        }
+    };
+    a.push(flag.into());
+    a.push(n.to_string().into());
 }
 
 /// A value as `--get` printed it, typed.

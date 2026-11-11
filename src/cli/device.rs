@@ -5,7 +5,7 @@ use crate::bench::Bench;
 use indexmap::IndexMap;
 
 use crate::config::{Binding, Device, DeviceLimits, SOURCE};
-use crate::declared::{Action, Decl, Limit, Type};
+use crate::declared::{Action, Decl, Limit, Stream, Type};
 use crate::error::Result;
 use crate::ops::Catalog;
 use crate::output::{Report, middle_ellipsis, table};
@@ -42,6 +42,8 @@ pub(super) struct Names {
     pub values: IndexMap<String, NameView>,
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub actions: IndexMap<String, ActionView>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    pub streams: IndexMap<String, StreamView>,
     /// Capability → its channels (`desk set <device>:<channel> …`).
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub channels: IndexMap<String, Vec<String>>,
@@ -63,6 +65,13 @@ pub(super) struct ActionView {
     pub action: Action,
 }
 
+#[derive(Clone, Serialize)]
+pub(super) struct StreamView {
+    pub capability: String,
+    #[serde(flatten)]
+    pub stream: Stream,
+}
+
 impl Names {
     /// `channel`: whose bench limits to show (a channel's own limit wins).
     pub(super) fn of(d: &Device, cat: &Catalog, channel: Option<&str>) -> Names {
@@ -70,7 +79,7 @@ impl Names {
         let clashes = |n: &str| {
             cat.entries
                 .iter()
-                .filter(|e| e.decls.names().any(|m| m == n))
+                .filter(|e| e.decls.names().any(|m| m == n) || e.decls.streams.contains_key(n))
                 .count()
                 > 1
         };
@@ -108,6 +117,15 @@ impl Names {
                     ActionView {
                         capability: e.key.clone(),
                         action: action.clone(),
+                    },
+                );
+            }
+            for (n, stream) in &e.decls.streams {
+                names.streams.insert(
+                    key(n),
+                    StreamView {
+                        capability: e.key.clone(),
+                        stream: stream.clone(),
                     },
                 );
             }
@@ -308,6 +326,33 @@ pub(super) fn action_blocks(actions: &IndexMap<String, ActionView>, indent: &str
     blocks(&rows, indent)
 }
 
+/// One block per stream: what its arguments take, what it delivers.
+pub(super) fn stream_blocks(streams: &IndexMap<String, StreamView>, indent: &str) -> String {
+    let rows: Vec<(&str, Vec<String>)> = streams
+        .iter()
+        .map(|(n, s)| {
+            let mut lines: Vec<String> = s
+                .stream
+                .args
+                .iter()
+                .map(|(k, d)| {
+                    let mut line = format!("{k}=<{}>", summary(d, None));
+                    if let Some(v) = &d.default {
+                        line.push_str(&format!(", default {}", v.display(Some(d))));
+                    } else if d.optional {
+                        line.push_str(", optional");
+                    }
+                    line
+                })
+                .collect();
+            lines.extend(s.stream.doc.clone());
+            lines.push(format!("delivers {} (desk stream)", s.stream.content));
+            (n.as_str(), lines)
+        })
+        .collect();
+    blocks(&rows, indent)
+}
+
 /// Max width of the power path column in `device list`; `device show` prints it in full.
 const PATH_WIDTH: usize = 48;
 
@@ -394,6 +439,10 @@ pub fn run(bench: &Bench, cmd: DeviceCmd) -> Result<Report> {
             if !view.names.actions.is_empty() {
                 human.push_str("actions:\n");
                 human.push_str(&action_blocks(&view.names.actions, "  "));
+            }
+            if !view.names.streams.is_empty() {
+                human.push_str("streams:\n");
+                human.push_str(&stream_blocks(&view.names.streams, "  "));
             }
             for (cap, chs) in &view.names.channels {
                 human.push_str(&format!("channels:     {cap}: {}\n", chs.join(", ")));

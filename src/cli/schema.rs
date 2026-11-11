@@ -91,12 +91,13 @@ pub fn run(bench: Result<Bench>, config_path: Option<&Path>) -> Report {
                 "requires": "the device's mains must be on (device_off otherwise)"
             },
             "declared": {
-                "description": "Any other capability: the model declares its settings, values and actions (see devices[].settings/values/actions, with types, units, ranges, limits and `switches`).",
+                "description": "Any other capability: the model declares its settings, values, actions and streams (see devices[].settings/values/actions/streams, with types, units, ranges, limits and `switches`).",
                 "commands": [
                     "desk get <device>[:<channel>] [<name>...]",
                     "desk set <device>[:<channel>] <setting> <value> [<setting> <value>...] [--dry-run]",
                     "desk do <device>[:<channel>] <action> [<arg>=<value>...] [--dry-run]",
-                    "desk watch <device>[:<channel>] [<name>...] [--interval 100ms] [--count N] [--changes]"
+                    "desk watch <device>[:<channel>] [<name>...] [--interval 100ms] [--count N] [--changes]",
+                    "desk stream <device>[:<channel>] <stream> [<arg>=<value>...] [--header|--frames|--discard] [--duration D] [--bytes N]"
                 ],
                 "rules": "numbers need their unit (330c, 250ma, 1.5kohm; prefixes are case-sensitive: m milli, M mega); the device range (min/max) and the bench limit are checked before anything is sent (limit_exceeded); several settings apply in declaration order, except that a boolean `switches` setting set to off is sent first; settings are read back (verified: true, absent = the device can't report it); `switches: true` means a physical effect: ask the user first",
                 "values": "numbers come in the declared unit without prefixes; a value declared with `units` comes as { value, unit }; absent = not reported",
@@ -109,7 +110,8 @@ pub fn run(bench: Result<Bench>, config_path: Option<&Path>) -> Report {
             "json": "with --json, stdout is one document: { ok, data, error? }; error = { code, message, hint? }",
             "partial_failure": "multi-device commands report every device in data.results; ok=false and error/exit code come from the first failure",
             "logs": "script bindings may return data.results[].log; they also print to stderr",
-            "streams": "`desk watch --json` prints one { ok, data } line per reading (data: device, time, elapsed, values, channels?, dropped, failed) and a final { ok: false, error } line if it ends with an error; a background daemon holds the session, other commands keep working"
+            "streams": "`desk watch --json` prints one { ok, data } line per reading (data: device, time, elapsed, values, channels?, dropped, failed) and a final { ok: false, error } line if it ends with an error; a background daemon holds the session, other commands keep working",
+            "binary_streams": "`desk stream` writes a stream's payload to stdout (never a terminal); --header prints its header line first, --frames passes the daemon's frames (docs/streaming.md); with --discard --json, stdout has the header (with --header) and a final summary or error envelope; without --discard, --json puts that envelope on stderr. While it runs, other commands for that device fail with endpoint_unavailable (busy)"
         },
         "errors": ERROR_CODES
             .iter()
