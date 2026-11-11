@@ -5,6 +5,7 @@
 #   desk --config examples/sigrok/desk.toml do la capture duration=1s samplerate=100khz format=binary
 #   desk --config examples/sigrok/desk.toml get dmm
 #   desk --config examples/sigrok/desk.toml watch dmm --count 5
+#   desk --config examples/sigrok/desk.toml stream la samples samplerate=10mhz --discard --duration 3s
 #
 # Captures go to the state folder (`[captures] dir` or $DESK_CAPTURE_DIR change that).
 
@@ -28,6 +29,16 @@ samplerate = { type = "number", unit = "Hz", min = 1000, max = 100e6, default = 
 channels   = { type = "string", default = "D0,D1,D2,D3", doc = "comma-separated, e.g. D0,D1" }
 format     = { type = "choice", choices = ["srzip", "binary", "csv", "vcd"], default = "srzip" }
 trigger    = { type = "string", optional = true, doc = "sigrok triggers, e.g. D0=r" }
+
+# Live samples for other programs (`desk stream la samples > samples.bin`, or
+# `cargo run --example stream_edges -- --config examples/sigrok/desk.toml la samples`).
+[devices.la.capture.streams.samples]
+content = "logic"
+doc     = "the demo device's logic channels, live, until stopped"
+
+[devices.la.capture.streams.samples.args]
+samplerate = { type = "number", unit = "Hz", min = 1000, max = 100e6, default = 1e6 }
+channels   = { type = "string", default = "D0,D1,D2,D3,D4,D5,D6,D7", doc = "comma-separated, in bit order" }
 
 # The demo device's analog channels as a meter: sigrok-cli runs once per reading.
 [devices.dmm]

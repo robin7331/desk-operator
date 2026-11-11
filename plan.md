@@ -1113,15 +1113,15 @@ Model format, next to values, settings and actions:
   with the real `demo` driver, and the numbers are in `docs/streaming.md`. They decide whether a
   shared-memory transport is needed for the highest rates.
 
-- [ ] `streams` in the model format (schema, `model check`, `device show`, `desk schema`, docs)
-- [ ] Stream sink, `ctx.describe`, the driver's `stream()`; `acquire` with `continuous`
-- [ ] Daemon hub: start, join, refuse, fan-out, drops, end, stall, device lock, idle exit
-- [ ] Socket protocol and `desk stream` (`--header`, `--frames`, `--discard`, `--duration`, `--bytes`)
-- [ ] Mock source and tests: two subscribers, a slow one, different arguments, source ends, source
+- [x] `streams` in the model format (schema, `model check`, `device show`, `desk schema`, docs)
+- [x] Stream sink, `ctx.describe`, the driver's `stream()`; `acquire` with `continuous`
+- [x] Daemon hub: start, join, refuse, fan-out, drops, end, stall, device lock, idle exit
+- [x] Socket protocol and `desk stream` (`--header`, `--frames`, `--discard`, `--duration`, `--bytes`)
+- [x] Mock source and tests: two subscribers, a slow one, different arguments, source ends, source
       fails, daemon stopped mid-stream, a busy device, stall
-- [ ] sigrok source against the fake and the real `demo` driver
-- [ ] Throughput measured and documented; an example consumer (`examples/stream_edges.rs`)
-- [ ] Docs and skills
+- [x] sigrok source against the fake and the real `demo` driver
+- [x] Throughput measured and documented; an example consumer (`examples/stream_edges.rs`)
+- [x] Docs and skills
 
 ### Not in M9.1
 

@@ -186,6 +186,13 @@
             "$ref": "#/$defs/action"
           }
         },
+        "streams": {
+          "type": "object",
+          "description": "Live data it delivers until stopped (`desk stream`); names are unique with values, settings and actions",
+          "additionalProperties": {
+            "$ref": "#/$defs/stream"
+          }
+        },
         "channels": {
           "description": "A count (1..64) or a list of channel names",
           "oneOf": [
@@ -392,11 +399,35 @@
           "description": "The action writes a file the core owns: the driver fills ctx.output and returns { format = \"…\", extension = \"…\", … }"
         }
       }
+    },
+    "stream": {
+      "type": "object",
+      "required": [
+        "content"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]{1,32}$",
+          "description": "What the bytes are: `logic` (well-known: the driver's description gives unit_size, samplerate and channels in bit order) or another name (opaque to the core)"
+        },
+        "doc": {
+          "type": "string"
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/arg"
+          },
+          "description": "Required unless they have a default or are optional"
+        }
+      }
     }
   },
   "patternProperties": {
     "^(?!(model|power|source|mains)$)[a-z][a-z0-9_]*$": {
-      "description": "A declared capability (any name but model/power/source/mains): a Lua driver with read(ctx), set(ctx, name, value), action(ctx, name, args) as needed by its declarations. desk requires at least one of values, settings, actions.",
+      "description": "A declared capability (any name but model/power/source/mains): a Lua driver with read(ctx), set(ctx, name, value), action(ctx, name, args), stream(ctx, name, args) as needed by its declarations. desk requires at least one of values, settings, actions, streams.",
       "$ref": "#/$defs/binding"
     }
   }

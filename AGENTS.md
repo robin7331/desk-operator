@@ -24,7 +24,9 @@ commands keep working (`docs/streaming.md`). **M7, open capabilities, done** (`p
 and sigrok, done** (`plan.md`, "M8"): actions that produce a file (`produces = "file"`, a sink the
 core owns), and sigrok as a connection kind (`sigrok-cli` run as a separate program,
 `docs/sigrok.md`). **M8.1**: readings and settings through sigrok (`ctx.sigrok.measure|get|set`
-in a driver's `read()`/`set()`). Still open:
+in a driver's `read()`/`set()`). **M9.1, raw binary streams** (`plan.md`, "M9"): models declare
+streams, a source fills a stream sink, the daemon fans its blocks out to subscribers over its
+socket (`desk stream`, `docs/streaming.md`). Still open: M9.2 (activity) and M9.3 (history),
 validating the `desk-setup` skill on a real bench, and real installs and serial devices on macOS
 and Windows (roadmap in `plan.md`).
 Keep it lean: build only what the current milestone needs.
@@ -52,6 +54,7 @@ Keep it lean: build only what the current milestone needs.
 | **Model** | What's true for *every unit* of a product ("FNIRSI IPS3608"): driver, USB ids, maximums, docs, tests. Lives in the model library (`models/<vendor>/<model>/`). Never contains anything user-specific (no Home Assistant entities, no bench limits). |
 | **Capability** | A named group of what a device can do, with one driver binding. **Well-known** ones have names and stricter rules fixed by the core: `power` (power_switch, mains) and `source` (voltage_source, bench power supplies). Any other name (`heater`, `meter`, …) is **declared**: the model lists its values, settings and actions, and the core applies its generic rules. |
 | **Value / setting / action** | What a capability declares: a **value** is reported (`temperature`), a **setting** is reported and changeable (`setpoint`), an **action** is done on request (`standby`). Typed (`number` with a unit, `boolean`, `choice`, `string`), with ranges; `switches` marks a physical effect. |
+| **Stream** | The fourth thing a capability declares: live data until stopped (`samples`), with a `content` (`logic` is well-known: `unit_size`, `samplerate`, `channels` in bit order; any other name is opaque) and arguments like an action's. The driver's `stream()` describes it once and fills a stream sink; the daemon cuts it into blocks and fans them out (`desk stream`). |
 | **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which is the `output` setting of `source`. Never mix "power" and "output". |
 | **Capability binding** | One config key per capability: `power`, `source`, or the declared capability's name. Each is a native provider binding or a Lua script. |
 | **Connection** | What a binding may open to reach its device: a serial `port` or a `sigrok` driver (run through `sigrok-cli`); other kinds (LAN, USBTMC, …) when a device needs one. A driver's connection is part of its capability binding. |
@@ -79,7 +82,7 @@ default.
 
 ## Architecture principles
 
-- **One command set for every device.** `desk get|set|do|watch <device>[:<channel>] …` work on
+- **One command set for every device.** `desk get|set|do|watch|stream <device>[:<channel>] …` work on
   any capability; only mains has its own group (`desk power`). Never add commands per kind of
   device.
 - **CLI first, agent-operable.** Everything the UI will do is a CLI command. Every command supports
@@ -138,6 +141,9 @@ src/
   units.rs             the unit table: parsing `330c`, `250mA`, `1.5kΩ`; formatting
   capture.rs           actions that produce a file: the sink (private temp folder, size cap,
                        rename, never overwrite), capture folder, `--output`/`--max-size`, cancel
+  stream/              streams: the description (`logic` rules), the stream sink (blocks of whole
+                       units, flushed when full or 5 ms old), the fan-out with per-subscriber
+                       queues and drop counts; frame.rs = the `desk-stream-1` frame codec
   deadline.rs          timeouts that a host function filling a capture can suspend
   ops.rs               a device's catalog of names, get/set/do ops (resolved + checked), running them
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
@@ -154,17 +160,22 @@ src/
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook; one file per
                        connection kind's host API: serial.rs (`ctx.serial`), sigrok.rs (`ctx.sigrok`)
   daemon/              `desk serve`: local socket (ipc.rs), JSON-lines protocol, CLI forwarding,
-                       `watch` streams; session.rs = live device sessions + per-device lock
+                       `watch` streams; session.rs = live device sessions + per-device lock;
+                       hub.rs = one running binary stream per device (start, join, refuse, end)
   cli/ops.rs           `desk get`, `desk set`, `desk do` (rendering included); left-out arguments
                        list what's possible and end as a usage error
+  cli/stream.rs        `desk stream`: the client of a binary stream (payload, `--header`,
+                       `--frames`, `--discard`, `--duration`, `--bytes`); prints its own output
   cli/complete.rs      `desk completions <shell>` and the candidates behind Tab (config and
                        models only, never a device)
   cli/update.rs        `desk update`: download, verify, swap the binary, refresh global skills
                        (only release builds, marked by `DESK_RELEASE_BUILD`; else --force)
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
 examples/sigrok/       sample bench on stock sigrok's `demo` driver (needs sigrok-cli)
+examples/stream_edges.rs  an example consumer of `desk stream --frames` (std only): edges per channel
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
-docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
+docs/streaming.md      `desk watch`, `desk stream` (header, frames, drops, throughput), the daemon
+                       and its socket protocol (for app authors)
 docs/sigrok.md         sigrok for users: getting it, vendor builds, backends, troubleshooting
 docs/model-format.md  model format (spec); schemas/ has its JSON Schema (tested
                        against every model in tests/models.rs)
@@ -177,6 +188,8 @@ tests/home_assistant.rs  end-to-end tests against a stateful fake HA (wiremock)
 tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, errors, logs)
 tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
 tests/daemon.rs        watch + daemon: streaming, commands during a watch, endings, the socket
+tests/streams.rs       `desk stream` against the mock source: header, pattern, frames, joiners,
+                       refusals, a slow subscriber, endings, busy devices, idle exit, Lua drivers
 tests/declared.rs      declared capabilities: units, ranges, limits, verify, channels, Lua drivers
 tests/captures.rs      actions that produce a file: defaults, where files go, size cap, timeouts,
                        cancel (Ctrl-C, daemon client gone), dry runs, Lua drivers and ctx.output
@@ -185,6 +198,8 @@ tests/sigrok.rs        sigrok against a fake sigrok-cli: backends, `desk sigrok`
                        resolution, ctx.sigrok.acquire (exact command lines, checks, failures,
                        timeout, size cap, cancel, one user per device); one test uses the real
                        `sigrok-cli -d demo` when it is installed
+tests/sigrok_streams.rs streams from sigrok (`acquire{ continuous = true }`): command line, stdout,
+                       two subscribers, no child left; the real `demo` driver where installed
 tests/sigrok_values.rs ctx.sigrok.measure|get|set: meters and supplies through `desk get|set|watch`,
                        exact command lines, checks, failures, timeouts; the real `demo` meter
 tests/update.rs        `desk update` against a fake release (wiremock); swapping the binary on Unix

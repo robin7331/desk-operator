@@ -22,6 +22,8 @@ pub struct Deadline(Arc<Mutex<State>>);
 #[derive(Debug, Default)]
 struct State {
     end: Option<Instant>,
+    /// What the last [`Deadline::start`] gave (for [`restart`]).
+    after: Option<Duration>,
     /// Open [`Suspended`] guards.
     paused: usize,
     since: Option<Instant>,
@@ -37,6 +39,7 @@ impl Deadline {
         let mut s = self.lock();
         let now = Instant::now();
         s.end = Some(now + after);
+        s.after = Some(after);
         if s.paused > 0 {
             s.since = Some(now);
         }
@@ -127,6 +130,21 @@ pub fn suspend() -> Suspended {
     Suspended(stack)
 }
 
+/// Start every running deadline of the calling task again with its whole time: a stream's driver
+/// that keeps delivering data never runs out of time, one that stops does.
+pub fn restart() {
+    let stack = ACTIVE.try_with(Clone::clone).unwrap_or_default();
+    for d in &stack {
+        let after = {
+            let s = d.lock();
+            s.end.and(s.after)
+        };
+        if let Some(after) = after {
+            d.start(after);
+        }
+    }
+}
+
 pub struct Suspended(Vec<Deadline>);
 
 impl Drop for Suspended {
@@ -176,6 +194,19 @@ mod tests {
         })
         .await;
         assert_eq!(r, Err(Elapsed));
+    }
+
+    #[tokio::test]
+    async fn restart_gives_a_deadline_its_whole_time_again() {
+        let r = timeout(Duration::from_millis(150), async {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                restart();
+            }
+            "done"
+        })
+        .await;
+        assert_eq!(r, Ok("done"));
     }
 
     #[tokio::test]

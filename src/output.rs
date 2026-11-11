@@ -16,6 +16,9 @@ pub struct Report {
     pub failure: Option<(ErrorJson, i32)>,
     /// The command already printed its output as it went (`watch`); only a failure is left.
     pub streamed: bool,
+    /// The command printed everything itself, its error too (`desk stream`, whose stdout may
+    /// carry binary data): only this exit code is left.
+    pub printed: Option<i32>,
 }
 
 impl Report {
@@ -25,6 +28,18 @@ impl Report {
             human,
             failure: None,
             streamed: false,
+            printed: None,
+        }
+    }
+
+    /// A command that printed everything itself and exits with `code`.
+    pub fn printed(code: i32) -> Self {
+        Report {
+            data: Value::Null,
+            human: String::new(),
+            failure: None,
+            streamed: true,
+            printed: Some(code),
         }
     }
 
@@ -35,6 +50,7 @@ impl Report {
             human: String::new(),
             failure,
             streamed: true,
+            printed: None,
         }
     }
 
@@ -48,6 +64,9 @@ impl Report {
 pub fn emit(json_mode: bool, result: Result<Report, DeskError>) -> i32 {
     match result {
         Ok(report) => {
+            if let Some(code) = report.printed {
+                return code;
+            }
             let code = report.failure.as_ref().map_or(0, |(_, c)| *c);
             if report.streamed {
                 // Streams are JSON lines: the error, if any, is one more line.

@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::capture::{self, Sink};
 use crate::config::{Device, SOURCE};
-use crate::declared::{self, Action, Decl, Declarations, Driver, Readings, Type, Val};
+use crate::declared::{self, Action, Decl, Declarations, Driver, Readings, Stream, Type, Val};
 use crate::error::{DeskError, Result};
 use crate::model::Power;
 use crate::source::{self, Limits, Mode, Reading, Request, SourceInfo, VoltageSource};
@@ -126,6 +126,16 @@ impl Catalog {
         match hits.as_slice() {
             [i] => Ok((*i, name.to_string())),
             [] => {
+                if self
+                    .entries
+                    .iter()
+                    .any(|e| cap.is_none_or(|c| c == e.key) && e.decls.streams.contains_key(name))
+                {
+                    return Err(DeskError::Usage(format!(
+                        "`{name}` is a stream of `{}`: `desk stream {} {name}`",
+                        self.device, self.device
+                    )));
+                }
                 // A power supply's name on a device that has none: say what's missing.
                 let psu = source_decls(SourceInfo::default(), None);
                 if cap.is_none_or(|c| c == SOURCE)
@@ -191,6 +201,48 @@ impl Catalog {
             None => Err(DeskError::Usage(format!(
                 "`{name}` is not an action (actions: {}); values and settings use `desk get` / `desk set`",
                 names_or_none(e.decls.actions.keys())
+            ))),
+        }
+    }
+
+    /// Find a stream (`samples` or `capture.samples`): the entry's index, the bare name and its
+    /// declaration.
+    pub fn stream(&self, query: &str) -> Result<(usize, String, &Stream)> {
+        let (cap, name) = match query.split_once('.') {
+            Some((c, n)) => (Some(c), n),
+            None => (None, query),
+        };
+        let hits: Vec<usize> = (0..self.entries.len())
+            .filter(|i| {
+                let e = &self.entries[*i];
+                cap.is_none_or(|c| c == e.key) && e.decls.streams.contains_key(name)
+            })
+            .collect();
+        match hits.as_slice() {
+            [i] => Ok((*i, name.to_string(), &self.entries[*i].decls.streams[name])),
+            [] => {
+                let all: Vec<String> = self
+                    .entries
+                    .iter()
+                    .flat_map(|e| e.decls.streams.keys().cloned())
+                    .collect();
+                Err(DeskError::Usage(format!(
+                    "device `{}` has no stream `{query}` (streams: {})",
+                    self.device,
+                    if all.is_empty() {
+                        "none".to_string()
+                    } else {
+                        all.join(", ")
+                    }
+                )))
+            }
+            many => Err(DeskError::Usage(format!(
+                "`{query}` is ambiguous on device `{}`: say {}",
+                self.device,
+                many.iter()
+                    .map(|i| format!("`{}.{name}`", self.entries[*i].key))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
             ))),
         }
     }
@@ -333,6 +385,7 @@ pub fn source_decls(ratings: SourceInfo, channels: Option<Vec<String>>) -> Decla
         values,
         settings,
         actions: IndexMap::new(),
+        streams: IndexMap::new(),
         channels,
     }
 }
@@ -554,7 +607,7 @@ pub fn plan_do(
 ) -> Result<Op> {
     let (i, name, action) = cat.action(query)?;
     cat.check_channel(i, channel, true)?;
-    let args = parse_args(&name, action, raw_args)?;
+    let args = parse_args(&name, &action.args, raw_args)?;
     match (&capture, action.produces_file()) {
         (Some(plan), true) => {
             if let Some(out) = &plan.output {
@@ -592,7 +645,39 @@ fn names_or_none<'a>(names: impl Iterator<Item = &'a String>) -> String {
     }
 }
 
-fn parse_args(action: &str, decl: &Action, raw: &[String]) -> Result<IndexMap<String, Val>> {
+/// What `desk stream <device[:channel]> <stream> [arg=value…]` asks for, resolved and checked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamOp {
+    pub channel: Option<String>,
+    pub entry: usize,
+    pub stream: String,
+    /// In declaration order, defaults filled in.
+    pub args: IndexMap<String, Val>,
+}
+
+/// `desk stream <device[:channel]> <stream> [arg=value…]`.
+pub fn plan_stream(
+    cat: &Catalog,
+    channel: Option<&str>,
+    query: &str,
+    raw_args: &[String],
+) -> Result<StreamOp> {
+    let (i, name, stream) = cat.stream(query)?;
+    cat.check_channel(i, channel, true)?;
+    let args = parse_args(&name, &stream.args, raw_args)?;
+    Ok(StreamOp {
+        channel: channel.map(str::to_string),
+        entry: i,
+        stream: name,
+        args,
+    })
+}
+
+fn parse_args(
+    action: &str,
+    decls: &IndexMap<String, Decl>,
+    raw: &[String],
+) -> Result<IndexMap<String, Val>> {
     let mut given: IndexMap<String, Val> = IndexMap::new();
     for a in raw {
         let Some((k, v)) = a.split_once('=') else {
@@ -600,10 +685,10 @@ fn parse_args(action: &str, decl: &Action, raw: &[String]) -> Result<IndexMap<St
                 "`{a}`: arguments look like name=value (e.g. seconds=10s)"
             )));
         };
-        let Some(d) = decl.args.get(k) else {
+        let Some(d) = decls.get(k) else {
             return Err(DeskError::Usage(format!(
                 "`{action}` has no argument `{k}` (arguments: {})",
-                names_or_none(decl.args.keys())
+                names_or_none(decls.keys())
             )));
         };
         let val = declared::parse_input(k, d, v)?;
@@ -612,8 +697,7 @@ fn parse_args(action: &str, decl: &Action, raw: &[String]) -> Result<IndexMap<St
             return Err(DeskError::Usage(format!("`{k}` given twice")));
         }
     }
-    let missing: Vec<&String> = decl
-        .args
+    let missing: Vec<&String> = decls
         .iter()
         .filter(|(k, d)| d.required() && !given.contains_key(*k))
         .map(|(k, _)| k)
@@ -629,8 +713,7 @@ fn parse_args(action: &str, decl: &Action, raw: &[String]) -> Result<IndexMap<St
         )));
     }
     // Declaration order, defaults filled in; optional ones left out stay absent.
-    Ok(decl
-        .args
+    Ok(decls
         .iter()
         .filter_map(|(k, d)| {
             given

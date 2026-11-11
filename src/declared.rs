@@ -4,6 +4,7 @@
 //! * **value**: something the device reports (`temperature`)
 //! * **setting**: something it reports and you can change (`setpoint`)
 //! * **action**: something it does on request, optionally with arguments (`standby`)
+//! * **stream**: live data it delivers until stopped (`samples`), see [`crate::stream`]
 //!
 //! The core parses what you type with the unit table, checks the device range and your `limits`
 //! before anything is sent, applies several settings in declaration order (switching off first),
@@ -16,6 +17,7 @@ use serde::Serialize;
 
 use crate::capture::{Output, Produced};
 use crate::error::{DeskError, Result};
+use crate::stream::StreamOutput;
 use crate::units;
 
 /// Read-back tolerance when a setting declares none (like `voltage_source`).
@@ -100,6 +102,26 @@ impl Action {
     }
 }
 
+/// A stream: live data the device delivers until it is stopped (`desk stream`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Stream {
+    /// What the payload is: `logic` (well-known, see [`crate::stream`]) or a declared name whose
+    /// bytes are opaque to the core.
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    /// Required unless they have a `default` or are `optional`, like an action's.
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    pub args: IndexMap<String, Decl>,
+}
+
+impl Stream {
+    /// Whether any argument must be given.
+    pub fn needs_args(&self) -> bool {
+        self.args.values().any(Decl::required)
+    }
+}
+
 /// Everything a capability declares.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Declarations {
@@ -109,6 +131,8 @@ pub struct Declarations {
     pub settings: IndexMap<String, Decl>,
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub actions: IndexMap<String, Action>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    pub streams: IndexMap<String, Stream>,
     /// Channel names (`channels = 2` gives `1`, `2`); `None` = no channels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channels: Option<Vec<String>>,
@@ -130,7 +154,10 @@ fn valid_name(n: &str) -> bool {
 
 impl Declarations {
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty() && self.settings.is_empty() && self.actions.is_empty()
+        self.values.is_empty()
+            && self.settings.is_empty()
+            && self.actions.is_empty()
+            && self.streams.is_empty()
     }
 
     pub fn readable(&self) -> bool {
@@ -157,6 +184,9 @@ impl Declarations {
         }
         for (name, v) in section(table, "actions")? {
             d.actions.insert(name.clone(), action(&name, &v)?);
+        }
+        for (name, v) in section(table, "streams")? {
+            d.streams.insert(name.clone(), stream(&name, &v)?);
         }
         d.channels = match table.remove("channels") {
             None => None,
@@ -194,6 +224,7 @@ impl Declarations {
             .keys()
             .chain(d.settings.keys())
             .chain(d.actions.keys())
+            .chain(d.streams.keys())
         {
             if seen.contains(&n.as_str()) {
                 return Err(format!(
@@ -468,6 +499,63 @@ fn action(name: &str, v: &toml::Value) -> std::result::Result<Action, String> {
         produces,
         args,
     })
+}
+
+/// A stream's `content`: lowercase letters, digits and `_`.
+pub fn valid_content(c: &str) -> bool {
+    !c.is_empty()
+        && c.len() <= 32
+        && c.chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn stream(name: &str, v: &toml::Value) -> std::result::Result<Stream, String> {
+    let at = |m: &str| format!("stream `{name}`: {m}");
+    if !valid_name(name) {
+        return Err(at("names use lowercase letters, digits and `_`"));
+    }
+    let toml::Value::Table(t) = v else {
+        return Err(at(
+            "must be a table like { content = \"logic\", doc = \"…\" }",
+        ));
+    };
+    if let Some(k) = t
+        .keys()
+        .find(|k| !["content", "doc", "args"].contains(&k.as_str()))
+    {
+        return Err(at(&format!(
+            "unknown key `{k}` (allowed: content, doc, args)"
+        )));
+    }
+    let content = match t.get("content") {
+        Some(toml::Value::String(c)) if valid_content(c) => c.clone(),
+        Some(toml::Value::String(c)) => {
+            return Err(at(&format!(
+                "`content` \"{c}\" must be lowercase letters, digits and `_` (e.g. \"logic\")"
+            )));
+        }
+        _ => {
+            return Err(at(
+                "needs `content = \"logic\"` (or another name for what its bytes are)",
+            ));
+        }
+    };
+    let doc = match t.get("doc") {
+        None => None,
+        Some(toml::Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err(at("`doc` must be a string")),
+    };
+    let mut args = IndexMap::new();
+    match t.get("args") {
+        None => {}
+        Some(toml::Value::Table(a)) => {
+            for (n, v) in a {
+                args.insert(n.clone(), decl(n, v, Role::Arg).map_err(|e| at(&e))?);
+            }
+        }
+        Some(_) => return Err(at("`args` must be a table of names")),
+    }
+    Ok(Stream { content, doc, args })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -787,6 +875,21 @@ pub trait Driver: Send + Sync {
         args: &IndexMap<String, Val>,
         output: Option<&Output>,
     ) -> Result<Option<Produced>>;
+    /// Deliver a stream: describe it on `output` once, fill it, and return when the source ends.
+    /// It is stopped by cancelling `output` (or by dropping the call).
+    async fn stream(
+        &self,
+        channel: Option<&str>,
+        name: &str,
+        args: &IndexMap<String, Val>,
+        output: &StreamOutput,
+    ) -> Result<()> {
+        let _ = (channel, args, output);
+        Err(DeskError::Internal(format!(
+            "{}: this driver has no streams (asked for `{name}`)",
+            self.label()
+        )))
+    }
     fn take_log(&self) -> Vec<String> {
         Vec::new()
     }
@@ -1010,6 +1113,33 @@ mod tests {
             err("[settings]\nx = { type = \"number\", optional = true }").contains("only action")
         );
         assert!(err("[actions.go]\nswitches = false\nproduces = \"files\"").contains("produces"));
+    }
+
+    #[test]
+    fn streams_are_declared_like_actions() {
+        let d = decls(
+            r#"
+            [streams.samples]
+            content = "logic"
+            doc = "live samples"
+            args = { samplerate = { type = "number", unit = "Hz", default = 1e6 }, channels = { type = "string" } }
+        "#,
+        )
+        .unwrap();
+        assert!(!d.is_empty(), "a capability with only streams is valid");
+        assert!(!d.readable());
+        let s = &d.streams["samples"];
+        assert_eq!(s.content, "logic");
+        assert!(s.needs_args());
+        assert_eq!(s.args["samplerate"].default, Some(Val::Number(1e6)));
+        let err = |t: &str| decls(t).unwrap_err();
+        assert!(err("[streams.s]\ndoc = \"x\"").contains("content"));
+        assert!(err("[streams.s]\ncontent = \"Logic\"").contains("lowercase"));
+        assert!(err("[streams.s]\ncontent = \"x\"\nrate = 1").contains("unknown key"));
+        assert!(
+            err("[actions]\ns = { switches = false }\n[streams.s]\ncontent = \"x\"")
+                .contains("twice")
+        );
     }
 
     #[test]

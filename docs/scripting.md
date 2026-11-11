@@ -53,8 +53,9 @@ function state(ctx) ... end -- optional
 | `ctx.clock()` | Monotonic milliseconds (float), for deadlines and "measured after my command?" checks |
 | `ctx.log(...)` | Log a line (arguments are joined with spaces). Shown on stderr as `device: line` and returned in `--json` output as `log` |
 | `ctx.channel` | The channel of this call (`"1"`, `"ch2"`, …) when the capability declares `channels`; `nil` otherwise |
-| `ctx.output` | During an action that produces a file: the handle to fill (see *Actions that produce a file*); `nil` otherwise |
-| `ctx.append{ into = ctx.output, data = s }` | Append bytes to that file |
+| `ctx.output` | During an action that produces a file or a `stream()` call: the handle to fill (see *Actions that produce a file*, *Streams*); `nil` otherwise |
+| `ctx.append{ into = ctx.output, data = s }` | Append bytes to that file or stream |
+| `ctx.describe{ into = ctx.output, … }` | Say what a stream's bytes are, once before the first byte (see *Streams*) |
 | `ctx.serial` | The binding's serial port (see *Serial ports*) |
 | `ctx.sigrok` | The binding's sigrok device (see *sigrok devices*) |
 
@@ -121,7 +122,7 @@ capture = { script = "drivers/la.lua", sigrok = { driver = "demo" } }
 |---|---|
 | `ctx.sigrok.driver` | The binding's `driver` |
 | `ctx.sigrok.conn` | The binding's `conn`, or `nil` |
-| `ctx.sigrok.acquire{ … }` | Capture into the file of an action that produces one. Returns `{ bytes = n }` |
+| `ctx.sigrok.acquire{ … }` | Capture into the file of an action that produces one, or into a stream. Returns `{ bytes = n }` |
 | `ctx.sigrok.measure{ … }` | Take readings from analog channels (a meter's display, a supply's output). Returns a list of readings |
 | `ctx.sigrok.get{ … }` | Read config keys (a supply's setpoint, a meter's mode). Returns `{ key = value, … }` |
 | `ctx.sigrok.set{ … }` | Change config keys. Returns nothing |
@@ -145,11 +146,12 @@ local r = ctx.sigrok.acquire{
 | `config` | Table of sigrok config keys (`[a-z0-9_]+`) to strings, numbers or booleans. Whole numbers are written without a fraction (`10000000`, never `1e7`); booleans as `true`/`false`. Strings can't contain `:`, `=`, whitespace or control characters, or start with `-` | one `--config k=v:k=v` (keys sorted) |
 | `channels` | A list of names, or one comma-separated string. Names are letters, digits, `_`, `.`, `-` (a range like `D0-D7` is passed as written) | one `--channels a,b` |
 | `time` / `samples` / `frames` | Exactly one. `time` in ms (a number, or a duration string such as `"2s"`); `samples` and `frames` whole numbers above 0 | `--time <ms>`, `--samples <n>`, `--frames <n>` |
+| `continuous` | `true`: until the stream is stopped, instead of `time`/`samples`/`frames`. Only into a stream | `--continuous` |
 | `triggers` | sigrok's trigger text, e.g. `"D0=r,D1=1"`: like a config value, but `=` and `,` are allowed | `--triggers <t>` |
 | `wait_trigger` | `true` to wait for the trigger (needs `triggers`) | `--wait-trigger` |
-| `format` | sigrok output module id (`[a-z0-9_]+`), default `"srzip"` | `-O <format>` |
-| `into` | Required: `ctx.output` | `-o <desk's temporary file>` |
-| `timeout` | Required: ms or a duration string | desk stops sigrok after it |
+| `format` | sigrok output module id (`[a-z0-9_]+`), default `"srzip"` (`"binary"` into a stream) | `-O <format>` |
+| `into` | Required: `ctx.output` | `-o <desk's temporary file>`; into a stream no `-o`: desk reads sigrok's stdout |
+| `timeout` | Required for a file, optional for a stream: ms or a duration string | desk stops sigrok after it |
 
 Each element is one argument, with `-d <driver>` (or `-d <driver>:conn=<conn>`) first and no
 shell. Anything else in the table, or a value that breaks a rule above, is `script_failed` before
@@ -160,6 +162,19 @@ sigrok's stdin stays open until it exits, and its warnings on stderr never fail 
 its exit code does. Failures: device busy or not found (`endpoint_unavailable`), no backend has
 the driver (`config_invalid`), no `sigrok-cli` (`provider_unreachable`), and anything else as
 `script_failed` with sigrok's own message.
+
+Into a stream, desk reads sigrok's stdout in large pieces and passes it on; the stream ends when
+sigrok does (a bounded acquisition ends it normally) or is stopped, and then sigrok is killed. A
+continuous stream from the `demo` driver:
+
+```lua
+ctx.sigrok.acquire{ config = { samplerate = 10000000 }, channels = { "D0", "D1" },
+                    continuous = true, format = "binary", into = ctx.output }
+-- -d demo --config samplerate=10000000 --channels D0,D1 --continuous -O binary
+```
+
+sigrok's `binary` output packs the enabled channels into each sample in the order they were
+enabled: with only D3 and D7 enabled, D3 is bit 0 and D7 bit 1. Describe `channels` in that order.
 
 ### Readings and settings through sigrok
 
@@ -258,6 +273,7 @@ function read(ctx)                   -- required if anything is readable: every 
 end
 function set(ctx, name, value) end   -- required if there are settings
 function action(ctx, name, args) end -- required if there are actions; args = { seconds = 10, … }
+function stream(ctx, name, args) end -- required if there are streams (see *Streams*)
 function open(ctx) end               -- optional: start of a session (connect, handshake)
 function close(ctx) end              -- optional: end of a session (always called)
 ```
@@ -310,6 +326,44 @@ folder, moves it to its name when the action succeeded, and removes the folder w
 it when the action fails, times out, goes over the size cap (`limit_exceeded`) or is cancelled.
 The size cap counts every file in that folder. The
 result reports `file` (the absolute path), `bytes`, `format` and `meta`.
+
+### Streams
+
+A capability that declares `streams` (format: [`model-format.md`](model-format.md)) needs
+`stream(ctx, name, args)`. During that call `ctx.output` is the stream's sink, an opaque handle
+like a capture's. The driver describes the data once, then fills the sink until the source ends,
+and returns:
+
+```lua
+function stream(ctx, name, args)
+  ctx.describe{
+    into       = ctx.output,
+    unit_size  = 1,                                  -- bytes per sample
+    samplerate = args.samplerate,
+    channels   = { "D0", "D1", "D2", "D3" },          -- bit order: the first is bit 0
+    driver     = ctx.sigrok.driver,                  -- anything else is `meta`
+  }
+  ctx.sigrok.acquire{ config = { samplerate = args.samplerate }, channels = "D0,D1,D2,D3",
+                      continuous = true, into = ctx.output }
+end
+```
+
+| `ctx.describe{ into = ctx.output, … }` | |
+|---|---|
+| `logic` content | `unit_size` (a whole number, 1 to 8), `samplerate` (above 0) and `channels` (a non-empty list of names, at most `unit_size * 8`) are required; they become the header's own fields |
+| any other content | `unit_size` (default 1) is taken if present, so blocks hold whole units |
+| everything else | the header's `meta`. Plain data only |
+
+`ctx.describe` comes once, before the first byte: filling an undescribed stream, describing it
+twice or describing a capture's file is `script_failed`. Returning without describing fails the
+stream. The data is filled with the same host functions as a capture: `ctx.append{ into =
+ctx.output, data = s }` and `ctx.sigrok.acquire{ …, into = ctx.output }`.
+
+Timeouts: until the description, the call's timeout applies. After that every `ctx.append`
+starts it again, and `acquire` suspends it, so a driver that keeps delivering never runs out of
+time. A source that delivers nothing for 10 s ends the stream with `timeout`. When the last
+subscriber leaves, the stream is stopped: host functions that fill it end (sigrok is killed),
+`ctx.append` fails with `cancelled`, and the call is dropped if it doesn't return within 2 s.
 
 Everything else is desk's, the same for every driver: units, ranges and limits before anything is
 sent, the order of settings, verification (`verified`, or "not confirmed" for settings `read()`

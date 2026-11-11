@@ -476,9 +476,10 @@ function read(ctx)
   error("not implemented: read")
 end
 
--- Needed once there are settings / actions:
+-- Needed once there are settings / actions / streams:
 -- function set(ctx, name, value) end
 -- function action(ctx, name, args) end
+-- function stream(ctx, name, args) end   -- ctx.describe{ into = ctx.output, … }, then fill it
 "#;
 
 const VENDOR_README: &str = r#"# {vendor}
@@ -577,6 +578,9 @@ reading = {{ type = "number", unit = "V", doc = "TODO" }}
 
 # [{key}.actions]
 # standby = {{ switches = true, doc = "…" }}
+
+# [{key}.streams]
+# samples = {{ content = "logic", doc = "…" }}   # live data for `desk stream`
 "#
         ),
     };

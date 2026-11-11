@@ -55,7 +55,7 @@ up per bench).
 |---|---|---|---|
 | `[power]` | `power_switch` (mains), well-known | `on`, `off`; optional `state` | nothing |
 | `[source]` | `voltage_source` (a bench power supply), well-known | `set_voltage`, `set_current`, `set_output`, `read`; optional `open`, `close`, `info` | `ratings` with `max_voltage`, `max_current` |
-| any other name (`[meter]`, `[heater]`, …) | a **declared** capability | `read`, `set`, `action` as its declarations need; optional `open`, `close` | at least one of `values`, `settings`, `actions` |
+| any other name (`[meter]`, `[heater]`, …) | a **declared** capability | `read`, `set`, `action`, `stream` as its declarations need; optional `open`, `close` | at least one of `values`, `settings`, `actions`, `streams` |
 
 Names: lowercase letters, digits, `_`; not `mains` and not a device key (`name`, `model`, `aliases`,
 `limits`). A table without declarations (e.g. a typo like `[sorce]`) is an error, not a new
@@ -105,8 +105,8 @@ boost   = { switches = true, args = { seconds = { type = "number", unit = "s", m
 `channels = 2` (or `channels = ["ch1", "ch2"]`) on a capability gives every value, setting and
 action once per channel: the driver gets `ctx.channel`, users address `<device>:<channel>`.
 
-Names are unique within a capability; where two capabilities of a device use the same name, users
-write `<capability>.<name>` (`heater.setpoint`).
+Names are unique within a capability (values, settings, actions and streams together); where two
+capabilities of a device use the same name, users write `<capability>.<name>` (`heater.setpoint`).
 
 ### Actions that produce a file
 
@@ -130,6 +130,32 @@ lists the arguments while a required one is missing, with defaults and which are
 
 `default`, `optional` and `produces` came with desk 0.4: a model that uses them needs
 `requires = "desk-operator >= 0.4"`.
+
+### Streams
+
+A stream is live data the device delivers until it is stopped, for other programs
+(`desk stream`, see [`streaming.md`](streaming.md)):
+
+```toml
+[capture.streams.samples]
+content = "logic"
+doc     = "live samples"
+
+[capture.streams.samples.args]
+samplerate = { type = "number", unit = "Hz", default = 10e6 }
+channels   = { type = "string", default = "D0,D1,D2,D3,D4,D5,D6,D7" }
+```
+
+| Field | Meaning |
+|---|---|
+| `content` | what the bytes are (required; lowercase letters, digits, `_`). `logic` is well-known: the driver's description must give `unit_size` (bytes per sample, 1 to 8), `samplerate` and `channels`, the names in **bit order** (the first is bit 0 of a sample). Any other name is the model's own, and its bytes are opaque to desk |
+| `doc` | what it delivers |
+| `args` | its arguments, declared like an action's (required unless they have a `default` or are `optional`) |
+
+A capability may have only streams. The driver's `stream(ctx, name, args)` describes the data
+once with `ctx.describe{ into = ctx.output, … }`, then fills `ctx.output` until the source ends
+(see [`scripting.md`](scripting.md)). A user's config can't change a stream's `content`. Streams
+came with desk 0.4, like `produces`.
 
 ### Connections: `port` and `sigrok`
 

@@ -749,6 +749,88 @@ fn json_schema_agrees_with_the_models() {
     }
 }
 
+/// A model with a stream: the schema takes it, `model check` loads its driver (which must have
+/// `stream()`), and a device can't change what the stream's bytes are.
+#[test]
+fn models_declare_streams() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("schemas/model.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("valid schema");
+    let la = r#"
+[model]
+id       = "acme/la-8"
+name     = "ACME LA 8"
+requires = "desk-operator >= 0.1"
+status   = "community"
+
+[capture]
+script = "la.lua"
+
+[capture.streams.samples]
+content = "logic"
+doc     = "live samples"
+args    = { samplerate = { type = "number", unit = "Hz", default = 1e6 } }
+"#;
+    let as_json =
+        |t: &str| serde_json::to_value(toml::from_str::<toml::Table>(t).unwrap()).unwrap();
+    let errors: Vec<String> = validator
+        .iter_errors(&as_json(la))
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "a stream: {errors:?}");
+    for (bad, why) in [
+        ("content = \"logic\"", "no content"),
+        ("content = \"Logic!\"", "a bad content name"),
+    ] {
+        let broken = la.replace(
+            "content = \"logic\"",
+            if why == "no content" { "" } else { bad },
+        );
+        assert!(
+            !validator.is_valid(&as_json(&broken)),
+            "schema should reject: {why}"
+        );
+    }
+
+    let b = Bench::new("[devices.la]\nmodel = \"acme/la-8\"\n");
+    b.write("models/acme/la-8/model.toml", la);
+    b.write(
+        "models/acme/la-8/la.lua",
+        "PARAMS = {}\nfunction stream(ctx, name, args) end\n",
+    );
+    let out = b.run(&["--json", "model", "check", "acme/la-8"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let out = b.run(&["--json", "device", "show", "la"]);
+    assert_eq!(
+        out.json()["data"]["device"]["streams"]["samples"]["content"],
+        "logic"
+    );
+
+    b.write("models/acme/la-8/la.lua", "PARAMS = {}\n");
+    let out = b.run(&["--json", "model", "check", "acme/la-8"]);
+    assert_eq!(out.code, 3, "{}", out.stdout);
+    assert!(
+        out.message().contains("`stream(ctx, ...)`"),
+        "{}",
+        out.message()
+    );
+
+    b.write(
+        "desk.toml",
+        "[devices.la]\nmodel = \"acme/la-8\"\ncapture = { streams = { samples = { content = \"frames\" } } }\n",
+    );
+    let out = b.run(&["--json", "device", "show", "la"]);
+    assert_eq!(out.code, 3, "{}", out.stdout);
+    assert!(
+        out.message().contains("streams.samples.content"),
+        "{}",
+        out.message()
+    );
+}
+
 #[test]
 fn scaffold_creates_a_checkable_model() {
     let b = Bench::new("");

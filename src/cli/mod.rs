@@ -12,6 +12,7 @@ mod schema;
 mod sigrok;
 mod skill;
 mod status;
+mod stream;
 mod update;
 
 use std::path::PathBuf;
@@ -33,7 +34,8 @@ For agents:
   desk skill desk-operator  how to operate the bench safely: read it before switching anything
   desk skill list           all skills (e.g. adding a device desk doesn't know yet)
 Every device works the same way: `desk get <device>` shows its values and settings, `desk set`
-changes settings, `desk do` runs actions, `desk watch` streams; `desk schema --json` lists them.
+changes settings, `desk do` runs actions, `desk watch` streams readings, `desk stream` binary data;
+`desk schema --json` lists them.
 Rules in short: change things only when the user asked; `desk power` is a device's mains,
 `desk set psu output on` a power supply's terminals; never pick values yourself.";
 
@@ -138,6 +140,11 @@ pub enum Command {
         #[arg(long)]
         changes: bool,
     },
+    /// Stream a device's live binary data to stdout (or count it with --discard), e.g. `desk
+    /// stream la samples > samples.bin`. A background daemon holds the device and shares the
+    /// stream with other programs. Without a stream, or without the arguments it needs, lists
+    /// what it takes, starts nothing and exits as a usage error
+    Stream(StreamArgs),
     /// Inspect configured devices
     Device {
         #[command(subcommand)]
@@ -206,6 +213,35 @@ Add to your shell's startup file:
         )]
         idle: String,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct StreamArgs {
+    /// Device id, alias or name; `device:channel` for one channel
+    #[arg(add = ArgValueCompleter::new(complete::candidates))]
+    pub device: String,
+    /// The stream
+    #[arg(add = ArgValueCompleter::new(complete::candidates))]
+    pub stream: Option<String>,
+    /// Arguments as name=value (required unless they have a default or are optional)
+    #[arg(add = ArgValueCompleter::new(complete::candidates))]
+    pub args: Vec<String>,
+    /// Print the header (one JSON line: what the data is) before the payload
+    #[arg(long)]
+    pub header: bool,
+    /// Write the frames as they come from the daemon (32-byte header + payload each, after the
+    /// header line), so a program sees sequence numbers, offsets and drops
+    #[arg(long, conflicts_with = "discard")]
+    pub frames: bool,
+    /// Read without writing the payload; print a summary with the throughput at the end
+    #[arg(long)]
+    pub discard: bool,
+    /// Stop after this long, e.g. 10s
+    #[arg(long, value_name = "DURATION")]
+    pub duration: Option<String>,
+    /// Stop after this much payload, e.g. 100MB (rounded up to whole units)
+    #[arg(long, value_name = "SIZE")]
+    pub bytes: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -455,6 +491,7 @@ pub async fn run(cli: Cli) -> Result<Report> {
                 .await
                 .unwrap_or_else(|e| Report::streamed(Some((e.to_json(), e.exit_code())))));
         }
+        Command::Stream(args) => return stream::run(cli.config.as_deref(), cli.json, args).await,
         Command::Schema => {
             let config = cli.config.as_deref();
             return Ok(schema::run(Bench::load(config), config));
@@ -578,6 +615,9 @@ pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
         }
         Command::Watch { .. } => Err(DeskError::Usage(
             "`desk watch` streams through the daemon; it can't run here".into(),
+        )),
+        Command::Stream(_) => Err(DeskError::Usage(
+            "`desk stream` runs through the daemon; it can't run here".into(),
         )),
         Command::Device { action } => device::run(bench, action),
         Command::Provider { action } => provider::run(bench, action).await,

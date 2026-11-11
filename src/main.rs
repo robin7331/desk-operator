@@ -17,6 +17,7 @@ mod script;
 mod serial;
 mod sigrok;
 mod source;
+mod stream;
 mod units;
 
 use clap::error::ErrorKind;

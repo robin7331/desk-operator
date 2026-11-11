@@ -113,6 +113,34 @@ which `--get` answers and `--set` keeps), its channel groups (`b.fake.groups(…
 a measurement prints (`b.fake.readings("P1: 4.98 V DC")`), and assert `b.fake.gets()`,
 `b.fake.sets()` and `b.fake.measures()`. `tests/sigrok_values.rs` has examples.
 
+A logic analyzer can also declare a **stream** for live samples (`desk stream`, see
+[`docs/model-format.md`](../docs/model-format.md)). Its driver describes the data once, then
+lets sigrok fill it until the stream is stopped:
+
+```toml
+[capture.streams.samples]
+content = "logic"
+args    = { samplerate = { type = "number", unit = "Hz", default = 1e6 }, channels = { type = "string", default = "D0,D1,D2,D3" } }
+```
+
+```lua
+function stream(ctx, name, args)
+  local channels = {}
+  for c in string.gmatch(args.channels, "[^,]+") do channels[#channels + 1] = c end
+  -- One byte per sample for up to 8 channels (check what your device's output gives for more).
+  ctx.describe{ into = ctx.output, unit_size = 1, samplerate = args.samplerate,
+                channels = channels }
+  ctx.sigrok.acquire{ config = { samplerate = args.samplerate }, channels = channels,
+                      continuous = true, format = "binary", into = ctx.output }
+end
+```
+
+`channels` is in **bit order**: the first is bit 0 of each sample. sigrok's `binary` output packs
+the enabled channels in the order they are given, so describe them in the order you pass them.
+Test it with the fake: with `-O` and no `-o` it writes its pattern (byte `i` is `i % 251`) to
+stdout, endlessly with `--continuous`; `b.fake.streams()` are those calls and
+`b.fake.stream_pids()` their processes. `tests/sigrok_streams.rs` has examples.
+
 ## Contributing a model
 
 An agent can walk you through all of it: `desk skill install` installs the `desk-add-device` skill

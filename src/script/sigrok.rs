@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use mlua::{Lua, Table, Value};
 
-use super::output_of;
+use super::{Sink, output_of};
 use crate::deadline;
 use crate::error::DeskError;
 use crate::providers::Registry;
@@ -42,19 +42,18 @@ pub(super) fn sigrok_api(
                 f,
                 "ctx.sigrok.acquire{ samples = 1000, into = ctx.output, timeout = \"5s\" }",
             )?;
-            let acquire = acquire_request(&req).map_err(|m| runtime(f, m))?;
             let out = output_of(&req, f)?;
+            let into_stream = matches!(out, Sink::Stream(_));
+            let acquire = acquire_request(&req, into_stream).map_err(|m| runtime(f, m))?;
             // Its own timeout instead of the script's and the session's.
             let _suspended = deadline::suspend();
-            let bytes = sigrok::acquire(
-                c.providers.configs(),
-                c.providers.base_dir(),
-                &c.device,
-                &spec,
-                &acquire,
-                &out,
-            )
-            .await
+            let (cfg, dir) = (c.providers.configs(), c.providers.base_dir());
+            let bytes = match &out {
+                Sink::File(file) => {
+                    sigrok::acquire(cfg, dir, &c.device, &spec, &acquire, file).await
+                }
+                Sink::Stream(s) => sigrok::stream(cfg, dir, &c.device, &spec, &acquire, s).await,
+            }
             .map_err(mlua::Error::external)?;
             let r = lua.create_table()?;
             r.set("bytes", bytes)?;
@@ -337,8 +336,10 @@ fn timeout_of(v: Value) -> std::result::Result<Option<Duration>, String> {
     }
 }
 
-/// Check the table a driver passes to `ctx.sigrok.acquire` (everything but `into`).
-fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
+/// Check the table a driver passes to `ctx.sigrok.acquire` (everything but `into`). `stream`:
+/// `into` is a stream's sink (sigrok's stdout is read; `continuous` is allowed, `timeout` is
+/// optional and the default format is `binary`).
+fn acquire_request(t: &Table, stream: bool) -> std::result::Result<Acquire, String> {
     only(
         t,
         &[
@@ -347,6 +348,7 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
             "time",
             "samples",
             "frames",
+            "continuous",
             "triggers",
             "wait_trigger",
             "format",
@@ -359,7 +361,26 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
     let config = config_of(get("config")?)?;
     let channels = channels_of(get("channels")?, "leave it out for all channels")?;
 
+    let continuous = match get("continuous")? {
+        Value::Nil => false,
+        Value::Boolean(b) => b,
+        other => {
+            return Err(format!(
+                "`continuous` must be a boolean, not {}",
+                other.type_name()
+            ));
+        }
+    };
+    if continuous && !stream {
+        return Err(
+            "`continuous = true` only fills a stream (a capture's file needs `time`, `samples` or `frames`)"
+                .into(),
+        );
+    }
     let mut lengths = Vec::new();
+    if continuous {
+        lengths.push(Length::Continuous);
+    }
     for k in ["time", "samples", "frames"] {
         let v = get(k)?;
         if v.is_nil() {
@@ -373,7 +394,18 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
     }
     let length = match lengths.as_slice() {
         [one] => *one,
+        [] if stream => {
+            return Err(
+                "give `continuous = true`, or one of `time` (ms), `samples` or `frames`".into(),
+            );
+        }
         [] => return Err("give one of `time` (ms), `samples` or `frames`".into()),
+        _ if continuous => {
+            return Err(
+                "`continuous = true` runs until stopped: leave out `time`, `samples` and `frames`"
+                    .into(),
+            );
+        }
         _ => return Err("give only one of `time`, `samples` and `frames`".into()),
     };
 
@@ -407,6 +439,7 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
         return Err("`wait_trigger = true` needs `triggers`".into());
     }
     let format = match get("format")? {
+        Value::Nil if stream => "binary".to_string(),
         Value::Nil => "srzip".to_string(),
         Value::String(s) => {
             let s = s
@@ -423,6 +456,7 @@ fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
         }
     };
     let timeout = match get("timeout")? {
+        Value::Nil if stream => sigrok::NO_TIMEOUT,
         Value::Nil => {
             return Err(
                 "`timeout` is required: how long the whole capture may take, trigger wait included (ms or \"10s\")"

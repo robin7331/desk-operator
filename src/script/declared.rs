@@ -8,6 +8,8 @@
 //! function set(ctx, name, value) end    -- required if there are settings (value checked + in unit)
 //! function action(ctx, name, args) end  -- required if there are actions (args checked)
 //!   -- an action with `produces = "file"` fills ctx.output and returns { format = "…", … }
+//! function stream(ctx, name, args) end  -- required if there are streams: ctx.describe{ … }
+//!   -- once, then fill ctx.output until the source ends (or the stream is stopped)
 //! function open(ctx) end / function close(ctx) end   -- optional: a session (connect)
 //! ```
 //!
@@ -22,6 +24,7 @@ use super::{Engine, ScriptSpec};
 use crate::capture::{Output, Produced};
 use crate::declared::{self, Declarations, Driver, Val};
 use crate::error::{DeskError, Result};
+use crate::stream::StreamOutput;
 
 pub struct ScriptDriver {
     engine: Engine,
@@ -39,6 +42,9 @@ impl ScriptDriver {
         }
         if !decls.actions.is_empty() {
             needed.push("action");
+        }
+        if !decls.streams.is_empty() {
+            needed.push("stream");
         }
         engine.require(&needed)?;
         Ok(ScriptDriver { engine })
@@ -145,6 +151,30 @@ impl Driver for ScriptDriver {
             ));
         }
         Ok(Some(produced))
+    }
+
+    async fn stream(
+        &self,
+        channel: Option<&str>,
+        name: &str,
+        args: &IndexMap<String, Val>,
+        output: &StreamOutput,
+    ) -> Result<()> {
+        self.engine.set_channel(channel)?;
+        let table: serde_json::Map<String, serde_json::Value> = args
+            .iter()
+            .map(|(k, v)| (k.clone(), declared::to_json(v)))
+            .collect();
+        let argv = vec![
+            self.engine
+                .to_lua(&serde_json::Value::String(name.into()))?,
+            self.engine.to_lua(&serde_json::Value::Object(table))?,
+        ];
+        self.engine.set_stream_output(Some(output))?;
+        let result = self.engine.call_args("stream", argv).await;
+        self.engine.set_stream_output(None)?;
+        output.close();
+        result.map(drop)
     }
 
     fn take_log(&self) -> Vec<String> {

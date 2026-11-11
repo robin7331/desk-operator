@@ -31,6 +31,14 @@
 //! (bytes per second, default as fast as possible) and `timeout` (in s, default 10) are used when
 //! the action declares and gets them. It reports `format = "mock"`, extension `bin`, and
 //! `meta = { pattern = "i % 251" }`. `fail_*` fails before writing anything.
+//!
+//! A declared stream delivers a pattern a consumer can check from a block's offset alone: unit
+//! `i` is the little-endian `unit_size`-byte value of `i % 251`. Arguments used when the stream
+//! declares and gets them: `unit_size` (1..8, default 1), `rate` (units per second; absent or 0
+//! = as fast as possible), `units` (the total, then the source ends; absent = endless),
+//! `fail_after` (units, then an error) and `stall_after` (units, then silence). A `logic` stream
+//! has `unit_size * 8` channels `D0…` and `samplerate` = `rate` (default 1 MHz). `fail_*` fails
+//! before the description.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +56,7 @@ use crate::error::{DeskError, Result};
 use crate::model::{Capability, Power, PowerFeatures, PowerState};
 use crate::power::PowerSwitch;
 use crate::source::{Mode, Protection, Reading, SourceInfo, VoltageSource};
+use crate::stream::StreamOutput;
 
 pub const KIND: &str = "mock";
 
@@ -547,8 +556,119 @@ impl Driver for SimDeclared {
         }))
     }
 
+    async fn stream(
+        &self,
+        _channel: Option<&str>,
+        name: &str,
+        args: &indexmap::IndexMap<String, Val>,
+        out: &StreamOutput,
+    ) -> Result<()> {
+        self.inner.simulate(&self.endpoint).await?;
+        let num = |k: &str| args.get(k).and_then(Val::as_f64);
+        let unit = num("unit_size").unwrap_or(1.0).clamp(1.0, 8.0) as usize;
+        let rate = num("rate").filter(|r| *r > 0.0);
+        let mut meta = serde_json::Map::new();
+        meta.insert("unit_size".into(), serde_json::json!(unit));
+        if out.content() == crate::stream::LOGIC {
+            let channels: Vec<String> = (0..unit * 8).map(|i| format!("D{i}")).collect();
+            meta.insert("samplerate".into(), serde_json::json!(rate.unwrap_or(1e6)));
+            meta.insert("channels".into(), serde_json::json!(channels));
+        }
+        meta.insert("pattern".into(), serde_json::json!("unit i = i % 251"));
+        meta.insert("stream".into(), serde_json::json!(name));
+        out.describe(meta)?;
+        let limit = |k: &str| num(k).map(|n| n.max(0.0) as u64);
+        let source = MockSource {
+            unit,
+            rate,
+            units: limit("units"),
+            fail_after: limit("fail_after"),
+            stall_after: limit("stall_after"),
+        };
+        source.run(&self.endpoint, out).await
+    }
+
     fn label(&self) -> String {
         format!("sim (endpoint={})", self.endpoint)
+    }
+}
+
+/// The mock's stream source: unit `i` is the little-endian `unit`-byte value of `i % 251`, so a
+/// consumer can check any block from its offset alone.
+struct MockSource {
+    unit: usize,
+    /// Units per second; `None` = as fast as possible.
+    rate: Option<f64>,
+    /// Total units, then the source ends.
+    units: Option<u64>,
+    fail_after: Option<u64>,
+    stall_after: Option<u64>,
+}
+
+impl MockSource {
+    /// One cycle of the pattern (251 units), repeated to cover a chunk from any start.
+    fn pattern(&self, chunk_units: usize) -> Vec<u8> {
+        let cycle: Vec<u8> = (0..251u64)
+            .flat_map(|i| i.to_le_bytes().into_iter().take(self.unit))
+            .collect();
+        let reps = chunk_units / 251 + 2;
+        cycle.repeat(reps)
+    }
+
+    async fn run(&self, endpoint: &str, out: &StreamOutput) -> Result<()> {
+        const STEP: Duration = Duration::from_millis(5);
+        let chunk_units = (1 << 20) / self.unit;
+        let pattern = self.pattern(chunk_units);
+        let stop = [self.units, self.fail_after, self.stall_after]
+            .into_iter()
+            .flatten()
+            .min();
+        let start = tokio::time::Instant::now();
+        let mut at = 0u64;
+        loop {
+            if stop.is_some_and(|s| at >= s) {
+                break;
+            }
+            // What's due by now (at most `chunk_units` per write).
+            let due = match self.rate {
+                Some(r) => (start.elapsed().as_secs_f64() * r) as u64,
+                None => at + chunk_units as u64,
+            };
+            let due = stop.map_or(due, |s| due.min(s));
+            while at < due {
+                let n = (due - at).min(chunk_units as u64);
+                let from = (at % 251) as usize * self.unit;
+                out.write(&pattern[from..from + n as usize * self.unit])?;
+                at += n;
+            }
+            if self.rate.is_some() {
+                tokio::select! {
+                    _ = tokio::time::sleep(STEP) => {}
+                    _ = out.cancelled() => break,
+                }
+            } else {
+                // Let the daemon send what's there.
+                tokio::task::yield_now().await;
+            }
+            if out.is_cancelled() {
+                break;
+            }
+        }
+        if out.is_cancelled() {
+            return Err(DeskError::Cancelled("the stream was stopped".into()));
+        }
+        if self.fail_after.is_some_and(|f| at >= f) {
+            return Err(DeskError::EndpointUnavailable {
+                endpoint: endpoint.to_string(),
+                message: format!("simulated failure after {at} units"),
+            });
+        }
+        if self.stall_after.is_some_and(|s| at >= s) {
+            // Silence until stopped.
+            out.cancelled().await;
+            return Err(DeskError::Cancelled("the stream was stopped".into()));
+        }
+        Ok(())
     }
 }
 
