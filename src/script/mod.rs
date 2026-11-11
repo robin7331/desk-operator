@@ -26,11 +26,14 @@ use mlua::{
     Value, VmState,
 };
 
+use crate::capture::Output;
 use crate::config::Binding;
+use crate::deadline::{self, Deadline};
 use crate::error::{DeskError, Result};
 use crate::power::{self as power_core, PowerSwitch, Target};
 use crate::providers::Registry;
 use crate::serial::{Port, PortSpec, Settings};
+use crate::sigrok::{self, Acquire, Length, SigrokSpec};
 
 pub use declared::ScriptDriver;
 pub use power::ScriptSwitch;
@@ -58,6 +61,8 @@ pub struct ScriptSpec<'a> {
     pub params: &'a toml::Table,
     /// The binding's port, the only one `ctx.serial.open` may open.
     pub port: Option<&'a PortSpec>,
+    /// The binding's sigrok device, the only one `ctx.sigrok.acquire` may capture from.
+    pub sigrok: Option<&'a SigrokSpec>,
     pub timeout: Duration,
     pub providers: Arc<Registry>,
 }
@@ -68,7 +73,7 @@ pub struct Engine {
     ctx: Table,
     path: PathBuf,
     timeout: Duration,
-    deadline: Arc<Mutex<Option<Instant>>>,
+    deadline: Deadline,
     log: Arc<Mutex<Vec<String>>>,
     params: Option<Vec<ParamSpec>>,
 }
@@ -119,6 +124,7 @@ impl Engine {
             path,
             params,
             port,
+            sigrok,
             timeout,
             providers,
         } = spec;
@@ -138,11 +144,15 @@ impl Engine {
         lua.set_memory_limit(MEMORY_LIMIT).map_err(internal)?;
 
         let log = Arc::new(Mutex::new(Vec::new()));
-        let deadline = Arc::new(Mutex::new(Some(Instant::now() + timeout)));
+        let deadline = Deadline::default();
+        deadline.start(timeout);
         install_timeout_hook(&lua, deadline.clone(), timeout, path)?;
-        let ctx = host_api(&lua, &device, params, log.clone(), providers).map_err(internal)?;
+        let ctx =
+            host_api(&lua, &device, params, log.clone(), providers.clone()).map_err(internal)?;
         ctx.set("serial", serial_api(&lua, port.cloned()).map_err(internal)?)
             .map_err(internal)?;
+        let api = sigrok_api(&lua, device.id, sigrok.cloned(), providers).map_err(internal)?;
+        ctx.set("sigrok", api).map_err(internal)?;
 
         let engine = Engine {
             lua,
@@ -159,7 +169,7 @@ impl Engine {
             .set_name(format!("@{}", file_name(path)))
             .exec()
             .map_err(|e| engine.error(e))?;
-        *engine.deadline.lock().map_err(poisoned)? = None;
+        engine.deadline.clear();
         let declared = engine.declared_params()?;
         if let Some(specs) = &declared {
             engine.check_params(specs, params)?;
@@ -300,6 +310,19 @@ impl Engine {
         self.lua.to_value(v).map_err(|e| self.error(e))
     }
 
+    /// `ctx.output` for the next call: the handle of a capture's sink, or `nil`.
+    pub fn set_output(&self, output: Option<&Output>) -> Result<()> {
+        let v = match output {
+            Some(o) => Value::UserData(
+                self.lua
+                    .create_userdata(OutputHandle(o.clone()))
+                    .map_err(internal)?,
+            ),
+            None => Value::Nil,
+        };
+        self.ctx.set("output", v).map_err(internal)
+    }
+
     /// `ctx.channel` for the next calls (`nil` without channels).
     pub fn set_channel(&self, channel: Option<&str>) -> Result<()> {
         self.ctx.set("channel", channel).map_err(|e| self.error(e))
@@ -313,9 +336,10 @@ impl Engine {
         for a in args {
             argv.push_back(a);
         }
-        *self.deadline.lock().map_err(poisoned)? = Some(Instant::now() + self.timeout);
-        let result = f.call_async::<Value>(argv).await;
-        *self.deadline.lock().map_err(poisoned)? = None;
+        // On the task's deadline stack, so a host function that fills a capture can suspend it.
+        self.deadline.start(self.timeout);
+        let result = deadline::scope(self.deadline.clone(), f.call_async::<Value>(argv)).await;
+        self.deadline.clear();
         result.map_err(|e| self.error(e))
     }
 
@@ -365,17 +389,13 @@ impl Engine {
 
 fn install_timeout_hook(
     lua: &Lua,
-    deadline: Arc<Mutex<Option<Instant>>>,
+    deadline: Deadline,
     timeout: Duration,
     path: &Path,
 ) -> Result<()> {
     let what = format!("script {}", file_name(path));
     let hook = move |_: &Lua, _: &mlua::debug::Debug| -> mlua::Result<VmState> {
-        let expired = deadline
-            .lock()
-            .map(|d| d.is_some_and(|d| Instant::now() > d))
-            .unwrap_or(false);
-        if expired {
+        if deadline.expired() {
             return Err(mlua::Error::external(DeskError::Timeout {
                 what: what.clone(),
                 after: timeout,
@@ -499,7 +519,41 @@ fn host_api(
     })?;
     ctx.set("power", power)?;
 
+    // ctx.append{ into = ctx.output, data = "…" }: bytes the driver has into the capture.
+    let append = lua.create_function(|_, spec: Table| {
+        let out = output_of(&spec, "ctx.append")?;
+        let data: mlua::LuaString = spec
+            .get::<Option<mlua::LuaString>>("data")?
+            .ok_or_else(|| mlua::Error::runtime("ctx.append: `data` must be a string of bytes"))?;
+        out.write(&data.as_bytes()).map_err(mlua::Error::external)
+    })?;
+    ctx.set("append", append)?;
+
     Ok(ctx)
+}
+
+/// What `ctx.output` holds: a capture's sink. Opaque to scripts: no methods, no path.
+struct OutputHandle(Output);
+
+impl mlua::UserData for OutputHandle {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, _, ()| Ok("capture output"));
+    }
+}
+
+/// The sink a host function fills: `spec.into`, which must be `ctx.output` of the running call.
+pub(crate) fn output_of(spec: &Table, function: &str) -> mlua::Result<Output> {
+    let bad = || mlua::Error::runtime(format!("{function}: `into` must be ctx.output"));
+    let Value::UserData(ud) = spec.get::<Value>("into")? else {
+        return Err(bad());
+    };
+    let out = ud.borrow::<OutputHandle>().map_err(|_| bad())?.0.clone();
+    if !out.is_open() {
+        return Err(mlua::Error::external(DeskError::ScriptFailed(format!(
+            "{function}: this ctx.output belongs to an action call that has ended"
+        ))));
+    }
+    Ok(out)
 }
 
 /// `ctx.serial`: `open{ baud = …, … }` opens the binding's port (and only that one).
@@ -522,6 +576,295 @@ fn serial_api(lua: &Lua, port: Option<PortSpec>) -> mlua::Result<Table> {
     })?;
     serial.set("open", open)?;
     Ok(serial)
+}
+
+/// `ctx.sigrok`: `driver`, `conn` and `acquire{ … }` for the binding's sigrok device (and only
+/// that one). Without a `sigrok = { … }` binding, `acquire` fails with a config error.
+fn sigrok_api(
+    lua: &Lua,
+    device: &str,
+    spec: Option<SigrokSpec>,
+    providers: Arc<Registry>,
+) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    if let Some(s) = &spec {
+        t.set("driver", s.driver.as_str())?;
+        t.set("conn", s.conn.as_deref())?;
+    }
+    let device = device.to_string();
+    let acquire = lua.create_async_function(move |lua, req: Value| {
+        let spec = spec.clone();
+        let providers = providers.clone();
+        let device = device.clone();
+        async move {
+            let Some(spec) = spec else {
+                return Err(mlua::Error::external(DeskError::ConfigInvalid(
+                    "ctx.sigrok.acquire: this binding has no `sigrok = { driver = \"…\" }`".into(),
+                )));
+            };
+            let Value::Table(req) = req else {
+                return Err(mlua::Error::runtime(
+                    "ctx.sigrok.acquire expects a table, e.g. ctx.sigrok.acquire{ samples = 1000, \
+                     into = ctx.output, timeout = \"5s\" }",
+                ));
+            };
+            let acquire = acquire_request(&req)
+                .map_err(|m| mlua::Error::runtime(format!("ctx.sigrok.acquire: {m}")))?;
+            let out = output_of(&req, "ctx.sigrok.acquire")?;
+            // Its own timeout instead of the script's and the session's.
+            let _suspended = deadline::suspend();
+            let bytes = sigrok::acquire(
+                providers.configs(),
+                providers.base_dir(),
+                &device,
+                &spec,
+                &acquire,
+                &out,
+            )
+            .await
+            .map_err(mlua::Error::external)?;
+            let r = lua.create_table()?;
+            r.set("bytes", bytes)?;
+            Ok(r)
+        }
+    })?;
+    t.set("acquire", acquire)?;
+    Ok(t)
+}
+
+/// A duration from Lua: milliseconds (number) or a string like "2s".
+fn lua_duration(what: &str, v: &Value) -> std::result::Result<Duration, String> {
+    let d = match v {
+        Value::Integer(ms) if *ms > 0 => Duration::from_millis(*ms as u64),
+        Value::Number(ms) if *ms > 0.0 && ms.is_finite() => {
+            Duration::try_from_secs_f64(ms / 1000.0).map_err(|_| format!("`{what}` is too long"))?
+        }
+        Value::String(s) => {
+            let s = s.to_str().map_err(|_| format!("`{what}` must be text"))?;
+            humantime::parse_duration(s.trim())
+                .map_err(|e| format!("`{what}` \"{s}\" is not a duration like \"2s\": {e}"))?
+        }
+        _ => {
+            return Err(format!(
+                "`{what}` must be milliseconds (a number above 0) or a duration like \"2s\""
+            ));
+        }
+    };
+    if d.is_zero() {
+        return Err(format!("`{what}` must be above 0"));
+    }
+    Ok(d)
+}
+
+fn lua_count(what: &str, v: &Value) -> std::result::Result<u64, String> {
+    match v {
+        Value::Integer(n) if *n > 0 => Ok(*n as u64),
+        Value::Number(n) if *n >= 1.0 && n.fract() == 0.0 && *n < 9.0e15 => Ok(*n as u64),
+        _ => Err(format!("`{what}` must be a whole number above 0")),
+    }
+}
+
+/// Check the table a driver passes to `ctx.sigrok.acquire` (everything but `into`).
+fn acquire_request(t: &Table) -> std::result::Result<Acquire, String> {
+    const KEYS: &[&str] = &[
+        "config",
+        "channels",
+        "time",
+        "samples",
+        "frames",
+        "triggers",
+        "wait_trigger",
+        "format",
+        "into",
+        "timeout",
+    ];
+    let lua_err = |e: mlua::Error| e.to_string();
+    for pair in t.pairs::<Value, Value>() {
+        let (k, _) = pair.map_err(lua_err)?;
+        let known = match &k {
+            Value::String(s) => s.to_str().is_ok_and(|s| KEYS.contains(&&*s)),
+            _ => false,
+        };
+        if !known {
+            return Err(format!(
+                "unknown key {} (allowed: {})",
+                match &k {
+                    Value::String(s) => format!("`{}`", s.to_string_lossy()),
+                    other => format!("of type {}", other.type_name()),
+                },
+                KEYS.join(", ")
+            ));
+        }
+    }
+    let get = |k: &str| t.get::<Value>(k).map_err(lua_err);
+
+    let mut config = Vec::new();
+    match get("config")? {
+        Value::Nil => {}
+        Value::Table(c) => {
+            for pair in c.pairs::<Value, Value>() {
+                let (k, v) = pair.map_err(lua_err)?;
+                let Value::String(k) = k else {
+                    return Err("`config` keys must be sigrok config names (strings)".into());
+                };
+                let k = k.to_string_lossy();
+                sigrok::check_config_key(&k)?;
+                let v = match v {
+                    Value::String(s) => {
+                        let s = s
+                            .to_str()
+                            .map_err(|_| format!("config `{k}` must be text"))?
+                            .to_string();
+                        sigrok::check_config_value(&k, &s)?;
+                        s
+                    }
+                    Value::Integer(i) => i.to_string(),
+                    Value::Number(n) => {
+                        sigrok::number_text(n).map_err(|e| format!("config `{k}`: {e}"))?
+                    }
+                    Value::Boolean(b) => b.to_string(),
+                    other => {
+                        return Err(format!(
+                            "config `{k}` must be a string, number or boolean, not {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+                config.push((k, v));
+            }
+            config.sort();
+        }
+        other => {
+            return Err(format!(
+                "`config` must be a table like {{ samplerate = 1000000 }}, not {}",
+                other.type_name()
+            ));
+        }
+    }
+
+    let channels: Vec<String> = match get("channels")? {
+        Value::Nil => Vec::new(),
+        Value::String(s) => {
+            let s = s
+                .to_str()
+                .map_err(|_| "`channels` must be text".to_string())?;
+            s.split(',').map(|c| c.trim().to_string()).collect()
+        }
+        Value::Table(list) => {
+            let mut v = Vec::new();
+            for item in list.sequence_values::<Value>() {
+                match item.map_err(lua_err)? {
+                    Value::String(s) => v.push(s.to_string_lossy()),
+                    other => {
+                        return Err(format!(
+                            "`channels` lists names like \"D0\", not {}",
+                            other.type_name()
+                        ));
+                    }
+                }
+            }
+            if v.is_empty() {
+                return Err("`channels` is empty (leave it out for all channels)".into());
+            }
+            v
+        }
+        other => {
+            return Err(format!(
+                "`channels` must be a list like {{ \"D0\", \"D1\" }} or \"D0,D1\", not {}",
+                other.type_name()
+            ));
+        }
+    };
+    for c in &channels {
+        sigrok::check_channel(c)?;
+    }
+
+    let mut lengths = Vec::new();
+    for k in ["time", "samples", "frames"] {
+        let v = get(k)?;
+        if v.is_nil() {
+            continue;
+        }
+        lengths.push(match k {
+            "time" => {
+                let d = lua_duration("time", &v)?;
+                // Whole milliseconds, never shorter than asked.
+                let ms = d.as_nanos().div_ceil(1_000_000);
+                Length::Time(u64::try_from(ms).map_err(|_| "`time` is too long".to_string())?)
+            }
+            "samples" => Length::Samples(lua_count(k, &v)?),
+            _ => Length::Frames(lua_count(k, &v)?),
+        });
+    }
+    let length = match lengths.as_slice() {
+        [one] => *one,
+        [] => return Err("give one of `time` (ms), `samples` or `frames`".into()),
+        _ => return Err("give only one of `time`, `samples` and `frames`".into()),
+    };
+
+    let triggers = match get("triggers")? {
+        Value::Nil => None,
+        Value::String(s) => {
+            let s = s
+                .to_str()
+                .map_err(|_| "`triggers` must be text".to_string())?;
+            sigrok::check_triggers(&s)?;
+            Some(s.to_string())
+        }
+        other => {
+            return Err(format!(
+                "`triggers` must be a string like \"D0=r\", not {}",
+                other.type_name()
+            ));
+        }
+    };
+    let wait_trigger = match get("wait_trigger")? {
+        Value::Nil => false,
+        Value::Boolean(b) => b,
+        other => {
+            return Err(format!(
+                "`wait_trigger` must be a boolean, not {}",
+                other.type_name()
+            ));
+        }
+    };
+    if wait_trigger && triggers.is_none() {
+        return Err("`wait_trigger = true` needs `triggers`".into());
+    }
+    let format = match get("format")? {
+        Value::Nil => "srzip".to_string(),
+        Value::String(s) => {
+            let s = s
+                .to_str()
+                .map_err(|_| "`format` must be text".to_string())?;
+            sigrok::check_format(&s)?;
+            s.to_string()
+        }
+        other => {
+            return Err(format!(
+                "`format` must be a string like \"srzip\", not {}",
+                other.type_name()
+            ));
+        }
+    };
+    let timeout = match get("timeout")? {
+        Value::Nil => {
+            return Err(
+                "`timeout` is required: how long the whole capture may take, trigger wait included (ms or \"10s\")"
+                    .into(),
+            );
+        }
+        v => lua_duration("timeout", &v)?,
+    };
+    Ok(Acquire {
+        config,
+        channels,
+        length,
+        triggers,
+        wait_trigger,
+        format,
+        timeout,
+    })
 }
 
 fn serial_settings(opts: Option<Table>) -> mlua::Result<Settings> {
@@ -759,6 +1102,43 @@ fn internal(e: mlua::Error) -> DeskError {
     DeskError::Internal(format!("lua: {e}"))
 }
 
-fn poisoned<T>(_: std::sync::PoisonError<T>) -> DeskError {
-    DeskError::Internal("script state lock poisoned".into())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host function that fills a capture suspends the script's per-call deadline; it
+    /// continues afterwards with the time it had left.
+    #[tokio::test]
+    async fn a_suspending_host_call_stops_the_script_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.lua");
+        std::fs::write(
+            &path,
+            "function filled(ctx) ctx.slow(300); for i = 1, 100000 do end end\n\
+             function slept(ctx) ctx.sleep(300); for i = 1, 100000 do end end\n",
+        )
+        .unwrap();
+        let engine = Engine::load(ScriptSpec {
+            device: DeviceInfo { id: "t", name: "t" },
+            path: &path,
+            params: &toml::Table::new(),
+            port: None,
+            sigrok: None,
+            timeout: Duration::from_millis(100),
+            providers: Arc::new(Registry::new(Default::default(), dir.path().to_path_buf())),
+        })
+        .unwrap();
+        let slow = engine
+            .lua
+            .create_async_function(|_, ms: u64| async move {
+                let _suspended = deadline::suspend();
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                Ok(())
+            })
+            .unwrap();
+        engine.ctx.set("slow", slow).unwrap();
+        engine.call("filled", Value::Nil).await.unwrap();
+        let e = engine.call("slept", Value::Nil).await.unwrap_err();
+        assert_eq!(e.code(), "timeout", "{e}");
+    }
 }

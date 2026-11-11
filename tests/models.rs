@@ -661,6 +661,47 @@ fn json_schema_agrees_with_the_models() {
         .map(|e| e.to_string())
         .collect();
     assert!(errors.is_empty(), "a declared capability: {errors:?}");
+    let capture = format!(
+        "{MODEL}\n[capture]\nscript = \"c.lua\"\n[capture.actions.capture]\nswitches = false\nproduces = \"file\"\nargs = {{ duration = {{ type = \"number\", unit = \"s\" }}, rate = {{ type = \"number\", unit = \"Hz\", default = 1e6 }}, trigger = {{ type = \"string\", optional = true }} }}\n"
+    );
+    let errors: Vec<String> = validator
+        .iter_errors(&as_json(&capture))
+        .map(|e| e.to_string())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "an action that produces a file: {errors:?}"
+    );
+    let sigrok = capture.replace(
+        "script = \"c.lua\"\n",
+        "script = \"c.lua\"\nsigrok = { driver = \"demo\", build = \"https://example.org/builds\" }\n",
+    );
+    let errors: Vec<String> = validator
+        .iter_errors(&as_json(&sigrok))
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "a sigrok binding: {errors:?}");
+    for (bad, why) in [
+        (
+            "sigrok = { driver = \"demo\", conn = \"1.2\" }",
+            "conn in a model",
+        ),
+        (
+            "sigrok = { driver = \"demo\", backend = \"v\" }",
+            "backend in a model",
+        ),
+        ("sigrok = { build = \"https://example.org\" }", "no driver"),
+        ("sigrok = { driver = \"Demo\" }", "driver id"),
+    ] {
+        let broken = capture.replace(
+            "script = \"c.lua\"\n",
+            &format!("script = \"c.lua\"\n{bad}\n"),
+        );
+        assert!(
+            !validator.is_valid(&as_json(&broken)),
+            "schema should reject: {why}"
+        );
+    }
 
     for (broken, why) in [
         (
@@ -687,6 +728,18 @@ fn json_schema_agrees_with_the_models() {
                 "{MODEL}\n[heater]\nscript = \"h.lua\"\nactions = {{ go = {{ doc = \"x\" }} }}\n"
             ),
             "action without switches",
+        ),
+        (
+            format!(
+                "{MODEL}\n[heater]\nscript = \"h.lua\"\nactions = {{ go = {{ switches = false, produces = \"stream\" }} }}\n"
+            ),
+            "produces something other than a file",
+        ),
+        (
+            format!(
+                "{MODEL}\n[heater]\nscript = \"h.lua\"\nactions = {{ go = {{ switches = false, args = {{ a = {{ type = \"number\", default = 1, optional = true }} }} }} }}\n"
+            ),
+            "default and optional",
         ),
     ] {
         assert!(

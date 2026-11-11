@@ -53,6 +53,10 @@ function state(ctx) ... end -- optional
 | `ctx.clock()` | Monotonic milliseconds (float), for deadlines and "measured after my command?" checks |
 | `ctx.log(...)` | Log a line (arguments are joined with spaces). Shown on stderr as `device: line` and returned in `--json` output as `log` |
 | `ctx.channel` | The channel of this call (`"1"`, `"ch2"`, …) when the capability declares `channels`; `nil` otherwise |
+| `ctx.output` | During an action that produces a file: the handle to fill (see *Actions that produce a file*); `nil` otherwise |
+| `ctx.append{ into = ctx.output, data = s }` | Append bytes to that file |
+| `ctx.serial` | The binding's serial port (see *Serial ports*) |
+| `ctx.sigrok` | The binding's sigrok device (see *sigrok devices*) |
 
 A power handle `p` (both `p:on()` and `p.on()` work):
 
@@ -102,6 +106,58 @@ Ports are opened **exclusively**: while one command uses a port, nothing else ca
 `endpoint_unavailable` says "port is busy". Binary protocols are easy with Lua 5.4's
 `string.pack`/`string.unpack` (`"<f"` = little-endian float32, `"B"` = byte, `">H"` = big-endian u16).
 
+## sigrok devices (`ctx.sigrok`)
+
+A script binding can name **one** sigrok device instead of (or next to) a port. desk runs
+`sigrok-cli` for it; the script never names a program, a path or raw arguments
+([`sigrok.md`](sigrok.md) says how desk finds the program):
+
+```toml
+capture = { script = "drivers/la.lua", sigrok = { driver = "demo" } }
+# per bench, in desk.toml: sigrok = { conn = "1.23", backend = "vendor" }
+```
+
+| | |
+|---|---|
+| `ctx.sigrok.driver` | The binding's `driver` |
+| `ctx.sigrok.conn` | The binding's `conn`, or `nil` |
+| `ctx.sigrok.acquire{ … }` | Capture into the file of an action that produces one. Returns `{ bytes = n }` |
+
+Without a `sigrok = { … }` binding, `acquire` fails with `config_invalid`.
+
+```lua
+local r = ctx.sigrok.acquire{
+  config   = { samplerate = 10000000 },  -- sigrok config keys: the driver's business
+  channels = { "D0", "D1" },             -- or "D0,D1"; default: all channels
+  time     = 2000,                       -- ms (or "2s"); or samples = n, or frames = n
+  triggers = "D0=r",                     -- optional; wait_trigger = true waits for it
+  format   = "srzip",                    -- sigrok's output module (-O)
+  into     = ctx.output,
+  timeout  = "5s",                       -- required: the whole capture, trigger wait included
+}
+```
+
+| Key | | Becomes |
+|---|---|---|
+| `config` | Table of sigrok config keys (`[a-z0-9_]+`) to strings, numbers or booleans. Whole numbers are written without a fraction (`10000000`, never `1e7`); booleans as `true`/`false`. Strings can't contain `:`, `=`, whitespace or control characters, or start with `-` | one `--config k=v:k=v` (keys sorted) |
+| `channels` | A list of names, or one comma-separated string. Names are letters, digits, `_`, `.`, `-` (a range like `D0-D7` is passed as written) | one `--channels a,b` |
+| `time` / `samples` / `frames` | Exactly one. `time` in ms (a number, or a duration string such as `"2s"`); `samples` and `frames` whole numbers above 0 | `--time <ms>`, `--samples <n>`, `--frames <n>` |
+| `triggers` | sigrok's trigger text, e.g. `"D0=r,D1=1"`: like a config value, but `=` and `,` are allowed | `--triggers <t>` |
+| `wait_trigger` | `true` to wait for the trigger (needs `triggers`) | `--wait-trigger` |
+| `format` | sigrok output module id (`[a-z0-9_]+`), default `"srzip"` | `-O <format>` |
+| `into` | Required: `ctx.output` | `-o <desk's temporary file>` |
+| `timeout` | Required: ms or a duration string | desk stops sigrok after it |
+
+Each element is one argument, with `-d <driver>` (or `-d <driver>:conn=<conn>`) first and no
+shell. Anything else in the table, or a value that breaks a rule above, is `script_failed` before
+sigrok runs. While `acquire` runs, the call's own timeout is suspended; sigrok is stopped on its
+`timeout` (`timeout`), at the size cap (`limit_exceeded`), on Ctrl-C or when a daemon client goes
+away (`cancelled`). Then nothing of the capture is left, including files sigrok wrote next to it.
+sigrok's stdin stays open until it exits, and its warnings on stderr never fail a capture: only
+its exit code does. Failures: device busy or not found (`endpoint_unavailable`), no backend has
+the driver (`config_invalid`), no `sigrok-cli` (`provider_unreachable`), and anything else as
+`script_failed` with sigrok's own message.
+
 ## Drivers of declared capabilities
 
 Any capability other than `power` and `source` is declared: the binding (or the model)
@@ -136,6 +192,45 @@ function close(ctx) end              -- optional: end of a session (always calle
   declaration order, except that a boolean setting with `switches` that is set to off/false is
   sent first; desk calls `read()` afterwards to verify them.
 - With `channels`, every call sees `ctx.channel`.
+- Arguments with a `default` arrive filled in; `optional` ones that weren't given are `nil`.
+
+### Actions that produce a file
+
+An action declared with `produces = "file"` writes a file that desk owns. During that call, and
+only then, `ctx.output` is a handle to it. The handle is opaque: it has no methods and doesn't
+tell the script where the file is. Pass it to a host function that fills it, as `into =
+ctx.output`, and return a table that describes the file:
+
+```lua
+function action(ctx, name, args)
+  local image = read_screenshot(ctx)                 -- your own code, e.g. over ctx.serial
+  ctx.append{ into = ctx.output, data = image }      -- bytes go into the file
+  return { format = "png", width = 800, height = 480 }
+end
+```
+
+| Key | |
+|---|---|
+| `format` | Required: what the file is, e.g. `"png"`, `"srzip"` |
+| `extension` | The file name's extension, 1 to 16 lowercase letters or digits. Default: `format` |
+| anything else | Reported as the result's `meta`, untouched. Plain data only (no functions or handles) |
+
+| Host function | |
+|---|---|
+| `ctx.append{ into = ctx.output, data = s }` | Append the bytes of the string `s` to the file |
+
+| `ctx.sigrok.acquire{ …, into = ctx.output }` | Capture from the binding's sigrok device (see *sigrok devices*) |
+
+Host functions that fill the file from the device directly come with their connection kinds.
+Each takes its own `timeout`; while it runs, the call's own timeout is suspended and continues
+afterwards with the time it had left.
+
+Returning nothing, no `format`, or leaving the file empty fails the action (`script_failed`).
+desk writes the file in a private temporary folder (`.<name>.<pid>.partial/`) in the destination
+folder, moves it to its name when the action succeeded, and removes the folder with everything in
+it when the action fails, times out, goes over the size cap (`limit_exceeded`) or is cancelled.
+The size cap counts every file in that folder. The
+result reports `file` (the absolute path), `bytes`, `format` and `meta`.
 
 Everything else is desk's, the same for every driver: units, ranges and limits before anything is
 sent, the order of settings, verification (`verified`, or "not confirmed" for settings `read()`
@@ -230,5 +325,8 @@ loops written in Lua.
   outlets in order, with delays; state comes from the iron outlet
 - [`examples/scripts/double_press.lua`](../examples/scripts/double_press.lua): a send-only device
   that needs every command twice, 50 ms apart
+- [`examples/sigrok/demo.lua`](../examples/sigrok/demo.lua): a capture action on stock sigrok's
+  `demo` driver (`desk --config examples/sigrok/desk.toml do la capture duration=200ms`, needs
+  sigrok-cli)
 
 Try them without hardware: `desk --config examples/desk.toml power on station`.

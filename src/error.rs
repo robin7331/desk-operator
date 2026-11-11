@@ -81,6 +81,9 @@ pub enum DeskError {
     UpdateUnsupported(String),
 
     #[error("{0}")]
+    Cancelled(String),
+
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -106,6 +109,7 @@ impl DeskError {
             DeskError::DaemonUnavailable(_) => "daemon_unavailable",
             DeskError::UpdateFailed(_) => "update_failed",
             DeskError::UpdateUnsupported(_) => "update_unsupported",
+            DeskError::Cancelled(_) => "cancelled",
             DeskError::Internal(_) => "internal",
         }
     }
@@ -132,6 +136,7 @@ impl DeskError {
             DeskError::Timeout { .. } => 6,
             DeskError::VerifyFailed { .. } => 7,
             DeskError::LimitExceeded { .. } => 8,
+            DeskError::Cancelled(_) => 130,
         }
     }
 
@@ -155,6 +160,16 @@ impl DeskError {
             }
             DeskError::UpdateUnsupported(_) => Some(
                 "update your clone and run `cargo install --path .` again, or `desk update --force` to replace it with the release build",
+            ),
+            DeskError::ProviderUnreachable { message, .. }
+                if message.starts_with(crate::sigrok::PROGRAM_MISSING) =>
+            {
+                Some(
+                    "install sigrok (sigrok-cli) from your package manager or https://sigrok.org, or set `program` in [providers.<id>] kind = \"sigrok\" (docs/sigrok.md)",
+                )
+            }
+            DeskError::LimitExceeded { kind, .. } if kind == crate::capture::SIZE_CAP => Some(
+                "nothing was kept; allow more with --max-size or `[captures] max_size` in desk.toml",
             ),
             DeskError::LimitExceeded { below: true, .. } => Some(
                 "use a higher value (a bench `limit` can be changed in the device's config; a device minimum can't)",
@@ -247,6 +262,11 @@ pub const ERROR_CODES: &[(&str, i32, &str)] = &[
     ("script_failed", 5, "a Lua power script raised an error"),
     ("timeout", 6, "the operation exceeded its timeout"),
     (
+        "cancelled",
+        130,
+        "stopped by Ctrl-C or a closed daemon connection; a capture in progress was discarded",
+    ),
+    (
         "verify_failed",
         7,
         "a command was sent but the device did not reach the target state",
@@ -334,6 +354,7 @@ mod tests {
             DeskError::DaemonUnavailable(String::new()),
             DeskError::UpdateFailed(String::new()),
             DeskError::UpdateUnsupported(String::new()),
+            DeskError::Cancelled(String::new()),
         ];
         assert_eq!(all.len(), ERROR_CODES.len());
         for e in &all {

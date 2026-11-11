@@ -59,6 +59,10 @@ two readings.
   (`--idle`, or `DESK_DAEMON_IDLE`). You don't need to start it.
 - **While it runs**, `desk power`, `get`, `set` and `do` go through it, so `desk set psu voltage
   4.2v` works during a watch. When it doesn't run, those commands work exactly as without it.
+- **One command per device at a time.** Commands for the same device wait for each other, so a
+  second `desk do la capture …` waits until the first capture is done instead of meeting a busy
+  device. That holds for serial ports and sigrok devices alike. Without the daemon, a second
+  process gets `endpoint_unavailable` (port busy, or sigrok's "Unable to claim USB interface").
 - **A mains cut through desk** (`desk power off psu`) ends the watch with `device_off` after
   closing the session cleanly.
 - **Devices that lock their front panel while connected** (the FNIRSI IPS3608) stay locked while
@@ -88,6 +92,11 @@ The protocol is JSON lines. A request carries the same arguments as the command 
 The reply is the `--json` envelope plus `human` (the text desk would print) and `exit` (its exit
 code). A connection can send several requests, one after the other. Only `power`, `get`, `set`,
 `do` and `watch` run through the daemon; anything else gets a `usage` error.
+
+Keep the connection open until the reply has arrived. Closing it (or only your sending side)
+cancels a capture (an action that produces a file) that runs for you: it is stopped and its
+partial file removed. Other commands run to their end. `--output` in a request must be an absolute
+path.
 
 A `["watch", …]` request turns the connection into a stream: one envelope per reading
 as above, and the connection closes when the stream ends. Closing the connection stops watching.

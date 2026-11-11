@@ -1,6 +1,6 @@
 [package]
 name = "desk-operator"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 description = "A unified interface for the equipment on an electronics bench"
 rust-version = "1.89"
@@ -9,6 +9,11 @@ license = "MIT OR Apache-2.0"
 [[bin]]
 name = "desk"
 path = "src/main.rs"
+
+# A fake `sigrok-cli` for the tests (`tests/support/sigrok.rs`); `cargo test` builds it.
+[[example]]
+name = "fake-sigrok-cli"
+path = "tests/support/fake_sigrok_cli.rs"
 
 [dependencies]
 async-trait = "0.1.92"

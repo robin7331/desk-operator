@@ -73,16 +73,17 @@ the first failure only.
 |---|---|
 | `device_not_found`, `device_ambiguous` | Check `desk schema`; ask the user which device they meant |
 | `no_power_path` | The device has no power binding; tell the user |
-| `provider_unreachable` | Report it (Home Assistant offline, bad token). Retry at most once |
-| `endpoint_unavailable` | That outlet or entity is offline or unknown; report it |
+| `provider_unreachable` | Report it (Home Assistant offline, bad token, `sigrok-cli` not installed: the hint says how to get it). Retry at most once |
+| `endpoint_unavailable` | That outlet or entity is offline or unknown, or a sigrok device is not found or busy (another program holds it); report it |
 | `state_unknown` | Toggle isn't possible here; ask whether they want `on` or `off` |
 | `verify_failed` | The command was sent but not confirmed. Report it; don't repeat it blindly |
 | `timeout` | Report it with the message; the device may be in an intermediate state, so check `power status` |
 | `script_failed` | Show the message and any `log` lines from the result |
-| `config_invalid` | Show the message. Don't edit the config unless the user asks |
+| `config_invalid` | Show the message (for a sigrok device it may say no sigrok build has the driver, and where to get one). Don't edit the config unless the user asks |
 | `capability_missing` | That device can't do this (e.g. no `source`, nothing to watch); say so |
 | `device_off` | Its mains power is off. Ask before switching it on with `desk power on` |
-| `limit_exceeded` | Refused, nothing was sent. Tell the user the limit; never work around it or edit `limits` unasked |
+| `limit_exceeded` | Refused, nothing was sent. Tell the user the limit; never work around it or edit `limits` unasked. For a capture over its size cap, nothing was kept: say so, and raise `--max-size` only if the user asks |
+| `cancelled` | Ctrl-C or a closed connection stopped it; a capture in progress was discarded. Report it; don't retry unasked |
 | `protection_tripped` | A protection (OVP, OCP, …) switched the output off; nothing was sent. Tell the user which one. Use `--clear-protection` only after they found the cause and asked you to switch on again |
 | `daemon_unavailable` | The background daemon behind `watch` failed or stopped. Show the message (it names the daemon's log); don't start `desk serve` yourself unless asked |
 | `update_failed` | `desk update` didn't work; the message says whether desk changed. Report it |
@@ -128,6 +129,29 @@ always pass `--count N` (or a timeout) so it ends. `--changes` prints only when 
 last line is `ok: false` if the watch ended with an error, e.g. `device_off` after a mains cut. A
 background daemon holds the device meanwhile, so other `desk` commands keep working. Watching only
 reads; it never switches anything.
+
+## Captures (actions that produce a file)
+
+An action with `"produces": "file"` in the schema (a logic analyzer's capture, say) writes a file.
+Its arguments may have a `default` (used when left out) or be `optional`; the others are required.
+
+```sh
+desk do la capture duration=2s --json                     # into the device's capture folder
+desk do la capture duration=2s --output run1.sr --json    # this file (its folder must exist)
+desk do la capture duration=2s --max-size 200MB --json    # stop and discard it above this size
+```
+
+Read `data.file` (absolute path), `data.bytes`, `data.format` and `data.meta` (what the driver
+reports about it), and give the user the path. desk never overwrites a file: an existing
+`--output` is a `usage` error before anything runs. A capture that fails, times out, goes over
+its size cap (default 1 GiB, `[captures] max_size`) or is cancelled leaves no file behind.
+`--dry-run` says where the file would go (`data.into`) and creates nothing.
+
+Devices that sigrok drives (logic analyzers and others) capture through `sigrok-cli`, which the
+user installs separately. `desk sigrok drivers` and `desk provider test sigrok` show whether it is
+there. A second capture on the same device waits while the daemon runs, and otherwise fails as
+busy (`endpoint_unavailable`): don't retry it in a loop. A sigrok capture failing with
+`script_failed` carries sigrok's own message; show it.
 
 ## Safety
 

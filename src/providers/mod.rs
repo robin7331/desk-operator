@@ -3,6 +3,7 @@
 
 mod home_assistant;
 mod mock;
+mod sigrok;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ use crate::power::PowerSwitch;
 use crate::source::VoltageSource;
 
 /// Provider kinds this build knows, as used in `kind = "..."`.
-pub const KINDS: &[&str] = &[home_assistant::KIND, mock::KIND];
+pub const KINDS: &[&str] = &[home_assistant::KIND, mock::KIND, crate::sigrok::KIND];
 
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -91,6 +92,9 @@ fn build(id: &str, cfg: &ProviderConfig, ctx: &BuildContext) -> Result<Arc<dyn P
             id, &settings, ctx,
         )?)),
         mock::KIND => Ok(Arc::new(mock::MockProvider::new(id, &settings)?)),
+        crate::sigrok::KIND => Ok(Arc::new(sigrok::SigrokProvider(
+            crate::sigrok::Backend::configured(id, cfg, ctx.base_dir)?,
+        ))),
         other => Err(DeskError::ConfigInvalid(format!(
             "provider `{id}`: unknown kind `{other}`"
         ))),
@@ -117,6 +121,25 @@ impl Registry {
         self.configs.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// The configured providers (for sigrok backend resolution).
+    pub fn configs(&self) -> &IndexMap<String, ProviderConfig> {
+        &self.configs
+    }
+
+    /// The folder relative paths in provider settings resolve against.
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
+    /// The kind of a provider id: configured, or the implicit sigrok backend.
+    pub fn kind(&self, id: &str) -> Option<&str> {
+        match self.configs.get(id) {
+            Some(c) => Some(&c.kind),
+            None if id == crate::sigrok::IMPLICIT => Some(crate::sigrok::KIND),
+            None => None,
+        }
+    }
+
     pub fn get(&self, id: &str) -> Result<Arc<dyn Provider>> {
         let mut built = self
             .built
@@ -125,9 +148,18 @@ impl Registry {
         if let Some(p) = built.get(id) {
             return Ok(p.clone());
         }
-        let cfg = self.configs.get(id).ok_or_else(|| {
-            DeskError::ConfigInvalid(format!("provider `{id}` is not defined under [providers]"))
-        })?;
+        let Some(cfg) = self.configs.get(id) else {
+            // Exists without configuration: `sigrok-cli` on PATH.
+            if id == crate::sigrok::IMPLICIT {
+                let p: Arc<dyn Provider> =
+                    Arc::new(sigrok::SigrokProvider(crate::sigrok::Backend::implicit()));
+                built.insert(id.to_string(), p.clone());
+                return Ok(p);
+            }
+            return Err(DeskError::ConfigInvalid(format!(
+                "provider `{id}` is not defined under [providers]"
+            )));
+        };
         let ctx = BuildContext {
             base_dir: &self.base_dir,
         };

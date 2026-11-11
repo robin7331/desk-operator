@@ -62,6 +62,35 @@ Rules:
 - **No workarounds for missing desk features.** If a device needs something desk can't do (a new
   connection type, a host API function), that's a change to desk itself, not a driver hack.
 
+### Devices that sigrok drives
+
+A model can reach its device through sigrok instead of a serial port: `sigrok = { driver = "…" }`
+on its binding, plus `build = "https://…"` when stock sigrok lacks the driver and a vendor build
+has it. The driver script captures with `ctx.sigrok.acquire{ … }` (see
+[`docs/scripting.md`](../docs/scripting.md) and [`docs/sigrok.md`](../docs/sigrok.md)). Users add
+`conn` and `backend` in their own config. `desk sigrok drivers`, `desk sigrok show <driver>` and
+`desk provider endpoints sigrok` help with finding the driver id, its config keys and the device.
+
+Its test uses a fake `sigrok-cli` (`tests/support/fake_sigrok_cli.rs`, built by `cargo test`),
+so neither CI nor contributors need sigrok or the device. `tests/support/sigrok.rs` sets up a
+bench whose backend `fake` is the fake program, and the test asserts the exact command line desk
+built:
+
+```rust
+#[path = "support/sigrok.rs"]
+mod sigrok;
+
+let b = sigrok::SigrokBench::new(
+    "[devices.la]\nmodel = \"acme/la-8\"\ncapture = { sigrok = { backend = \"fake\" } }\n",
+);
+b.fake.drivers("acme-la ACME LA").devices("acme-la - ACME LA with 8 channels: D0 D1 D2 D3 D4 D5 D6 D7");
+let out = b.run(&["--json", "do", "la", "capture", "duration=10ms"]);
+assert_eq!(b.fake.captures()[0][..4], ["-d", "acme-la", "--config", "samplerate=1000000"]);
+```
+
+The fake's scenario (its drivers, devices, and behaviour such as a busy or missing device, a slow
+capture or a failure with a given message) is described at the top of `fake_sigrok_cli.rs`.
+
 ## Contributing a model
 
 An agent can walk you through all of it: `desk skill install` installs the `desk-add-device` skill
@@ -77,7 +106,8 @@ repository:
 3. Reuse a family driver if one fits (`--driver ../shared/x.lua`); otherwise implement the skeleton.
 4. Fill in ratings, declarations, params and sources; `desk model check models/<vendor>/<model>/model.toml`;
    add a fake-device test in `tests/model_<vendor>_<family>.rs` (`#[path = "support/models.rs"] mod harness;`
-   gives it this checkout's `desk`).
+   gives it this checkout's `desk`; for a sigrok device, `support/sigrok.rs` and its fake
+   `sigrok-cli`).
 5. Smoke-test on real hardware with nothing connected to the outputs, at low values, using
    `DESK_MODELS=$PWD/models`. Record what you observed (boot time, ramps, quirks) in the vendor
    `README.md`, and set `status`/`tested`.

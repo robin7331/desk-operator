@@ -16,6 +16,7 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::Serialize;
 
+use crate::capture::{self, Sink};
 use crate::config::{Device, SOURCE};
 use crate::declared::{self, Action, Decl, Declarations, Driver, Readings, Type, Val};
 use crate::error::{DeskError, Result};
@@ -250,6 +251,8 @@ pub fn source_decls(ratings: SourceInfo, channels: Option<Vec<String>>) -> Decla
         choices: Vec::new(),
         doc: Some(doc.into()),
         switches,
+        default: None,
+        optional: false,
     };
     let value = |unit: &str, doc: &str| num(unit, None, doc, false);
     let choice = |choices: &[&str], doc: &str| Decl {
@@ -262,6 +265,8 @@ pub fn source_decls(ratings: SourceInfo, channels: Option<Vec<String>>) -> Decla
         choices: choices.iter().map(|c| c.to_string()).collect(),
         doc: Some(doc.into()),
         switches: false,
+        default: None,
+        optional: false,
     };
     let mut settings = IndexMap::new();
     settings.insert(
@@ -403,6 +408,8 @@ pub enum Op {
         action: String,
         args: IndexMap<String, Val>,
         dry_run: bool,
+        /// An action that produces a file: where it goes and its bounds.
+        capture: Option<capture::Plan>,
     },
 }
 
@@ -535,23 +542,44 @@ pub fn plan_set(
     })
 }
 
-/// `desk do <device[:channel]> <action> [arg=value…]`.
+/// `desk do <device[:channel]> <action> [arg=value…]`. `capture` is required for an action that
+/// produces a file, and refused for any other.
 pub fn plan_do(
     cat: &Catalog,
     channel: Option<&str>,
     query: &str,
     raw_args: &[String],
     dry_run: bool,
+    capture: Option<capture::Plan>,
 ) -> Result<Op> {
     let (i, name, action) = cat.action(query)?;
     cat.check_channel(i, channel, true)?;
     let args = parse_args(&name, action, raw_args)?;
+    match (&capture, action.produces_file()) {
+        (Some(plan), true) => {
+            if let Some(out) = &plan.output {
+                capture::check_output(out)?;
+            }
+        }
+        (None, false) => {}
+        (None, true) => {
+            return Err(DeskError::Internal(format!(
+                "`{name}` produces a file but no capture was planned"
+            )));
+        }
+        (Some(_), false) => {
+            return Err(DeskError::Usage(format!(
+                "`{name}` doesn't produce a file, so --output and --max-size don't apply"
+            )));
+        }
+    }
     Ok(Op::Do {
         channel: channel.map(str::to_string),
         entry: i,
         action: name,
         args,
         dry_run,
+        capture,
     })
 }
 
@@ -586,8 +614,9 @@ fn parse_args(action: &str, decl: &Action, raw: &[String]) -> Result<IndexMap<St
     }
     let missing: Vec<&String> = decl
         .args
-        .keys()
-        .filter(|k| !given.contains_key(*k))
+        .iter()
+        .filter(|(k, d)| d.required() && !given.contains_key(*k))
+        .map(|(k, _)| k)
         .collect();
     if !missing.is_empty() {
         return Err(DeskError::Usage(format!(
@@ -599,11 +628,16 @@ fn parse_args(action: &str, decl: &Action, raw: &[String]) -> Result<IndexMap<St
                 .join(", ")
         )));
     }
-    // Declaration order.
+    // Declaration order, defaults filled in; optional ones left out stay absent.
     Ok(decl
         .args
-        .keys()
-        .filter_map(|k| given.get(k).map(|v| (k.clone(), v.clone())))
+        .iter()
+        .filter_map(|(k, d)| {
+            given
+                .get(k)
+                .or(d.default.as_ref())
+                .map(|v| (k.clone(), v.clone()))
+        })
         .collect())
 }
 
@@ -694,6 +728,9 @@ pub struct Outcome {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     pub applied: bool,
+    /// The file an action produced: `file`, `bytes`, `format`, `meta`.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<capture::Captured>,
 }
 
 fn missing(cat: &Catalog, i: usize) -> DeskError {
@@ -822,6 +859,7 @@ pub async fn run(cat: &Catalog, drivers: &Drivers, op: &Op) -> Result<Outcome> {
             action,
             args,
             dry_run,
+            capture,
         } => {
             let d = drivers
                 .get(*entry)
@@ -833,15 +871,41 @@ pub async fn run(cat: &Catalog, drivers: &Drivers, op: &Op) -> Result<Outcome> {
                 ));
             };
             let e = &cat.entries[*entry];
-            let o = declared::act(
+            // Dropped without `finish` (an error, a timeout, a cancel), the sink removes its file.
+            let sink = match capture {
+                Some(plan) if !*dry_run => Some(Sink::create(plan)?),
+                _ => None,
+            };
+            let acting = declared::act(
                 drv.as_ref(),
                 &e.decls,
                 channel.as_deref(),
                 action,
                 args,
                 *dry_run,
-            )
-            .await?;
+                sink.as_deref(),
+            );
+            let (o, produced) = match capture {
+                Some(plan) => tokio::select! {
+                    r = acting => r?,
+                    _ = plan.cancel.cancelled() => {
+                        return Err(DeskError::Cancelled(format!(
+                            "`{action}` of `{}` was cancelled; nothing was kept",
+                            cat.device
+                        )));
+                    }
+                },
+                None => acting.await?,
+            };
+            if let (Some(sink), Some(p)) = (&sink, produced) {
+                let (file, bytes) = sink.finish(&p.extension)?;
+                out.capture = Some(capture::Captured {
+                    file,
+                    bytes,
+                    format: p.format,
+                    meta: p.meta,
+                });
+            }
             out.applied = o.applied;
             out.readings.values.extend(o.values);
         }
@@ -865,6 +929,9 @@ pub struct Report {
     pub action: Option<String>,
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub args: IndexMap<String, Val>,
+    /// A dry run of an action that produces a file: where it would go (`into`, `max_size`).
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub planned: Option<capture::Planned>,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
@@ -891,6 +958,17 @@ impl Report {
                 args.clone(),
             ),
         };
+        let planned = match op {
+            Op::Do {
+                dry_run: true,
+                capture: Some(plan),
+                ..
+            } => Some(capture::Planned {
+                into: plan.destination().to_path_buf(),
+                max_size: plan.max_size,
+            }),
+            _ => None,
+        };
         Report {
             device: cat.device.clone(),
             channel,
@@ -898,6 +976,7 @@ impl Report {
             requested,
             action,
             args,
+            planned,
             outcome,
         }
     }

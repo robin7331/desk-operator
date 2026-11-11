@@ -20,7 +20,10 @@ skill, validated when a fresh session added the XDM1041. Streaming is done: a da
 commands keep working (`docs/streaming.md`). **M7, open capabilities, done** (`plan.md`,
 "M7"): models declare values, settings and actions; one command set for every device
 (`desk get|set|do|watch`; `desk source` is gone); channels. **Public since 2026-11-09**, releases
-`v0.1.0` to `v0.3.1`: CI, release builds, one-line installers and `desk update`. Still open:
+`v0.1.0` to `v0.3.1`: CI, release builds, one-line installers and `desk update`. **M8, captures
+and sigrok, done** (`plan.md`, "M8"): actions that produce a file (`produces = "file"`, a sink the
+core owns), and sigrok as a connection kind (`sigrok-cli` run as a separate program,
+`docs/sigrok.md`). Still open:
 validating the `desk-setup` skill on a real bench, and real installs and serial devices on macOS
 and Windows (roadmap in `plan.md`).
 Keep it lean: build only what the current milestone needs.
@@ -50,11 +53,11 @@ Keep it lean: build only what the current milestone needs.
 | **Value / setting / action** | What a capability declares: a **value** is reported (`temperature`), a **setting** is reported and changeable (`setpoint`), an **action** is done on request (`standby`). Typed (`number` with a unit, `boolean`, `choice`, `string`), with ranges; `switches` marks a physical effect. |
 | **Power path** | How a device gets **mains** power. This is not the same as a PSU's **output** (its terminals), which is the `output` setting of `source`. Never mix "power" and "output". |
 | **Capability binding** | One config key per capability: `power`, `source`, or the declared capability's name. Each is a native provider binding or a Lua script. |
-| **Connection** | What a binding may open to reach its device: a serial `port` today; other kinds (LAN, USBTMC, …) when a device needs one. A driver's connection is part of its capability binding. |
-| **Provider** | A configured connection to something that can switch or control many things, such as Home Assistant, a Shelly, a USB relay board, or an RF dongle. You configure it once. |
+| **Connection** | What a binding may open to reach its device: a serial `port` or a `sigrok` driver (run through `sigrok-cli`); other kinds (LAN, USBTMC, …) when a device needs one. A driver's connection is part of its capability binding. |
+| **Provider** | A configured connection to something that can switch or control many things, such as Home Assistant, a Shelly, a USB relay board, an RF dongle, or a sigrok backend (a `sigrok-cli` program; stock `sigrok-cli` on PATH is the implicit `sigrok`). You configure it once. |
 | **Endpoint** | One thing a provider can list and control, such as an HA entity `switch.desk_outlet_1`. Providers can list their endpoints, which is what makes pickers possible. |
 | **Binding** | A device's power path. It is either **native** (`{ provider = "ha", entity = "…" }`) or **script** (`{ script = "x.lua" }`). |
-| **Host API** | The Rust functions exposed to Lua scripts (providers, `sleep`, `log`, `clock`, serial ports). This is the real plugin contract, so keep it small and stable. |
+| **Host API** | The Rust functions exposed to Lua scripts (providers, `sleep`, `log`, `clock`, serial ports, sigrok captures). This is the real plugin contract, so keep it small and stable. |
 
 ### Power bindings
 
@@ -126,15 +129,23 @@ src/
   source.rs            VoltageSource trait + PSU semantics (limits, setpoints before output, protections)
   declared.rs          declarations (values/settings/actions), typed values, generic rules, Driver trait
   units.rs             the unit table: parsing `330c`, `250mA`, `1.5kΩ`; formatting
+  capture.rs           actions that produce a file: the sink (private temp folder, size cap,
+                       rename, never overwrite), capture folder, `--output`/`--max-size`, cancel
+  deadline.rs          timeouts that a host function filling a capture can suspend
   ops.rs               a device's catalog of names, get/set/do ops (resolved + checked), running them
   bench.rs             Config + provider Registry; resolves bindings, applies timeouts
   serial.rs            PortSpec matching, `desk port list`, async Port handle (exclusive opens);
                        `desk port probe` (raw hex in/out) lives in cli/port.rs
+  sigrok.rs            sigrok as a connection kind: the `sigrok = { … }` binding, backends (the
+                       implicit `sigrok-cli` on PATH, `kind = "sigrok"` providers), resolution,
+                       running sigrok-cli (`acquire`'s checked command line); `desk sigrok
+                       drivers|show` lives in cli/sigrok.rs, the provider in providers/sigrok.rs
   models.rs           models: search path, `model.toml` parsing, merge, bundled files
-  providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs
+  providers/           Provider trait, lazy Registry, Params helper; mock.rs, home_assistant.rs,
+                       sigrok.rs
   script/              mlua engine, sandbox, host API (`ctx`), timeout hook
   daemon/              `desk serve`: local socket (ipc.rs), JSON-lines protocol, CLI forwarding,
-                       `watch` streams; session.rs = live device sessions + per-device port lock
+                       `watch` streams; session.rs = live device sessions + per-device lock
   cli/ops.rs           `desk get`, `desk set`, `desk do` (rendering included); left-out arguments
                        list what's possible and end as a usage error
   cli/complete.rs      `desk completions <shell>` and the candidates behind Tab (config and
@@ -142,8 +153,10 @@ src/
   cli/update.rs        `desk update`: download, verify, swap the binary, refresh global skills
                        (only release builds, marked by `DESK_RELEASE_BUILD`; else --force)
 examples/desk.toml     sample bench on the mock provider (+ examples/scripts/*.lua)
+examples/sigrok/       sample bench on stock sigrok's `demo` driver (needs sigrok-cli)
 docs/scripting.md      user-facing Lua host API reference: keep it in sync with src/script/
 docs/streaming.md      `desk watch`, the daemon and its socket protocol (for app authors)
+docs/sigrok.md         sigrok for users: getting it, vendor builds, backends, troubleshooting
 docs/model-format.md  model format (spec); schemas/ has its JSON Schema (tested
                        against every model in tests/models.rs)
 skills/<name>/         SKILL.md per agent skill (desk-operator, desk-setup, desk-add-device), embedded via
@@ -156,12 +169,20 @@ tests/scripts.rs       end-to-end tests of Lua bindings (sandbox, timeouts, erro
 tests/source.rs        end-to-end tests of voltage_source against the simulated PSU
 tests/daemon.rs        watch + daemon: streaming, commands during a watch, endings, the socket
 tests/declared.rs      declared capabilities: units, ranges, limits, verify, channels, Lua drivers
+tests/captures.rs      actions that produce a file: defaults, where files go, size cap, timeouts,
+                       cancel (Ctrl-C, daemon client gone), dry runs, Lua drivers and ctx.output
 tests/serial.rs        ctx.serial over pseudo-terminal pairs (Linux); FORK_LOCK avoids fd inheritance
+tests/sigrok.rs        sigrok against a fake sigrok-cli: backends, `desk sigrok`, bindings,
+                       resolution, ctx.sigrok.acquire (exact command lines, checks, failures,
+                       timeout, size cap, cancel, one user per device); one test uses the real
+                       `sigrok-cli -d demo` when it is installed
 tests/update.rs        `desk update` against a fake release (wiremock); swapping the binary on Unix
 tests/models.rs       model = "…", merging, search path, desk model list|show|check
 tests/model_checks.rs       every model passes the check, and the README lists it with its status
 tests/model_*.rs      one file per protocol family: a driver against a fake device on a pty (Linux)
 tests/support/models.rs  helpers for those: this checkout's desk with models/ on its search path
+tests/support/sigrok.rs  a bench with a fake sigrok-cli backend (for tests/sigrok.rs and sigrok
+                       models); tests/support/fake_sigrok_cli.rs is that fake, a Cargo example
 build.rs               bundles models/<vendor>/… into the binary (`bundled:<path>`)
 install.sh, install.ps1  one-line installers: download a release, verify it, offer the skills
 .github/workflows/     ci.yml (fmt, clippy, tests on all three OSes); release.yml (builds, runs the

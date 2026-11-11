@@ -61,6 +61,20 @@ actions  = { standby = { switches = true, doc = "heater to standby temperature" 
 [devices.scope]
 name = "Oscilloscope"
 
+# An action that produces a file (simulated: a known byte pattern of `bytes` bytes). It goes to
+# the device's capture folder, or where --output says:
+#   cargo run -- --config examples/desk.toml do scope screenshot
+#   cargo run -- --config examples/desk.toml do scope screenshot --output screen.bin
+[devices.scope.screen]
+provider = "sim"
+endpoint = "scope"
+actions  = { screenshot = { switches = false, produces = "file", doc = "save what the screen shows", args = { bytes = { type = "number", min = 1, max = 1000000, default = 4096 } } } }
+
+# Where files from actions go (default: <state dir>/captures/<device>/), and how big they may get.
+# [captures]
+# dir      = "captures"      # relative to this file
+# max_size = "1GiB"
+
 # Script power paths (Lua): see docs/scripting.md and examples/scripts/.
 [devices.station]
 name    = "Iron + fume extractor"

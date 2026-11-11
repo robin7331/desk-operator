@@ -1,0 +1,28 @@
+# A sample bench with a logic analyzer reached through sigrok: stock sigrok's `demo` driver, so it
+# needs no hardware, only sigrok-cli on PATH (see docs/sigrok.md).
+#
+#   desk --config examples/sigrok/desk.toml do la capture duration=200ms
+#   desk --config examples/sigrok/desk.toml do la capture duration=1s samplerate=100khz format=binary
+#
+# Captures go to the state folder (`[captures] dir` or $DESK_CAPTURE_DIR change that).
+
+[devices.la]
+name    = "sigrok demo"
+aliases = ["logic"]
+
+[devices.la.capture]
+script  = "demo.lua"
+sigrok  = { driver = "demo" }   # a real unit adds its `conn`, and `backend` for a vendor build
+timeout = "5s"
+
+[devices.la.capture.actions.capture]
+switches = false
+produces = "file"
+doc      = "capture a bounded window of the demo device's logic channels"
+
+[devices.la.capture.actions.capture.args]
+duration   = { type = "number", unit = "s", min = 0.001, max = 60 }
+samplerate = { type = "number", unit = "Hz", min = 1000, max = 100e6, default = 1e6 }
+channels   = { type = "string", default = "D0,D1,D2,D3", doc = "comma-separated, e.g. D0,D1" }
+format     = { type = "choice", choices = ["srzip", "binary", "csv", "vcd"], default = "srzip" }
+trigger    = { type = "string", optional = true, doc = "sigrok triggers, e.g. D0=r" }

@@ -7,6 +7,7 @@
 //! end
 //! function set(ctx, name, value) end    -- required if there are settings (value checked + in unit)
 //! function action(ctx, name, args) end  -- required if there are actions (args checked)
+//!   -- an action with `produces = "file"` fills ctx.output and returns { format = "…", … }
 //! function open(ctx) end / function close(ctx) end   -- optional: a session (connect)
 //! ```
 //!
@@ -18,8 +19,9 @@ use indexmap::IndexMap;
 use mlua::Value;
 
 use super::{Engine, ScriptSpec};
+use crate::capture::{Output, Produced};
 use crate::declared::{self, Declarations, Driver, Val};
-use crate::error::Result;
+use crate::error::{DeskError, Result};
 
 pub struct ScriptDriver {
     engine: Engine,
@@ -89,7 +91,8 @@ impl Driver for ScriptDriver {
         channel: Option<&str>,
         name: &str,
         args: &IndexMap<String, Val>,
-    ) -> Result<()> {
+        output: Option<&Output>,
+    ) -> Result<Option<Produced>> {
         self.engine.set_channel(channel)?;
         let table: serde_json::Map<String, serde_json::Value> = args
             .iter()
@@ -100,7 +103,48 @@ impl Driver for ScriptDriver {
                 .to_lua(&serde_json::Value::String(name.into()))?,
             self.engine.to_lua(&serde_json::Value::Object(table))?,
         ];
-        self.engine.call_args("action", argv).await.map(drop)
+        self.engine.set_output(output)?;
+        let result = self.engine.call_args("action", argv).await;
+        // Only during the call: a handle the script kept can't be filled later.
+        self.engine.set_output(None)?;
+        if let Some(out) = output {
+            out.close();
+        }
+        let returned = result?;
+        let Some(out) = output else {
+            return Ok(None);
+        };
+        let file = self.engine.file_name();
+        let bad = |m: String| DeskError::ScriptFailed(format!("{file}: action(\"{name}\"): {m}"));
+        let raw: serde_json::Value = self.engine.decode(
+            "action",
+            "a table of plain data like { format = \"srzip\" } (no functions or handles)",
+            returned,
+        )?;
+        let mut meta = match raw {
+            serde_json::Value::Object(m) => m,
+            _ => {
+                return Err(bad(
+                    "an action that produces a file must return { format = \"…\", … }".into(),
+                ));
+            }
+        };
+        let text = |v: Option<serde_json::Value>, key: &str| match v {
+            None => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s)),
+            Some(_) => Err(bad(format!("`{key}` must be a string"))),
+        };
+        let format = text(meta.remove("format"), "format")?.ok_or_else(|| {
+            bad("must return the file's `format`, e.g. { format = \"srzip\" }".into())
+        })?;
+        let extension = text(meta.remove("extension"), "extension")?;
+        let produced = Produced::new(format, extension, meta).map_err(bad)?;
+        if out.size() == 0 {
+            return Err(bad(
+                "left ctx.output empty: fill it with a host function (`into = ctx.output`)".into(),
+            ));
+        }
+        Ok(Some(produced))
     }
 
     fn take_log(&self) -> Vec<String> {

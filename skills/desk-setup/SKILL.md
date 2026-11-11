@@ -30,6 +30,7 @@ next. Pass `--json` to every `desk` command. For operating the bench later, foll
 desk schema --json       # data.config.path: where desk.toml goes; data.devices: what's set up
 desk model list --json   # the products desk already knows
 desk port list --json    # USB serial ports right now
+desk sigrok drivers --json   # sigrok backends (sigrok-cli) and their drivers, if sigrok is installed
 ```
 
 `data.config.ok` is `false` until there's a valid `desk.toml`. If the file is missing, you'll create
@@ -109,6 +110,31 @@ Identify the unit with `serial_number` when the port has one. Without one, the m
 enough as long as only one such device is connected. With several, use `path` (on Linux, the stable
 one under `/dev/serial/by-path`).
 
+**A device that sigrok drives** (the model's binding has `sigrok = { driver = … }` in `desk model
+show`) needs `sigrok-cli`, which the user installs themselves (package manager or
+https://sigrok.org; desk never downloads it). Find the unit with
+`desk provider endpoints sigrok --json`: each endpoint has `params` with `driver` and maybe `conn`.
+Write only what identifies this unit, and which build runs it:
+
+```toml
+[devices.la]
+model   = "vendor/model"
+capture = { sigrok = { conn = "1.23" } }     # `conn` from `desk provider endpoints`, if needed
+
+[providers.vendor]                           # only for a vendor's own sigrok build
+kind    = "sigrok"
+program = "/path/the/user/gave/sigrok-cli"   # a wrapper script must `exec` the program
+```
+
+A wrapper script as `program` must start sigrok with `exec`: desk stops only the process it
+started, so a wrapper that keeps a child running can leave the device held after a timeout.
+
+With a vendor build, add `backend = "vendor"` to the device's `sigrok` table if stock sigrok has the
+same driver. If no backend has the model's driver, desk says so (`config_invalid`) and names the
+model's `build` link: tell the user where the build comes from and let them install it. On Linux,
+a device that isn't found may need sigrok's or the vendor's udev rules. `desk provider test
+<backend> --json` checks a backend; see `docs/sigrok.md` in the project.
+
 **c. Ask for limits.** Whatever can output power or heat gets the user's own limits, which desk then
 enforces on every command. `desk device show <device> --json` lists each setting's range. A device
 that only measures doesn't need any, and the model's maximums always apply anyway.
@@ -143,7 +169,8 @@ next to `desk.toml`. Note any model that changed in the plan, for step 6.
 again with this device done.
 
 **When a check fails,** report the message, and don't work around it. `device_off`: it has no mains.
-`endpoint_unavailable`: often the wrong port, the port is in use, or missing permissions on Linux.
+`endpoint_unavailable`: often the wrong port, the port is in use, or missing permissions on Linux
+(for a sigrok device: not found, the wrong `conn`, or busy in another program).
 If a device can't be fixed now, leave its block out or comment it out, mark it in the plan, and go on.
 
 ## 5. Devices desk doesn't know yet

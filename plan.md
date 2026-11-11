@@ -841,6 +841,164 @@ the `check` hook, events, captures.
 - ~~DC load: exact model and how it connects.~~ Answered: the OWON OEL1515
   (`models/owon/oel1515`, SCPI over a USB serial adapter).
 
+## M8 — Captures and sigrok (designed 2026-11-11; issues #4, #5)
+
+**Goal:** `desk do la capture duration=2s samplerate=10MHz` produces a file, through a mechanism
+that is not about logic analyzers: **a source fills a sink that the core owns.** In M8 the sink is
+a file; in M9 (issue #6) the same sink is the daemon's subscribers. sigrok is the first source and
+a new connection kind next to `port`.
+
+**Done when** a fresh session can add a sigrok device as a model with `desk-add-device` and no
+change to `src/`. The Sipeed SLogic32U3 is that test and is *not* part of M8 (its own issue).
+
+### Part A — actions that produce a file (no sigrok in here)
+
+Model format:
+
+```toml
+[capture.actions.capture]
+switches = false
+produces = "file"
+doc      = "capture a bounded window"
+
+[capture.actions.capture.args]
+duration   = { type = "number", unit = "s", min = 0.000001, max = 600 }   # required, as today
+samplerate = { type = "number", unit = "Hz", default = 10e6 }             # may be left out
+trigger    = { type = "string", optional = true }                         # may be absent (nil)
+```
+
+- **Arguments:** `default` (must pass the argument's own type and range checks) and
+  `optional = true`, not both. Everything else stays required. `desk do <dev> <action>` with no
+  arguments still lists them while a required one is missing, and now shows defaults.
+- **`produces = "file"`:** the driver's `action(ctx, name, args)` gets `ctx.output`, an opaque
+  handle to the sink. It can't read it, write to it or learn its path; it can only pass it to a
+  host function that fills it (`into = ctx.output`). The driver returns a table: `format`
+  (required, e.g. `"srzip"`), `extension` (optional, default = `format`), and anything else is
+  metadata. An action that produces a file and leaves the sink empty fails.
+- **Result:** next to what `do` reports today: `file` (absolute path), `bytes`, `format`, `meta`
+  (the driver's other keys, untouched). The core never knows what a sample rate is.
+- **Where:** `<state dir>/captures/<device>/<UTC time>.<ext>`; `[captures] dir = "…"` in
+  `desk.toml` and `$DESK_CAPTURE_DIR` (tests) override the folder; `desk do … --output <path>`
+  names the file (made absolute by the CLI before it goes to the daemon). Written under a
+  temporary name in the same folder and renamed when complete. Never overwrite: an existing
+  `--output` is an error before anything runs.
+- **Bounds, the same for every source:** a size cap (`[captures] max_size = "1GiB"` default,
+  `--max-size` per call) enforced while the file grows, and a timeout. Over the cap: the source
+  is stopped, nothing is left behind, `limit_exceeded`. No free-disk check yet (needs a new
+  dependency; noted below).
+- **Timeouts:** a host function that fills the sink takes its own required `timeout` from the
+  driver (which knows the duration and the trigger wait). The script's per-call deadline is
+  suspended while it runs and continues afterwards.
+- **Cancel:** Ctrl-C, a closed daemon connection, a timeout or an error stops the source,
+  removes the partial file and frees the device.
+- **Dry run:** checks arguments, reports what would run, creates nothing.
+- **Mock:** a mock declared device can have a file-producing action (a known byte pattern of a
+  requested size, with the usual `fail_` and a slow variant), so every rule above is tested
+  without sigrok.
+
+- [x] A1 Arguments: `default`, `optional` (format, schema, `model check`, listing, docs)
+- [x] A2 `produces = "file"`, `ctx.output`, driver result → `file`/`bytes`/`format`/`meta`
+- [x] A3 Capture folder, `[captures]`, `--output`, `--max-size`, temp name + rename, never overwrite
+- [x] A4 Size cap, suspended script deadline, cancel and cleanup (direct and through the daemon)
+- [x] A5 Mock source + tests (`tests/captures.rs`); `docs/scripting.md`, `docs/model-format.md`,
+      schema, `desk schema`
+
+### Part B — sigrok as a connection kind
+
+desk runs `sigrok-cli` as a separate program and never links libsigrok (GPLv3+; desk is
+MIT OR Apache-2.0). Nothing is bundled or downloaded in M8.
+
+**Backends** are providers:
+
+```toml
+# No configuration: `sigrok-cli` on PATH is the backend `sigrok`.
+[providers.sipeed]                 # a vendor build next to it
+kind    = "sigrok"
+program = "/path/to/vendor-sigrok-cli"
+```
+
+- `desk provider test <id>`: the program runs; its version; how many drivers it has.
+- `desk provider endpoints <id>`: what `--scan` finds, as `{ driver, conn }` ready to paste.
+  (A plain scan finds USB devices; serial ones need their `conn`.)
+- `desk sigrok drivers [--backend <id>]`: each backend with its driver list.
+- `desk sigrok show <driver> [--conn …] [--backend <id>]`: sigrok's own `--show` text,
+  **unparsed**. For people and agents writing a model, like `desk port probe`.
+
+**Bindings** (any script binding of any capability, like `port`):
+
+```toml
+# model.toml: true for every unit
+[capture]
+script = "driver.lua"
+sigrok = { driver = "vendor-driver-name", build = "https://…/releases" }
+
+# desk.toml: this unit
+capture = { sigrok = { conn = "1.23", backend = "sipeed" } }     # both optional
+```
+
+- `driver` is sigrok's driver name. `build` (optional, models) says where a sigrok build with
+  this driver comes from when stock sigrok has none; it only appears in hints. `conn` and
+  `backend` are per bench: `desk model check` rejects them in a model.
+- **Which backend:** the device's `backend`; otherwise the only sigrok backend there is;
+  otherwise the first that lists the driver, `sigrok` (stock) first, then config order. Driver
+  lists are remembered for the life of the process. None has it: an error that names the driver
+  and the model's `build`.
+
+**Host API** (`ctx.sigrok`, only with a `sigrok` binding, only that device):
+
+```lua
+local r = ctx.sigrok.acquire{
+  config   = { samplerate = 10000000 },      -- sigrok config keys, the driver's business
+  channels = { "D0", "D1" },                 -- or "D0,D1"
+  time     = 2000,                           -- ms; or samples = n, or frames = n (one is required)
+  triggers = "D0=r",                         -- optional; wait_trigger = true
+  format   = "srzip",                        -- sigrok's -O id
+  into     = ctx.output,
+  timeout  = "5s",                           -- required
+}                                            -- r.bytes
+```
+
+- The core builds the command line, one argument per element, no shell. Keys and values are
+  checked (no `:`, `=`, control characters or leading `-` where they'd change the meaning). A
+  script can never pass raw arguments, name a path or start another program.
+- The child gets a stdin that stays open (`--continuous` and some builds stop on end of file),
+  is killed on timeout, cancel and drop, and its stderr (bounded) becomes the error message.
+  Stock sigrok prints decoder warnings on stderr even on success: stderr never decides success.
+- `ctx.sigrok.driver`, `ctx.sigrok.conn`: what the binding says.
+- Not yet: `get`/`set`/readings through sigrok (multimeters and supplies sigrok drives). The
+  binding works on any capability so those can follow without a redesign.
+
+**Errors:** program not found (`provider_unreachable`, hint: install sigrok or set `program`);
+no backend has the driver (hint names driver and `build`); device not found and device busy
+("Unable to claim USB interface") as `endpoint_unavailable`; anything else with sigrok's text.
+**One user at a time:** the daemon's per-device lock covers sigrok bindings as it does ports.
+
+**Testing:** a fake `sigrok-cli` built with the tests (a Cargo example at
+`tests/support/fake_sigrok_cli.rs`): scenario and a log of every call in a folder named by an
+env var, so tests assert the exact command line and simulate busy, missing, slow and failing
+devices. `tests/support/` offers it to model tests too. CI needs no sigrok. A test against the
+real `sigrok-cli -d demo` runs only where sigrok is installed.
+
+- [x] B1 `kind = "sigrok"` provider (desk.toml uses `kind`, like every provider), implicit `sigrok` backend, `test`, `endpoints`
+- [x] B2 `desk sigrok drivers|show`
+- [x] B3 `sigrok = { … }` in models and devices (merge, check, schema), backend resolution
+- [x] B4 `ctx.sigrok.acquire` into `ctx.output`; errors; lock; cleanup
+- [x] B5 Fake `sigrok-cli`, `tests/sigrok.rs`, the optional `demo` test, an example bench
+      (`examples/sigrok/`) on the `demo` driver
+- [x] B6 `docs/sigrok.md` (getting sigrok, vendor builds, udev, AppImage/FUSE, Windows WinUSB),
+      `docs/scripting.md`, `docs/model-format.md`, `models/README.md`, skills (`desk-operator`,
+      `desk-setup`, `desk-add-device`), `AGENTS.md`, README
+
+### Not in M8
+
+- The SLogic32U3 model (a fresh session with `desk-add-device`; then a hardware smoke test).
+- **M9, binary streams (#6):** `streams` in models, `desk stream`, fan-out in the daemon. The
+  sink of Part A gets a second kind; well-known content names (`logic`, `frames`) with any other
+  name declared, payload opaque to the core.
+- Downloading or bundling sigrok builds (`build` leaves room for URL + SHA-256 per platform).
+- Protocol decoders, a viewer, a `list` argument type, retention of old captures, a free-disk
+  check, keeping a cancelled capture's partial file, moving bytes from a serial port into a sink.
+
 ## After M6 (rough order, re-evaluate each time)
 
 1. **Config editing from the CLI:** `device add`, `device power <dev>` with interactive provider/entity pickers (`toml_edit`, `inquire`)

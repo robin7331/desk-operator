@@ -90,6 +90,11 @@ power = { provider = "ha", entity = "switch.desk_outlet_1" }   # optional: how i
 `desk device show <device>` lists what a device can do, and leaving out arguments
 (`desk set <device>`) lists the options. `desk completions <shell>` adds Tab completion.
 
+Logic analyzers and other devices that [sigrok](https://sigrok.org) drives work through
+`sigrok-cli`, installed separately: `desk do la capture duration=2s` writes a capture file. See
+[`docs/sigrok.md`](docs/sigrok.md), and try it with sigrok's demo device:
+`desk --config examples/sigrok/desk.toml do la capture duration=200ms`.
+
 ## Supported devices
 
 | Device | Type | Status |

@@ -71,13 +71,24 @@ pack the folder for the user at the end (step 11).
   (`voltage_source`: fixed names and stricter rules in desk). **Anything else** (meter, load, iron,
   sensor, relay board, …) gets a **declared capability**: the model declares its `settings`,
   `values` and `actions`, and desk applies its generic rules to them (see *Declaring what it can
-  do*). Large data (scope waveforms, logic analyzer captures) isn't supported yet: say so.
+  do*). A capture (a logic analyzer's samples, a screenshot) is an action that **produces a
+  file** (`produces = "file"`, see *Captures*). Streaming large data live isn't supported yet:
+  say so.
 - **Only switched on/off?** If the user just wants mains on/off (e.g. via a Home Assistant outlet),
   no model is needed: add a `power` binding to their device and you're done
   (`desk provider endpoints <id> --search …` finds the entity).
 - **How it connects:** USB (CDC-ACM serial, USB-serial adapter, HID, USBTMC), RS-232, LAN,
-  Bluetooth. desk drivers talk serial today (`ctx.serial`, `port = { … }`). Any other connection
-  is a gap in desk itself: see *When desk itself is missing something*.
+  Bluetooth. desk drivers reach a device in one of two ways:
+  - **serial** (`port = { … }`, `ctx.serial`): the driver speaks the protocol itself;
+  - **sigrok** (`sigrok = { driver = … }`, `ctx.sigrok`): sigrok already supports the device
+    (stock `sigrok-cli`, or a vendor's sigrok build), and desk runs `sigrok-cli` for captures.
+    Check `desk sigrok drivers --json` and sigrok's device list at https://sigrok.org. Today the
+    driver can only capture through sigrok (`acquire`); reading values or changing settings
+    through sigrok isn't there yet.
+
+  Prefer sigrok when it supports the device and the job is a capture: no protocol work. Any
+  other connection (HID, USBTMC, LAN, Bluetooth, or values and settings through sigrok) is a gap
+  in desk itself: see *When desk itself is missing something*.
 
 ### 2. Check the existing models first
 
@@ -142,7 +153,11 @@ cargo clippy --all-targets -- -D warnings && cargo fmt
 
 ### 6. Find the device
 
-Run `desk port list --json` before and after the user plugs it in or powers it on; the new entry is
+**A sigrok device:** `desk provider endpoints <backend> --json` (`sigrok` for stock sigrok-cli)
+before and after the user plugs it in; the new entry's `params` are `{ driver, conn }`. A serial
+one isn't found by a plain scan: it needs its `conn` (e.g. `/dev/ttyUSB0`).
+
+**A serial device:** run `desk port list --json` before and after the user plugs it in or powers it on; the new entry is
 the device (path, USB VID:PID, serial number). If the outlet is already a desk device, mains on is
 `desk power on <device>`, with the user's OK. **Generic USB ids** (e.g. a microcontroller vendor's
 default id such as Artery `2e3c:5740`) are shared with unrelated gadgets: then the driver must
@@ -150,6 +165,12 @@ identify the model (name query) before it sends anything else, and the user bind
 `serial_number`.
 
 ### 7. Probe read-only
+
+**A sigrok device:** `desk sigrok show <driver> [--conn …] --json` prints sigrok's own
+description: channels, channel groups, config keys (`samplerate`, …) with their ranges or choices,
+and trigger types. That is what the driver may put in `acquire{ config = … }`. It opens the
+device but changes nothing. Then a short test capture is step 9. The rest of this step is for
+serial devices.
 
 Confirm with the user that nothing is connected to the outputs, then send documented queries:
 
@@ -195,6 +216,10 @@ model  = "<vendor>/<model>"
 heater = { port = { serial_number = "…" } }                     # the capability's name
 limits = { heater = { setpoint = 200 } }                        # a number = maximum, or { min, max }
 ```
+
+A sigrok device names its unit and build the same way: `capture = { sigrok = { conn = "…",
+backend = "…" } }` (both optional; `backend` names a `[providers.<id>] kind = "sigrok"` with the
+vendor's `program`).
 
 Check with `desk device show <id> --json`.
 
@@ -256,10 +281,65 @@ this file list. Then, on the branch from *Where to work*:
 Until a desk release includes the model, their bench uses the copy next to `desk.toml`, whatever
 happens to the clone or its branch. Merging doesn't change that: only a release does.
 
+## Captures (through sigrok)
+
+The model's binding names sigrok's driver, and the action produces a file:
+
+```toml
+[capture]
+script = "driver.lua"
+sigrok = { driver = "vendor-la", build = "https://…" }   # build: only if stock sigrok lacks it
+
+[capture.actions.capture]
+switches = false
+produces = "file"
+doc      = "capture a bounded window"
+
+[capture.actions.capture.args]
+duration   = { type = "number", unit = "s", min = 0.001, max = 60 }   # range from the sources
+samplerate = { type = "number", unit = "Hz", default = 1e6 }
+format     = { type = "choice", choices = ["srzip", "binary"], default = "srzip" }
+trigger    = { type = "string", optional = true, doc = "sigrok triggers, e.g. D0=r" }
+```
+
+```lua
+PARAMS = {}
+function action(ctx, name, args)
+  local ms = math.ceil(args.duration * 1000)
+  local r = ctx.sigrok.acquire{
+    config = { samplerate = args.samplerate },   -- keys from `desk sigrok show`
+    time = ms, triggers = args.trigger, wait_trigger = args.trigger ~= nil,
+    format = args.format, into = ctx.output,
+    timeout = ms + 10000,                        -- the whole capture, trigger wait included
+  }
+  return { format = args.format, extension = args.format == "srzip" and "sr" or "bin",
+           samplerate = args.samplerate, bytes = r.bytes }
+end
+```
+
+- desk builds the command line from the table and checks every key and value; the driver can't
+  pass raw arguments, paths or programs. Full table: `docs/scripting.md`, *sigrok devices*.
+- `conn` and `backend` never go in a model (`desk model check` refuses them). `build` is the URL
+  of the vendor's sigrok releases, only when stock sigrok has no such driver; it only appears in
+  hints, desk never downloads it. Find it in the vendor's documentation; don't guess it.
+- **The fake-device test** uses the fake `sigrok-cli` (`tests/support/fake_sigrok_cli.rs`, built
+  by `cargo test`; no sigrok needed): `#[path = "support/sigrok.rs"] mod sigrok;`, then
+  `sigrok::SigrokBench::new(<config with capture = { sigrok = { backend = "fake" } }>)`, give
+  the fake its drivers and devices (`b.fake.drivers(…)`, `b.fake.devices(…)`), run
+  `desk do <dev> capture …` and assert the exact command line in `b.fake.captures()`. The fake
+  can also be busy, find no device, capture slowly or fail with a given message (see the top of
+  that file). `tests/sigrok.rs` has examples.
+- **Smoke test:** a short capture with nothing connected (`desk do <dev> capture
+  duration=100ms --json`): `data.file` opens in PulseView? `data.bytes` plausible?
+- Errors: `provider_unreachable` (no sigrok-cli), `config_invalid` naming the driver (no
+  backend has it: a vendor build is needed), `endpoint_unavailable` (not found, or busy in
+  another program), `script_failed` with sigrok's message (a config key or channel the device
+  doesn't have).
+
 ## When desk itself is missing something
 
 Some devices need more than a model: a connection desk can't open yet (HID, USBTMC, LAN,
-Bluetooth), a host API function, a kind of declaration desk doesn't have, extra settings or
+Bluetooth; values and settings through sigrok), a host API function, a kind of declaration desk doesn't have, extra settings or
 actions on `source`. **Never work around it in the driver** (no side channels in `params`, no
 abusing another capability). Instead:
 
@@ -373,7 +453,8 @@ function action(ctx, name, args) ... end      -- if there are actions (args alre
 | `error.code` | What to do |
 |---|---|
 | `config_invalid` | `desk model check` names the problem (unknown param, missing rating, bad port) |
-| `endpoint_unavailable` | Port not found or busy: `desk port list`; is it powered, is another program using it? |
+| `endpoint_unavailable` | Port or sigrok device not found or busy: `desk port list` / `desk provider endpoints sigrok`; is it powered, is another program using it? |
+| `provider_unreachable` | For sigrok: no `sigrok-cli` (install it, or set the provider's `program`) |
 | `script_failed` | The driver raised an error: read the message and `log` lines, fix the driver |
 | `timeout` | The device didn't answer in time: wrong baud or frame, still booting, or not powered |
 | `verify_failed` | Sent but not confirmed: check the status layout or echo handling with `desk port probe` |

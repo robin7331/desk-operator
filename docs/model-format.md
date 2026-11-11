@@ -97,13 +97,58 @@ boost   = { switches = true, args = { seconds = { type = "number", unit = "s", m
 | `choices` | choices | the allowed strings |
 | `doc` | all | what it means |
 | `switches` | settings, actions | a physical effect (heats, outputs, moves). Settings default to `true`; actions must say it; values can't switch |
-| `args` | actions | the action's arguments, declared like settings; every argument is required |
+| `args` | actions | the action's arguments, declared like settings; required unless they have a `default` or are `optional` |
+| `default` | arguments | the value used when the argument is left out: a number in the declared unit, `true`/`false`, a choice or a string. It must pass the argument's own type and range |
+| `optional` | arguments | `true`: may be left out, and the driver then doesn't get it. Not together with `default` |
+| `produces` | actions | `"file"`: the action writes a file (see *Actions that produce a file*) |
 
 `channels = 2` (or `channels = ["ch1", "ch2"]`) on a capability gives every value, setting and
 action once per channel: the driver gets `ctx.channel`, users address `<device>:<channel>`.
 
 Names are unique within a capability; where two capabilities of a device use the same name, users
 write `<capability>.<name>` (`heater.setpoint`).
+
+### Actions that produce a file
+
+```toml
+[capture.actions.capture]
+switches = false
+produces = "file"
+doc      = "capture a bounded window"
+
+[capture.actions.capture.args]
+duration   = { type = "number", unit = "s", min = 0.000001, max = 600 }   # required
+samplerate = { type = "number", unit = "Hz", default = 10e6 }             # may be left out
+trigger    = { type = "string", optional = true }                         # may be absent (nil)
+```
+
+The driver's `action(ctx, name, args)` gets `ctx.output`, a handle to the file desk owns. It
+passes it to a host function that fills it (`into = ctx.output`) and returns `{ format = "…" }`
+plus anything it wants to report (see [`scripting.md`](scripting.md)). desk decides where the file
+goes, caps its size and removes it when the action fails. `desk do <device>` without arguments
+lists the arguments while a required one is missing, with defaults and which are optional.
+
+`default`, `optional` and `produces` came with desk 0.4: a model that uses them needs
+`requires = "desk-operator >= 0.4"`.
+
+### Connections: `port` and `sigrok`
+
+A binding says how its driver reaches the device, and the driver can reach nothing else:
+
+| Key | What | In the model | Per bench (desk.toml) |
+|---|---|---|---|
+| `port` | a serial port (`ctx.serial`) | `usb_vid`, `usb_pid` | `serial_number`, `path` |
+| `sigrok` | a device that sigrok drives (`ctx.sigrok`, see [`sigrok.md`](sigrok.md)) | `driver` (required), `build` | `conn`, `backend` |
+
+```toml
+[capture]
+script = "driver.lua"
+sigrok = { driver = "vendor-driver-name", build = "https://…/releases" }
+```
+
+`driver` is sigrok's driver id (`desk sigrok drivers`). `build` is optional: where a sigrok build
+with this driver comes from when stock sigrok has none. It only appears in hints. `desk model
+check` rejects `conn` and `backend` in a model. `sigrok` came with desk 0.4, like `produces`.
 
 ### Units
 
@@ -176,6 +221,10 @@ model  = "acme/iron-t12"
 heater = { port = { serial_number = "…" } }
 limits = { heater = { setpoint = 380, ch2 = { setpoint = 300 } } }   # a number = maximum, or
                                                                        # { min, max }; per channel
+
+[devices.la]
+model   = "acme/la-8"
+capture = { sigrok = { conn = "1.23", backend = "acme" } }   # which unit, which sigrok build
 ```
 
 Limits are per capability and setting: a number is the maximum, `{ min = …, max = … }` both. A

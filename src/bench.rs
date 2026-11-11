@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::capture::Cancel;
 use crate::config::{Binding, Config, Device};
 use crate::daemon::session::{Sessions, Watcher};
 use crate::error::{DeskError, Result};
@@ -13,6 +14,7 @@ use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
 use crate::providers::{Endpoint, ProviderInfo, Registry};
 use crate::script::{DeviceInfo, ScriptDriver, ScriptSource, ScriptSpec, ScriptSwitch};
 use crate::serial::PortSpec;
+use crate::sigrok::SigrokSpec;
 use crate::source;
 
 pub struct Bench {
@@ -20,6 +22,8 @@ pub struct Bench {
     pub providers: Arc<Registry>,
     /// Set inside the daemon: live device sessions that commands go through.
     pub sessions: Option<Arc<Sessions>>,
+    /// Cancels a capture this bench runs (Ctrl-C, or the daemon client went away).
+    pub cancel: Cancel,
 }
 
 /// The result of an operation on one device, plus whatever it logged (scripts), which is
@@ -42,6 +46,7 @@ impl Bench {
             config,
             providers,
             sessions: None,
+            cancel: Cancel::default(),
         })
     }
 
@@ -64,6 +69,7 @@ impl Bench {
                 params,
                 timeout,
                 port,
+                sigrok,
                 ..
             } => {
                 let timeout = timeout.unwrap_or(power::DEFAULT_SCRIPT_TIMEOUT);
@@ -71,7 +77,7 @@ impl Bench {
                     device,
                     script,
                     params,
-                    port.as_ref(),
+                    (port.as_ref(), sigrok.as_deref()),
                     timeout,
                 ))?;
                 (Box::new(sw), timeout)
@@ -117,7 +123,7 @@ impl Bench {
         device: &'a Device,
         path: &'a Path,
         params: &'a toml::Table,
-        port: Option<&'a PortSpec>,
+        (port, sigrok): (Option<&'a PortSpec>, Option<&'a SigrokSpec>),
         timeout: Duration,
     ) -> ScriptSpec<'a> {
         ScriptSpec {
@@ -128,6 +134,7 @@ impl Bench {
             path,
             params,
             port,
+            sigrok,
             timeout,
             providers: self.providers.clone(),
         }
@@ -151,13 +158,14 @@ impl Bench {
                     script,
                     params,
                     port,
+                    sigrok,
                     ..
                 },
             ) => CapDriver::Source(Box::new(ScriptSource::load(self.script_spec(
                 device,
                 script,
                 params,
-                port.as_ref(),
+                (port.as_ref(), sigrok.as_deref()),
                 entry.timeout,
             ))?)),
             (
@@ -176,10 +184,17 @@ impl Bench {
                     script,
                     params,
                     port,
+                    sigrok,
                     ..
                 },
             ) => CapDriver::Declared(Box::new(ScriptDriver::load(
-                self.script_spec(device, script, params, port.as_ref(), entry.timeout),
+                self.script_spec(
+                    device,
+                    script,
+                    params,
+                    (port.as_ref(), sigrok.as_deref()),
+                    entry.timeout,
+                ),
                 &entry.decls,
             )?)),
         })
@@ -381,9 +396,19 @@ impl Bench {
         }
     }
 
+    /// The ceiling around a provider's `test` and `endpoints`. A sigrok backend runs several
+    /// queries, each under its own `timeout`.
+    fn provider_timeout(&self, id: &str) -> Duration {
+        if self.providers.kind(id) == Some(crate::sigrok::KIND) {
+            Duration::from_secs(300)
+        } else {
+            power::DEFAULT_TIMEOUT
+        }
+    }
+
     pub async fn test_provider(&self, id: &str) -> Result<ProviderInfo> {
         let provider = self.providers.get(id)?;
-        let after = power::DEFAULT_TIMEOUT;
+        let after = self.provider_timeout(id);
         tokio::time::timeout(after, provider.test())
             .await
             .map_err(|_| DeskError::Timeout {
@@ -394,7 +419,7 @@ impl Bench {
 
     pub async fn endpoints(&self, id: &str, capability: Capability) -> Result<Vec<Endpoint>> {
         let provider = self.providers.get(id)?;
-        let after = power::DEFAULT_TIMEOUT;
+        let after = self.provider_timeout(id);
         tokio::time::timeout(after, provider.endpoints(capability))
             .await
             .map_err(|_| DeskError::Timeout {
@@ -467,7 +492,8 @@ async fn session<T>(
     what: &str,
     op: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    let result = tokio::time::timeout(timeout, async {
+    // A host function that fills a capture suspends this timeout while its own one runs.
+    let result = crate::deadline::timeout(timeout, async {
         open_drivers(drivers).await?;
         op.await
     })

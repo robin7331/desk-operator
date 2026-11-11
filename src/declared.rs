@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde::Serialize;
 
+use crate::capture::{Output, Produced};
 use crate::error::{DeskError, Result};
 use crate::units;
 
@@ -53,6 +54,19 @@ pub struct Decl {
     pub doc: Option<String>,
     /// Changing it has a physical effect (heats, outputs, moves). Always false for values.
     pub switches: bool,
+    /// Action arguments: the value used when the argument is left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<Val>,
+    /// Action arguments: may be left out (the driver then doesn't get it).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+}
+
+impl Decl {
+    /// An action argument that must be given (no default, not optional).
+    pub fn required(&self) -> bool {
+        self.default.is_none() && !self.optional
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -60,9 +74,30 @@ pub struct Action {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     pub switches: bool,
-    /// Every declared argument is required.
+    /// What the action produces besides doing it: `file` (a capture).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub produces: Option<Produces>,
+    /// Required unless they have a `default` or are `optional`.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub args: IndexMap<String, Decl>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Produces {
+    /// A file the core owns (`ctx.output`).
+    File,
+}
+
+impl Action {
+    pub fn produces_file(&self) -> bool {
+        self.produces == Some(Produces::File)
+    }
+
+    /// Whether any argument must be given.
+    pub fn needs_args(&self) -> bool {
+        self.args.values().any(Decl::required)
+    }
 }
 
 /// Everything a capability declares.
@@ -200,6 +235,8 @@ const DECL_KEYS: &[&str] = &[
     "choices",
     "doc",
     "switches",
+    "default",
+    "optional",
 ];
 
 fn decl(name: &str, v: &toml::Value, role: Role) -> std::result::Result<Decl, String> {
@@ -313,6 +350,18 @@ fn decl(name: &str, v: &toml::Value, role: Role) -> std::result::Result<Decl, St
             }
         }
     }
+    if role != Role::Arg {
+        for k in ["default", "optional"] {
+            if t.contains_key(k) {
+                return Err(at(&format!("only action arguments have `{k}`")));
+            }
+        }
+    }
+    let optional = match t.get("optional") {
+        None => false,
+        Some(toml::Value::Boolean(b)) => *b,
+        Some(_) => return Err(at("`optional` must be true or false")),
+    };
     let switches = match (role, t.get("switches")) {
         (Role::Value, Some(_)) => return Err(at("values can't switch anything (no `switches`)")),
         (Role::Arg, Some(_)) => {
@@ -323,7 +372,7 @@ fn decl(name: &str, v: &toml::Value, role: Role) -> std::result::Result<Decl, St
         (Role::Setting, None) => true,
         (_, None) => false,
     };
-    Ok(Decl {
+    let mut d = Decl {
         kind,
         unit,
         units,
@@ -333,7 +382,40 @@ fn decl(name: &str, v: &toml::Value, role: Role) -> std::result::Result<Decl, St
         choices,
         doc: string("doc")?,
         switches,
-    })
+        default: None,
+        optional,
+    };
+    if let Some(v) = t.get("default") {
+        if optional {
+            return Err(at("give `default` or `optional = true`, not both"));
+        }
+        let val = default_value(&d, v).map_err(|m| at(&format!("`default`: {m}")))?;
+        check_range(name, &d, &val, None).map_err(|e| at(&format!("`default`: {e}")))?;
+        d.default = Some(val);
+    }
+    Ok(d)
+}
+
+/// An argument's `default`, written in TOML: a number in the declared unit, `true`/`false`, or a
+/// string (one of the choices).
+fn default_value(d: &Decl, v: &toml::Value) -> std::result::Result<Val, String> {
+    match (d.kind, v) {
+        (Type::Number, toml::Value::Float(f)) if f.is_finite() => Ok(Val::Number(*f)),
+        (Type::Number, toml::Value::Integer(i)) => Ok(Val::Number(*i as f64)),
+        (Type::Number, _) => Err(format!(
+            "must be a number{}",
+            d.unit
+                .as_ref()
+                .map(|u| format!(" in {u}"))
+                .unwrap_or_default()
+        )),
+        (Type::Boolean, toml::Value::Boolean(b)) => Ok(Val::Bool(*b)),
+        (Type::Boolean, _) => Err("must be true or false".into()),
+        (Type::Choice, toml::Value::String(s)) if d.choices.contains(s) => Ok(Val::Text(s.clone())),
+        (Type::Choice, _) => Err(format!("must be one of: {}", d.choices.join(", "))),
+        (Type::String, toml::Value::String(s)) => Ok(Val::Text(s.clone())),
+        (Type::String, _) => Err("must be a string".into()),
+    }
 }
 
 fn action(name: &str, v: &toml::Value) -> std::result::Result<Action, String> {
@@ -346,12 +428,17 @@ fn action(name: &str, v: &toml::Value) -> std::result::Result<Action, String> {
     };
     if let Some(k) = t
         .keys()
-        .find(|k| !["switches", "doc", "args"].contains(&k.as_str()))
+        .find(|k| !["switches", "doc", "args", "produces"].contains(&k.as_str()))
     {
         return Err(at(&format!(
-            "unknown key `{k}` (allowed: switches, doc, args)"
+            "unknown key `{k}` (allowed: switches, doc, args, produces)"
         )));
     }
+    let produces = match t.get("produces") {
+        None => None,
+        Some(toml::Value::String(s)) if s == "file" => Some(Produces::File),
+        Some(_) => return Err(at("`produces` can only be \"file\"")),
+    };
     let switches = match t.get("switches") {
         Some(toml::Value::Boolean(b)) => *b,
         _ => {
@@ -378,6 +465,7 @@ fn action(name: &str, v: &toml::Value) -> std::result::Result<Action, String> {
     Ok(Action {
         doc,
         switches,
+        produces,
         args,
     })
 }
@@ -690,12 +778,15 @@ pub trait Driver: Send + Sync {
     }
     async fn read(&self, channel: Option<&str>) -> Result<serde_json::Value>;
     async fn set(&self, channel: Option<&str>, name: &str, value: &Val) -> Result<()>;
+    /// Run an action. One that produces a file gets `output` to fill and reports what it
+    /// produced.
     async fn action(
         &self,
         channel: Option<&str>,
         name: &str,
         args: &IndexMap<String, Val>,
-    ) -> Result<()>;
+        output: Option<&Output>,
+    ) -> Result<Option<Produced>>;
     fn take_log(&self) -> Vec<String> {
         Vec::new()
     }
@@ -784,7 +875,8 @@ pub async fn set(
     })
 }
 
-/// Run an action (arguments already parsed and checked), then read the state after.
+/// Run an action (arguments already parsed and checked), then read the state after. An action
+/// that produces a file fills `output`; it must report a format and leave something in it.
 pub async fn act(
     drv: &dyn Driver,
     decls: &Declarations,
@@ -792,15 +884,33 @@ pub async fn act(
     name: &str,
     args: &IndexMap<String, Val>,
     dry_run: bool,
-) -> Result<Outcome> {
+    output: Option<&Output>,
+) -> Result<(Outcome, Option<Produced>)> {
+    let mut produced = None;
     if !dry_run {
-        drv.action(channel, name, args).await?;
+        produced = drv.action(channel, name, args, output).await?;
+        if let Some(out) = output {
+            out.close();
+            let label = drv.label();
+            if produced.is_none() {
+                return Err(DeskError::Internal(format!(
+                    "{label}: `{name}` produces a file, but the driver reported no format"
+                )));
+            }
+            if out.size() == 0 {
+                return Err(DeskError::EndpointUnavailable {
+                    endpoint: label,
+                    message: format!("`{name}` produced no data (the capture is empty)"),
+                });
+            }
+        }
     }
-    Ok(Outcome {
+    let outcome = Outcome {
         values: read(drv, decls, channel).await?,
         applied: !dry_run,
         ..Outcome::default()
-    })
+    };
+    Ok((outcome, produced))
 }
 
 /// A value as JSON (for a script's `params` and logs).
@@ -863,6 +973,43 @@ mod tests {
                 .contains("twice")
         );
         assert!(err("channels = 0").contains("count"));
+    }
+
+    #[test]
+    fn action_arguments_have_defaults_or_are_optional() {
+        let d = decls(
+            r#"
+            [actions.capture]
+            switches = false
+            produces = "file"
+            args = { duration = { type = "number", unit = "s", min = 0.001, max = 600 }, samplerate = { type = "number", unit = "Hz", default = 10e6 }, trigger = { type = "string", optional = true } }
+        "#,
+        )
+        .unwrap();
+        let a = &d.actions["capture"];
+        assert!(a.produces_file());
+        assert!(a.needs_args());
+        assert!(a.args["duration"].required());
+        assert_eq!(a.args["samplerate"].default, Some(Val::Number(10e6)));
+        assert!(!a.args["samplerate"].required());
+        assert!(a.args["trigger"].optional);
+        let err = |t: &str| decls(t).unwrap_err();
+        assert!(
+            err("[actions.go]\nswitches = false\nargs = { a = { type = \"number\", max = 5, default = 6 } }")
+                .contains("device maximum")
+        );
+        assert!(
+            err("[actions.go]\nswitches = false\nargs = { a = { type = \"boolean\", default = true, optional = true } }")
+                .contains("not both")
+        );
+        assert!(
+            err("[actions.go]\nswitches = false\nargs = { a = { type = \"boolean\", optional = 1 } }")
+                .contains("true or false")
+        );
+        assert!(
+            err("[settings]\nx = { type = \"number\", optional = true }").contains("only action")
+        );
+        assert!(err("[actions.go]\nswitches = false\nproduces = \"files\"").contains("produces"));
     }
 
     #[test]

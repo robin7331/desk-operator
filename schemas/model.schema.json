@@ -134,6 +134,26 @@
           },
           "description": "USB ids of the model. Serial numbers and paths are per unit: users add them in their own config."
         },
+        "sigrok": {
+          "type": "object",
+          "required": [
+            "driver"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "driver": {
+              "type": "string",
+              "pattern": "^[a-z0-9_][a-z0-9_-]*$",
+              "description": "sigrok's driver id (`desk sigrok drivers` lists them)"
+            },
+            "build": {
+              "type": "string",
+              "pattern": "^https?://\\S+$",
+              "description": "Where a sigrok build with this driver comes from, when stock sigrok has none (only shown in hints)"
+            }
+          },
+          "description": "The model is reached through sigrok (ctx.sigrok). `conn` and `backend` are per bench: users add them in their own config."
+        },
         "timeout": {
           "type": "string",
           "description": "e.g. \"10s\""
@@ -323,7 +343,25 @@
         },
         "doc": {
           "type": "string"
+        },
+        "default": {
+          "type": [
+            "number",
+            "boolean",
+            "string"
+          ],
+          "description": "Used when the argument is left out: a number in the declared unit, true/false, a choice or a string. Must pass the argument's own type and range (checked by desk model check). Not with optional"
+        },
+        "optional": {
+          "type": "boolean",
+          "description": "May be left out; the driver then doesn't get it. Not with default"
         }
+      },
+      "not": {
+        "required": [
+          "default",
+          "optional"
+        ]
       }
     },
     "action": {
@@ -345,7 +383,13 @@
           "additionalProperties": {
             "$ref": "#/$defs/arg"
           },
-          "description": "Every argument is required"
+          "description": "Required unless they have a default or are optional"
+        },
+        "produces": {
+          "enum": [
+            "file"
+          ],
+          "description": "The action writes a file the core owns: the driver fills ctx.output and returns { format = \"…\", extension = \"…\", … }"
         }
       }
     }
