@@ -39,13 +39,14 @@ irm https://raw.githubusercontent.com/robin7331/desk-operator/main/install.ps1 |
 Both verify the download and offer to install the agent skills. To update later, run
 `desk update` (`desk update --check` only looks), or the install command again.
 
-To build from source instead, you
-need [Rust](https://rustup.rs) (stable):
+To build from source instead, you need [Rust](https://rustup.rs) (stable, 1.89 or newer). On Linux
+the build also needs the libudev development files and `pkg-config` (Debian and Ubuntu:
+`sudo apt install libudev-dev pkg-config`; other distributions name the package differently):
 
 ```sh
 git clone https://github.com/robin7331/desk-operator
 cd desk-operator
-cargo install --path .
+cargo install --locked --path .
 ```
 
 Models are compiled into `desk`, so a new device arrives with the next build.

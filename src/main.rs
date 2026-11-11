@@ -43,7 +43,7 @@ fn main() {
                     | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
             );
             // Agents asked for JSON: give them a parseable usage error too.
-            if !informational && std::env::args().any(|a| a == "--json") {
+            if !informational && std::env::args_os().any(|a| a == "--json") {
                 let msg = e.render().to_string();
                 let msg = msg.trim().trim_start_matches("error: ");
                 output::emit_error(true, &DeskError::Usage(msg.to_string()));

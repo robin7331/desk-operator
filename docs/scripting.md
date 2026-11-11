@@ -426,7 +426,9 @@ Drivers only implement primitives. Everything users rely on is done by desk itse
 every driver:
 
 - **Sessions:** one `open` … `close` per command around all steps. `close` is called even after
-  errors and timeouts (devices that lock their front panel while connected get released).
+  errors and timeouts (devices that lock their front panel while connected get released). When
+  the command succeeded and `close` then fails, the command still counts: its result is
+  reported, with the error from `close` as a warning.
 - **Limits:** values above `info()`'s maximum or the device's bench `limits` are refused before
   the driver is called. Switching the output on is also refused when the device *already* holds a
   setpoint above the bench limits (as far as `read()` reports it).
@@ -450,7 +452,8 @@ Only the `string`, `table`, `math`, `utf8` and `coroutine` libraries are availab
 reach the outside world through `ctx`. `load` compiles source text only, never precompiled chunks.
 A script may use up to 64 MiB of memory. One `port:read` returns at most 64 KiB; ask again for more.
 `print` writes to the log, so `--json` output stays parseable. The timeout also interrupts busy
-loops written in Lua.
+loops written in Lua, and it can't be caught: `pcall`, `xpcall` and `coroutine.resume` catch other
+errors as usual and pass a timeout on. Clean up in `close`, which gets its own time.
 
 ## Examples
 

@@ -280,7 +280,16 @@ impl Bench {
             .max()
             .unwrap_or(source::DEFAULT_TIMEOUT);
         let what = format!("controlling `{}`", device.id);
-        let result = session(&drivers, timeout, &what, ops::run(cat, &drivers, op)).await;
+        let result = session(&drivers, timeout, &what, ops::run(cat, &drivers, op))
+            .await
+            .map(|(mut outcome, closed)| {
+                if let Some(e) = closed {
+                    outcome.warnings.push(format!(
+                        "the command is done, but closing the session failed: {e}"
+                    ));
+                }
+                outcome
+            });
         Run {
             result,
             log: take_logs(&drivers),
@@ -473,12 +482,14 @@ pub fn take_logs(drivers: &Drivers) -> Vec<String> {
 }
 
 /// Open, run `op` with a timeout, always close (devices that lock their panel get released).
+/// Next to what `op` returned comes an error from closing: once the op is done (something may be
+/// switched on, a capture is on disk), a failing close must not hide its result.
 async fn session<T>(
     drivers: &Drivers,
     timeout: Duration,
     what: &str,
     op: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
+) -> Result<(T, Option<DeskError>)> {
     // A host function that fills a capture suspends this timeout while its own one runs.
     let result = crate::deadline::timeout(timeout, async {
         open_drivers(drivers).await?;
@@ -492,9 +503,6 @@ async fn session<T>(
         })
     });
     let closed = close_drivers(drivers).await;
-    match (result, closed) {
-        (Err(e), _) => Err(e),
-        (Ok(_), Some(e)) => Err(e),
-        (Ok(v), None) => Ok(v),
-    }
+    // A failed op keeps its own error: that is the one to act on.
+    result.map(|v| (v, closed))
 }

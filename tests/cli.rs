@@ -837,3 +837,35 @@ fn core_never_references_specific_devices() {
         }
     }
 }
+
+/// An argument that isn't UTF-8 is a usage error (exit 2), with `--json` too: never a panic.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_argument_is_a_usage_error() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let b = Bench::new();
+    for json in [false, true] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_desk"));
+        cmd.env_remove("DESK_CONFIG")
+            .env("DESK_MOCK_STATE", b.dir.path().join("mock-state.json"))
+            .arg("--config")
+            .arg(b.config());
+        if json {
+            cmd.arg("--json");
+        }
+        let out = cmd
+            .arg("get")
+            .arg(OsStr::from_bytes(b"ps\xffu"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "json={json}: {stderr}");
+        assert!(!stderr.contains("panicked"), "json={json}: {stderr}");
+        if json {
+            let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(v["ok"], false);
+            assert_eq!(v["error"]["code"], "usage");
+        }
+    }
+}

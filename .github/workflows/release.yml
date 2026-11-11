@@ -1,6 +1,6 @@
-# Builds desk for every platform and runs the real installer against each build. A pushed tag
-# (v0.1.0, matching Cargo.toml) also publishes the release; running this by hand only builds and
-# tests, so it also works before the repo is public.
+# Runs the tests, builds desk for every platform and runs the real installer against each build.
+# A pushed tag (v0.1.0, matching Cargo.toml) also publishes the release; running this by hand only
+# builds and tests, so it also works before the repo is public.
 name: Release
 
 on:
@@ -12,6 +12,26 @@ permissions:
   contents: read
 
 jobs:
+  # Nothing is built or published from a commit whose tests fail, and a tag that doesn't match
+  # Cargo.toml fails here, before five builds.
+  check:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml" >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo test --locked --no-fail-fast
+
   notices:
     name: Third-party notices
     runs-on: ubuntu-latest
@@ -28,7 +48,7 @@ jobs:
 
   build:
     name: Build (${{ matrix.target }})
-    needs: notices
+    needs: [check, notices]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -121,13 +141,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: The tag matches Cargo.toml
-        run: |
-          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml" >&2
-            exit 1
-          fi
       - uses: actions/download-artifact@v8
         with:
           path: dist

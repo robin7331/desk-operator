@@ -779,6 +779,17 @@ pub async fn forward(config: Option<&Path>, args: &[String]) -> Result<Option<Re
     Ok(Some(reply.into_report()))
 }
 
+/// Write to stdout right away. `false`: nobody reads it any more (`desk watch … | head -3`).
+fn print_out(text: &str) -> Result<bool> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(DeskError::Internal(format!("cannot write to stdout: {e}"))),
+    }
+}
+
 /// `desk watch`: stream readings from the daemon (starting it if needed) to stdout. `cat` gives
 /// units for the human table.
 pub async fn watch(
@@ -816,10 +827,14 @@ pub async fn watch(
             return Ok(Report::streamed(reply.into_report().failure));
         }
         received += 1;
-        if json_mode {
-            println!("{line}");
+        let text = if json_mode {
+            format!("{line}\n")
         } else {
-            print!("{}", printer.row(&reply.data));
+            printer.row(&reply.data)
+        };
+        if !print_out(&text)? {
+            // The reader is gone: a normal end, as for `desk stream`.
+            return Ok(Report::streamed(None));
         }
     }
 }

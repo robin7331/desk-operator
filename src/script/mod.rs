@@ -11,7 +11,8 @@
 //! `dofile`/`loadfile`/`string.dump` are removed, so there is no file, OS or network access except
 //! through `ctx`. `load` only takes source text (binary chunks are unverified bytecode), and each
 //! state has a memory limit.
-//! `print` goes to the log. A global instruction hook enforces the timeout even in busy loops.
+//! `print` goes to the log. A global instruction hook enforces the timeout even in busy loops,
+//! and `pcall`, `xpcall` and `coroutine.resume` pass a timeout on instead of catching it.
 
 pub mod declared;
 pub mod power;
@@ -390,6 +391,22 @@ impl Engine {
     }
 }
 
+/// Runs once per Lua state with the deadline check as its argument. The hook's timeout is an
+/// ordinary Lua error, so a protected call would catch it and the script could run on (a retry
+/// loop around `pcall` would never end). What catches errors asks the deadline when a call
+/// failed, and passes a timeout on. The original functions stay locals of this chunk.
+const GUARD_CATCHERS: &str = r#"
+local check = ...
+local raw_pcall, raw_xpcall, raw_resume = pcall, xpcall, coroutine.resume
+local function guard(ok, ...)
+  if not ok then check() end
+  return ok, ...
+end
+pcall = function(f, ...) return guard(raw_pcall(f, ...)) end
+xpcall = function(f, msgh, ...) return guard(raw_xpcall(f, msgh, ...)) end
+coroutine.resume = function(co, ...) return guard(raw_resume(co, ...)) end
+"#;
+
 fn install_timeout_hook(
     lua: &Lua,
     deadline: Deadline,
@@ -397,19 +414,39 @@ fn install_timeout_hook(
     path: &Path,
 ) -> Result<()> {
     let what = format!("script {}", file_name(path));
-    let hook = move |_: &Lua, _: &mlua::debug::Debug| -> mlua::Result<VmState> {
-        if deadline.expired() {
-            return Err(mlua::Error::external(DeskError::Timeout {
-                what: what.clone(),
-                after: timeout,
-            }));
+    let timed_out = move || {
+        mlua::Error::external(DeskError::Timeout {
+            what: what.clone(),
+            after: timeout,
+        })
+    };
+    let hook = {
+        let (deadline, timed_out) = (deadline.clone(), timed_out.clone());
+        move |_: &Lua, _: &mlua::debug::Debug| -> mlua::Result<VmState> {
+            if deadline.expired() {
+                return Err(timed_out());
+            }
+            Ok(VmState::Continue)
         }
-        Ok(VmState::Continue)
     };
     let triggers = HookTriggers::new().every_nth_instruction(HOOK_EVERY);
     // The main thread runs the top level; async calls run on new threads (global hook).
     lua.set_hook(triggers, hook.clone()).map_err(internal)?;
-    lua.set_global_hook(triggers, hook).map_err(internal)
+    lua.set_global_hook(triggers, hook).map_err(internal)?;
+
+    // The same check for `pcall`, `xpcall` and `coroutine.resume`: see `GUARD_CATCHERS`.
+    let check = lua
+        .create_function(move |_, ()| {
+            if deadline.expired() {
+                return Err(timed_out());
+            }
+            Ok(())
+        })
+        .map_err(internal)?;
+    lua.load(GUARD_CATCHERS)
+        .set_name("=sandbox")
+        .call::<()>(check)
+        .map_err(internal)
 }
 
 /// Build `ctx` and replace unsafe/noisy globals.
