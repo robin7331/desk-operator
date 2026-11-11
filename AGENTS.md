@@ -26,7 +26,7 @@ core owns), and sigrok as a connection kind (`sigrok-cli` run as a separate prog
 `docs/sigrok.md`). **M8.1**: readings and settings through sigrok (`ctx.sigrok.measure|get|set`
 in a driver's `read()`/`set()`). **M9.1, raw binary streams** (`plan.md`, "M9"): models declare
 streams, a source fills a stream sink, the daemon fans its blocks out to subscribers over its
-socket (`desk stream`, `docs/streaming.md`). Still open: M9.2 (activity) and M9.3 (history),
+socket (`desk stream`, `docs/streaming.md`). Still open: M9.2 (activity),
 validating the `desk-setup` skill on a real bench, and real installs and serial devices on macOS
 and Windows (roadmap in `plan.md`).
 Keep it lean: build only what the current milestone needs.
