@@ -249,6 +249,9 @@ struct Inner {
 struct State {
     file: Option<std::fs::File>,
     written: u64,
+    /// The data file's path went to an external program: the core closed its handle (so the
+    /// program can replace the file, e.g. rename a sibling over it) and writes no more.
+    handed_out: bool,
     /// Fillers may write (only during the driver's call).
     open: bool,
     /// Finished or discarded: the temporary file is gone or renamed.
@@ -339,6 +342,7 @@ impl Sink {
             state: Mutex::new(State {
                 file: Some(file),
                 written: 0,
+                handed_out: false,
                 open: true,
                 done: false,
             }),
@@ -353,7 +357,8 @@ impl Sink {
         inner.lock().file = None;
         self.check_size()?;
         // Only the data file is the capture; anything else in the folder goes with it.
-        let bytes = std::fs::metadata(&inner.tmp).map_or(0, |m| m.len());
+        let written = inner.lock().written;
+        let bytes = file_len(&inner.tmp, None).max(written);
         let io = |p: &Path, e: std::io::Error| {
             DeskError::Internal(format!("capture: cannot write {}: {e}", p.display()))
         };
@@ -457,6 +462,11 @@ impl Output {
             s.open = false;
             return Err(self.too_big(size));
         }
+        if s.handed_out {
+            return Err(DeskError::Internal(
+                "capture: the data file was handed to a program, the core can't write to it".into(),
+            ));
+        }
         let Some(file) = s.file.as_mut() else {
             return Err(DeskError::Internal("capture file is closed".into()));
         };
@@ -472,14 +482,20 @@ impl Output {
 
     /// The temporary data file, for a program that writes the capture itself. It may put other
     /// files next to it: they count towards the size and are removed with the sink. Never give it
-    /// to a script.
+    /// to a script. The core closes its own handle first (Windows refuses to replace a file that
+    /// is open), and [`Output::write`] fails from then on.
     pub(crate) fn temp_path(&self) -> &Path {
+        let mut s = self.0.lock();
+        s.file = None;
+        s.handed_out = true;
         &self.0.tmp
     }
 
-    /// The size on disk now: every file in the private folder.
+    /// The size now: every file in the private folder, the data file at least what the core
+    /// wrote itself.
     pub fn size(&self) -> u64 {
-        folder_size(&self.0.folder)
+        let written = self.0.lock().written;
+        folder_size(&self.0.folder, &self.0.tmp, written)
     }
 
     /// The size on disk, or `limit_exceeded` if it's over the cap.
@@ -514,28 +530,58 @@ impl Output {
     }
 }
 
+/// How often, and how long apart, [`remove_folder`] tries.
+#[cfg(not(windows))]
+const REMOVE_TRIES: (u32, Duration) = (5, Duration::from_millis(20));
+/// On Windows a file can't be removed while any handle to it is open, and a process that was
+/// just killed (or a virus scanner looking at its new file) can hold one a little longer: up to
+/// about 1 s.
+#[cfg(windows)]
+const REMOVE_TRIES: (u32, Duration) = (20, Duration::from_millis(50));
+
 /// Remove the sink's private folder. A program that was just killed may still have been creating
 /// a file in it, so try a few times.
 fn remove_folder(folder: &Path) {
-    for _ in 0..5 {
+    let (tries, pause) = REMOVE_TRIES;
+    for _ in 0..tries {
         if std::fs::remove_dir_all(folder).is_ok() || !folder.exists() {
             return;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(pause);
     }
 }
 
-/// The sum of the files in `dir` and its sub-folders (a program may make them).
-fn folder_size(dir: &Path) -> u64 {
+/// A file's length, asked through a handle: a directory entry's size can lag behind while the
+/// file is open for writing (on Windows it is updated when the writer closes it). Falls back to
+/// the path's metadata, then to the directory entry's.
+fn file_len(path: &Path, entry: Option<&std::fs::DirEntry>) -> u64 {
+    if let Ok(m) = std::fs::File::open(path).and_then(|f| f.metadata()) {
+        return m.len();
+    }
+    if let Ok(m) = std::fs::metadata(path) {
+        return m.len();
+    }
+    entry.and_then(|e| e.metadata().ok()).map_or(0, |m| m.len())
+}
+
+/// The sum of the files in `dir` and its sub-folders (a program may make them); the data file
+/// `data` counts at least `written` bytes (what the core wrote through its own handle).
+fn folder_size(dir: &Path, data: &Path, written: u64) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
     entries
         .flatten()
-        .map(|e| match e.file_type() {
-            Ok(t) if t.is_dir() => folder_size(&e.path()),
-            Ok(t) if t.is_file() => e.metadata().map_or(0, |m| m.len()),
-            _ => 0,
+        .map(|e| {
+            let path = e.path();
+            match e.file_type() {
+                Ok(t) if t.is_dir() => folder_size(&path, data, written),
+                Ok(t) if t.is_file() => {
+                    let len = file_len(&path, Some(&e));
+                    if path == data { len.max(written) } else { len }
+                }
+                _ => 0,
+            }
         })
         .sum()
 }
@@ -608,7 +654,7 @@ mod tests {
         assert!(files(dir.path())[0].ends_with(".partial"));
         assert!(dir.path().join(&files(dir.path())[0]).is_dir());
         // A program's stray file next to the data counts and goes with the sink.
-        let stray = sink.temp_path().with_extension("xyz.part");
+        let stray = dir.path().join(&files(dir.path())[0]).join("data.xyz.part");
         std::fs::write(&stray, b"12").unwrap();
         assert_eq!(sink.size(), 7);
         let (path, bytes) = sink.finish("bin").unwrap();
@@ -719,6 +765,40 @@ mod tests {
             !dir.path().exists(),
             "the private folder and the empty device folder are gone"
         );
+    }
+
+    #[test]
+    fn the_cores_own_writes_count_while_its_handle_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Sink::create(&plan(dir.path(), 100)).unwrap();
+        sink.write(b"hello").unwrap();
+        assert_eq!(sink.size(), 5);
+        sink.write(b" world").unwrap();
+        assert_eq!(sink.size(), 11);
+        assert_eq!(sink.check_size().unwrap(), 11);
+        let (path, bytes) = sink.finish("bin").unwrap();
+        assert_eq!(bytes, 11);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn a_program_may_replace_the_data_file_it_was_handed() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Sink::create(&plan(dir.path(), 100)).unwrap();
+        let path = sink.temp_path().to_path_buf();
+        let e = sink.write(b"x").unwrap_err();
+        assert_eq!(e.code(), "internal", "{e}");
+        assert!(e.to_string().contains("handed to a program"), "{e}");
+        // Like srzip: write a sibling, then rename it over the data file.
+        let sibling = path.with_file_name("data.tmp");
+        std::fs::write(&sibling, b"from the program").unwrap();
+        std::fs::rename(&sibling, &path).unwrap();
+        assert_eq!(sink.size(), 16);
+        let (out, bytes) = sink.finish("sr").unwrap();
+        assert_eq!(bytes, 16);
+        assert_eq!(std::fs::read(&out).unwrap(), b"from the program");
+        drop(sink);
+        assert_eq!(files(dir.path()).len(), 1, "only the capture is left");
     }
 
     #[tokio::test]

@@ -3,7 +3,10 @@
 //! that leaves the daemon), dry runs, and Lua drivers that fill `ctx.output`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
+// Only the Unix tests (Ctrl-C, a client that leaves the daemon) wait for children.
+#[cfg(unix)]
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
@@ -175,6 +178,7 @@ fn nothing_left(dir: &Path) -> bool {
     std::fs::read_dir(dir).map_or(true, |mut e| e.next().is_none())
 }
 
+#[cfg(unix)] // its users are the Unix-only tests
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !cond() {
@@ -183,6 +187,7 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(unix)] // its users are the Unix-only tests
 fn wait_exit(child: &mut Child) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -381,7 +386,14 @@ fn output_names_the_file_relative_to_where_desk_runs() {
     let out = output(c);
     assert_eq!(out.code, 0, "{} {}", out.stdout, out.stderr);
     let file = PathBuf::from(out.data()["file"].as_str().unwrap());
-    assert_eq!(file, std::path::absolute(b.path("work/run1.bin")).unwrap());
+    // desk names the file as its working directory resolves it; the temp folder may be under a
+    // symlink (macOS: /var -> /private/var), so compare the resolved folders.
+    assert_eq!(file.file_name().unwrap(), "run1.bin");
+    assert_eq!(
+        file.parent().unwrap().canonicalize().unwrap(),
+        b.path("work").canonicalize().unwrap()
+    );
+    assert!(file.is_absolute(), "{file:?}");
     assert_eq!(std::fs::read(&file).unwrap(), pattern(7));
     assert_eq!(files(&b.path("work")), ["run1.bin"]);
 
