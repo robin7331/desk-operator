@@ -1,5 +1,7 @@
 //! `desk get`, `desk set`, `desk do`: values, settings and actions of any device.
 
+use std::path::PathBuf;
+
 use serde::Serialize;
 
 use super::device::{self, ActionView, NameView, Names};
@@ -47,12 +49,20 @@ pub async fn set(
     finish(bench, device, &cat, op, None).await
 }
 
+/// `desk do … --output … --max-size …` (only for actions that produce a file).
+pub struct CaptureArgs {
+    /// Absolute (the CLI made it so before forwarding it to the daemon).
+    pub output: Option<PathBuf>,
+    pub max_size: Option<String>,
+}
+
 pub async fn act(
     bench: &Bench,
     target: &str,
     action: Option<&str>,
     args: &[String],
     dry_run: bool,
+    capture: CaptureArgs,
 ) -> Result<Report> {
     let (query, channel) = split_channel(target);
     let device = bench.config.resolve_device(query)?;
@@ -60,10 +70,40 @@ pub async fn act(
     let Some(action) = action else {
         return list_actions(device, &cat, target, channel);
     };
-    if args.is_empty() && !cat.action(action)?.2.args.is_empty() {
+    let decl = cat.action(action)?.2;
+    if args.is_empty() && decl.needs_args() {
         return describe_action(device, &cat, target, channel, action);
     }
-    let op = ops::plan_do(&cat, channel, action, args, dry_run)?;
+    let plan = if decl.produces_file() {
+        let max_size = match &capture.max_size {
+            Some(s) => crate::capture::parse_size(s)
+                .map_err(|e| DeskError::Usage(format!("--max-size: {e}")))?,
+            None => bench.config.captures.max_size,
+        };
+        Some(crate::capture::Plan {
+            dir: crate::capture::base_dir(&bench.config)?.join(&device.id),
+            output: capture.output,
+            max_size,
+            cancel: bench.cancel.clone(),
+        })
+    } else if capture.output.is_some() || capture.max_size.is_some() {
+        return Err(DeskError::Usage(format!(
+            "`{action}` doesn't produce a file, so --output and --max-size don't apply"
+        )));
+    } else {
+        None
+    };
+    let capturing = plan.is_some() && !dry_run;
+    let op = ops::plan_do(&cat, channel, action, args, dry_run, plan)?;
+    // Run directly (not in the daemon): Ctrl-C stops the capture and removes the partial file.
+    if capturing && bench.sessions.is_none() {
+        let cancel = bench.cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                cancel.cancel();
+            }
+        });
+    }
     finish(bench, device, &cat, op, None).await
 }
 
@@ -307,8 +347,9 @@ fn describe_action(
     let mut one = indexmap::IndexMap::new();
     one.insert(name.clone(), view);
     let human = device::action_blocks(&one, "");
-    let needs: Vec<String> = action.args.keys().map(|k| format!("`{k}=…`")).collect();
-    let args: Vec<String> = action.args.keys().map(|k| format!("{k}=<value>")).collect();
+    let required = || action.args.iter().filter(|(_, d)| d.required());
+    let needs: Vec<String> = required().map(|(k, _)| format!("`{k}=…`")).collect();
+    let args: Vec<String> = required().map(|(k, _)| format!("{k}=<value>")).collect();
     let message = format!(
         "`{name}` needs {} (nothing was done): desk do {} {query} {}",
         needs.join(", "),
@@ -438,9 +479,24 @@ fn render(cat: &Catalog, r: &ops::Report, dry_run: bool) -> String {
         };
         if dry_run {
             out.push_str(&format!("dry run, nothing sent: would do {call}\n"));
+            if let Some(p) = &r.planned {
+                out.push_str(&format!(
+                    "the file would go to {} (at most {})\n",
+                    p.into.display(),
+                    crate::capture::format_size(p.max_size)
+                ));
+            }
         } else {
             out.push_str(&format!("done: {call}\n"));
         }
+    }
+    if let Some(c) = &r.outcome.capture {
+        out.push_str(&format!(
+            "file: {} ({}, {})\n",
+            c.file.display(),
+            crate::capture::format_size(c.bytes),
+            c.format
+        ));
     }
     for w in &r.outcome.warnings {
         out.push_str(&format!("warning: {w}\n"));

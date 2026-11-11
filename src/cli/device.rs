@@ -288,9 +288,20 @@ pub(super) fn action_blocks(actions: &IndexMap<String, ActionView>, indent: &str
                 .action
                 .args
                 .iter()
-                .map(|(k, d)| format!("{k}=<{}>", summary(d, None)))
+                .map(|(k, d)| {
+                    let mut line = format!("{k}=<{}>", summary(d, None));
+                    if let Some(v) = &d.default {
+                        line.push_str(&format!(", default {}", v.display(Some(d))));
+                    } else if d.optional {
+                        line.push_str(", optional");
+                    }
+                    line
+                })
                 .collect();
             lines.extend(a.action.doc.clone());
+            if a.action.produces_file() {
+                lines.push("produces a file (--output, --max-size)".into());
+            }
             (n.as_str(), lines)
         })
         .collect();

@@ -4,7 +4,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::capture::Cancel;
 use crate::config::{Binding, Config, Device};
+use crate::connections::Connections;
 use crate::daemon::session::{Sessions, Watcher};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, Confidence, Power, PowerState};
@@ -12,7 +14,6 @@ use crate::ops::{self, CapDriver, Catalog, Drivers, Entry, Kind, Op};
 use crate::power::{self, Outcome, Plan, PowerSwitch, Target};
 use crate::providers::{Endpoint, ProviderInfo, Registry};
 use crate::script::{DeviceInfo, ScriptDriver, ScriptSource, ScriptSpec, ScriptSwitch};
-use crate::serial::PortSpec;
 use crate::source;
 
 pub struct Bench {
@@ -20,6 +21,8 @@ pub struct Bench {
     pub providers: Arc<Registry>,
     /// Set inside the daemon: live device sessions that commands go through.
     pub sessions: Option<Arc<Sessions>>,
+    /// Cancels a capture this bench runs (Ctrl-C, or the daemon client went away).
+    pub cancel: Cancel,
 }
 
 /// The result of an operation on one device, plus whatever it logged (scripts), which is
@@ -42,6 +45,7 @@ impl Bench {
             config,
             providers,
             sessions: None,
+            cancel: Cancel::default(),
         })
     }
 
@@ -63,7 +67,7 @@ impl Bench {
                 script,
                 params,
                 timeout,
-                port,
+                connections,
                 ..
             } => {
                 let timeout = timeout.unwrap_or(power::DEFAULT_SCRIPT_TIMEOUT);
@@ -71,7 +75,7 @@ impl Bench {
                     device,
                     script,
                     params,
-                    port.as_ref(),
+                    connections,
                     timeout,
                 ))?;
                 (Box::new(sw), timeout)
@@ -117,7 +121,7 @@ impl Bench {
         device: &'a Device,
         path: &'a Path,
         params: &'a toml::Table,
-        port: Option<&'a PortSpec>,
+        connections: &'a Connections,
         timeout: Duration,
     ) -> ScriptSpec<'a> {
         ScriptSpec {
@@ -127,7 +131,7 @@ impl Bench {
             },
             path,
             params,
-            port,
+            connections,
             timeout,
             providers: self.providers.clone(),
         }
@@ -150,14 +154,14 @@ impl Bench {
                 Binding::Script {
                     script,
                     params,
-                    port,
+                    connections,
                     ..
                 },
             ) => CapDriver::Source(Box::new(ScriptSource::load(self.script_spec(
                 device,
                 script,
                 params,
-                port.as_ref(),
+                connections,
                 entry.timeout,
             ))?)),
             (
@@ -175,11 +179,11 @@ impl Bench {
                 Binding::Script {
                     script,
                     params,
-                    port,
+                    connections,
                     ..
                 },
             ) => CapDriver::Declared(Box::new(ScriptDriver::load(
-                self.script_spec(device, script, params, port.as_ref(), entry.timeout),
+                self.script_spec(device, script, params, connections, entry.timeout),
                 &entry.decls,
             )?)),
         })
@@ -383,7 +387,7 @@ impl Bench {
 
     pub async fn test_provider(&self, id: &str) -> Result<ProviderInfo> {
         let provider = self.providers.get(id)?;
-        let after = power::DEFAULT_TIMEOUT;
+        let after = provider.query_ceiling();
         tokio::time::timeout(after, provider.test())
             .await
             .map_err(|_| DeskError::Timeout {
@@ -394,7 +398,7 @@ impl Bench {
 
     pub async fn endpoints(&self, id: &str, capability: Capability) -> Result<Vec<Endpoint>> {
         let provider = self.providers.get(id)?;
-        let after = power::DEFAULT_TIMEOUT;
+        let after = provider.query_ceiling();
         tokio::time::timeout(after, provider.endpoints(capability))
             .await
             .map_err(|_| DeskError::Timeout {
@@ -467,7 +471,8 @@ async fn session<T>(
     what: &str,
     op: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    let result = tokio::time::timeout(timeout, async {
+    // A host function that fills a capture suspends this timeout while its own one runs.
+    let result = crate::deadline::timeout(timeout, async {
         open_drivers(drivers).await?;
         op.await
     })

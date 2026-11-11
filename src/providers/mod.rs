@@ -3,6 +3,7 @@
 
 mod home_assistant;
 mod mock;
+mod sigrok;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,50 @@ use crate::power::PowerSwitch;
 use crate::source::VoltageSource;
 
 /// Provider kinds this build knows, as used in `kind = "..."`.
-pub const KINDS: &[&str] = &[home_assistant::KIND, mock::KIND];
+pub const KINDS: &[&str] = &[home_assistant::KIND, mock::KIND, crate::sigrok::KIND];
+
+/// Providers that exist without configuration (id, kind), built like a configured one with no
+/// settings. A `[providers.<id>]` of the same id replaces it.
+const IMPLICIT: &[(&str, &str)] = &[(crate::sigrok::IMPLICIT, crate::sigrok::KIND)];
+
+/// The providers that exist without configuration, as (id, kind).
+pub fn implicit() -> impl Iterator<Item = (&'static str, &'static str)> {
+    IMPLICIT.iter().copied()
+}
+
+/// The kind of provider `id`, given these configs: a configured one, or an implicit one.
+pub fn kind_of<'a>(id: &str, configs: &'a IndexMap<String, ProviderConfig>) -> Option<&'a str> {
+    match configs.get(id) {
+        Some(c) => Some(&c.kind),
+        None => implicit().find(|(i, _)| *i == id).map(|(_, k)| k),
+    }
+}
+
+/// How a provider's endpoints are used in a device's config.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EndpointUse {
+    /// As a native binding: `<capability> = { provider = <id>, …params }`.
+    Native,
+    /// As the connection `key` of a script binding: `key = { …params }`. The provider is a
+    /// connection backend, never `provider = …`.
+    Connection {
+        key: &'static str,
+        /// Why it can't be bound as `provider = …` (what every binder answers).
+        not_native: &'static str,
+        /// Printed under a listing of its endpoints: where their params go.
+        note: String,
+        /// Printed instead of an empty listing.
+        none_found: String,
+    },
+}
+
+/// The binders' answer when a provider can't bind an endpoint this way.
+fn cannot_bind(usage: EndpointUse, native: &str) -> DeskError {
+    DeskError::ConfigInvalid(match usage {
+        EndpointUse::Native => native.into(),
+        EndpointUse::Connection { not_native, .. } => not_native.into(),
+    })
+}
 
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -29,19 +73,37 @@ pub trait Provider: Send + Sync {
     async fn test(&self) -> Result<ProviderInfo>;
     /// Everything this provider can offer for a capability, e.g. HA entities that can be switched.
     async fn endpoints(&self, capability: Capability) -> Result<Vec<Endpoint>>;
+    /// How its endpoints are used: as native bindings unless the provider says otherwise.
+    fn endpoint_use(&self) -> EndpointUse {
+        EndpointUse::Native
+    }
+    /// The ceiling around `test` and `endpoints`.
+    fn query_ceiling(&self) -> Duration {
+        crate::power::DEFAULT_TIMEOUT
+    }
+    /// Whether an implicit provider is there to be listed (e.g. its program is installed).
+    fn present(&self) -> bool {
+        true
+    }
     /// Bind one endpoint, described by the device's power binding params, as a power switch.
-    fn power_switch(&self, params: &toml::Table) -> Result<Box<dyn PowerSwitch>>;
+    fn power_switch(&self, _params: &toml::Table) -> Result<Box<dyn PowerSwitch>> {
+        Err(cannot_bind(
+            self.endpoint_use(),
+            "this provider can't switch mains power (use a driver script or another provider)",
+        ))
+    }
     /// Bind an endpoint as a bench power supply. Most providers can't.
     fn voltage_source(&self, _params: &toml::Table) -> Result<Box<dyn VoltageSource>> {
-        Err(DeskError::ConfigInvalid(
-            "this provider can't drive a voltage source (use a driver script or another provider)"
-                .into(),
+        Err(cannot_bind(
+            self.endpoint_use(),
+            "this provider can't drive a voltage source (use a driver script or another provider)",
         ))
     }
     /// Bind an endpoint as a declared capability. Most providers can't.
     fn declared(&self, _params: &toml::Table, _decls: &Declarations) -> Result<Box<dyn Driver>> {
-        Err(DeskError::ConfigInvalid(
-            "this provider can't drive a declared capability (use a driver script)".into(),
+        Err(cannot_bind(
+            self.endpoint_use(),
+            "this provider can't drive a declared capability (use a driver script)",
         ))
     }
 }
@@ -69,6 +131,8 @@ pub struct Endpoint {
 pub struct BuildContext<'a> {
     /// Directory of the config file; relative paths in settings resolve against it.
     pub base_dir: &'a Path,
+    /// Built as an implicit provider (no `[providers.<id>]`).
+    pub implicit: bool,
 }
 
 impl BuildContext<'_> {
@@ -91,6 +155,9 @@ fn build(id: &str, cfg: &ProviderConfig, ctx: &BuildContext) -> Result<Arc<dyn P
             id, &settings, ctx,
         )?)),
         mock::KIND => Ok(Arc::new(mock::MockProvider::new(id, &settings)?)),
+        crate::sigrok::KIND => Ok(Arc::new(sigrok::SigrokProvider(
+            crate::sigrok::Backend::configured(id, cfg, ctx)?,
+        ))),
         other => Err(DeskError::ConfigInvalid(format!(
             "provider `{id}`: unknown kind `{other}`"
         ))),
@@ -117,6 +184,16 @@ impl Registry {
         self.configs.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// The configured providers (for resolving connection backends).
+    pub fn configs(&self) -> &IndexMap<String, ProviderConfig> {
+        &self.configs
+    }
+
+    /// The folder relative paths in provider settings resolve against.
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
     pub fn get(&self, id: &str) -> Result<Arc<dyn Provider>> {
         let mut built = self
             .built
@@ -125,11 +202,25 @@ impl Registry {
         if let Some(p) = built.get(id) {
             return Ok(p.clone());
         }
-        let cfg = self.configs.get(id).ok_or_else(|| {
-            DeskError::ConfigInvalid(format!("provider `{id}` is not defined under [providers]"))
-        })?;
+        let implicit_cfg;
+        let (cfg, implicit) = match self.configs.get(id) {
+            Some(cfg) => (cfg, false),
+            None => {
+                let Some((_, kind)) = implicit().find(|(i, _)| *i == id) else {
+                    return Err(DeskError::ConfigInvalid(format!(
+                        "provider `{id}` is not defined under [providers]"
+                    )));
+                };
+                implicit_cfg = ProviderConfig {
+                    kind: kind.into(),
+                    settings: toml::Table::new(),
+                };
+                (&implicit_cfg, true)
+            }
+        };
         let ctx = BuildContext {
             base_dir: &self.base_dir,
+            implicit,
         };
         let provider = build(id, cfg, &ctx)?;
         built.insert(id.to_string(), provider.clone());
@@ -209,6 +300,57 @@ impl<'a> Params<'a> {
             Some(s) => humantime::parse_duration(s)
                 .map(Some)
                 .map_err(|e| self.invalid(format_args!("invalid `{key}` \"{s}\": {e}"))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn implicit_providers_have_a_kind_until_configured_otherwise() {
+        let mut configs = IndexMap::new();
+        for (id, kind) in implicit() {
+            assert_eq!(kind_of(id, &configs), Some(kind));
+            let registry = Registry::new(configs.clone(), PathBuf::new());
+            assert!(
+                registry.get(id).is_ok(),
+                "{id} builds without configuration"
+            );
+        }
+        assert_eq!(kind_of("nope", &configs), None);
+        for (id, _) in implicit() {
+            configs.insert(
+                id.to_string(),
+                ProviderConfig {
+                    kind: mock::KIND.into(),
+                    settings: toml::Table::new(),
+                },
+            );
+            assert_eq!(kind_of(id, &configs), Some(mock::KIND));
+        }
+    }
+
+    #[test]
+    fn a_connection_backend_refuses_every_native_binding() {
+        let registry = Registry::new(IndexMap::new(), PathBuf::new());
+        for (id, _) in implicit() {
+            let p = registry.get(id).unwrap();
+            let EndpointUse::Connection { not_native, .. } = p.endpoint_use() else {
+                continue;
+            };
+            let t = toml::Table::new();
+            let errors = [
+                p.power_switch(&t).err().map(|e| e.to_string()),
+                p.voltage_source(&t).err().map(|e| e.to_string()),
+                p.declared(&t, &Declarations::default())
+                    .err()
+                    .map(|e| e.to_string()),
+            ];
+            for e in errors {
+                assert_eq!(e.as_deref(), Some(not_native));
+            }
         }
     }
 }

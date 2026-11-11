@@ -343,7 +343,18 @@ async fn handle(state: Arc<State>, conn: impl ipc::Conn) {
     let _counted = Connection(state.clone());
     let (read, mut write) = tokio::io::split(conn);
     let mut lines = BufReader::new(read).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    // Requests that arrived while a command ran.
+    let mut queued: std::collections::VecDeque<String> = Default::default();
+    let mut closed = false;
+    loop {
+        let line = match queued.pop_front() {
+            Some(l) => l,
+            None if closed => return,
+            None => match lines.next_line().await {
+                Ok(Some(l)) => l,
+                _ => return,
+            },
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -366,7 +377,25 @@ async fn handle(state: Arc<State>, conn: impl ipc::Conn) {
             }
             Ok(Parsed::Command(cmd)) => {
                 let result = match state.bench() {
-                    Ok(bench) => cli::dispatch(&bench, cmd).await,
+                    Ok(bench) => {
+                        // A client that goes away cancels a capture it started (the command
+                        // itself always runs to its end, so the device is closed cleanly).
+                        let cancel = bench.cancel.clone();
+                        let work = cli::dispatch(&bench, cmd);
+                        tokio::pin!(work);
+                        loop {
+                            tokio::select! {
+                                r = &mut work => break r,
+                                l = lines.next_line(), if !closed => match l {
+                                    Ok(Some(l)) => queued.push_back(l),
+                                    _ => {
+                                        closed = true;
+                                        cancel.cancel();
+                                    }
+                                },
+                            }
+                        }
+                    }
                     Err(e) => Err(e),
                 };
                 if send(&mut write, &reply(result)).await.is_err() {
@@ -602,7 +631,13 @@ pub async fn forward(config: Option<&Path>, args: &[String]) -> Result<Option<Re
         .await
         .map_err(|e| lost(&ep, &format!("cannot talk to the desk daemon: {e}")))?;
     let mut lines = BufReader::new(read).lines();
-    let line = tokio::time::timeout(REPLY_TIMEOUT, lines.next_line())
+    // An action may run longer (a capture has its own timeout, enforced by the daemon, which
+    // closes the connection if it dies).
+    let action =
+        Cli::try_parse_from(std::iter::once("desk").chain(args.iter().map(String::as_str)))
+            .is_ok_and(|c| matches!(c.command, Command::Do { .. }));
+    let ceiling = if action { Duration::MAX } else { REPLY_TIMEOUT };
+    let line = tokio::time::timeout(ceiling, lines.next_line())
         .await
         .map_err(|_| lost(&ep, "the desk daemon didn't answer"))?
         .map_err(|e| lost(&ep, &format!("reading the daemon's reply failed: {e}")))?

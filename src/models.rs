@@ -380,6 +380,8 @@ fn parse_model(id: &str, text: &str, file: PathBuf, origin: Origin) -> Result<Mo
             return Err(bad(format!("`{key}` needs `script = \"...\"`")));
         };
         required_ratings(&key, &binding).map_err(bad)?;
+        crate::connections::Connections::check_model(&binding)
+            .map_err(|e| bad(format!("`{key}`: {e}")))?;
         let resolved = resolve_relative(&file, script);
         binding.insert(
             "script".into(),
@@ -577,6 +579,11 @@ pub fn check_tightens(
             };
             let path = format!("actions.{name}");
             check_switches(&path, ma, da)?;
+            if let Some(d) = da.get("produces")
+                && ma.get("produces") != Some(d)
+            {
+                return Err(model_owned(&format!("{path}.produces")));
+            }
             if let (Some(margs), Some(dargs)) = (table(ma, "args"), table(da, "args")) {
                 for (arg, dd) in &dargs {
                     if let (Some(toml::Value::Table(md)), toml::Value::Table(dd)) =

@@ -1,7 +1,10 @@
 mod bench;
+mod capture;
 mod cli;
 mod config;
+mod connections;
 mod daemon;
+mod deadline;
 mod declared;
 mod error;
 mod model;
@@ -12,6 +15,7 @@ mod power;
 mod providers;
 mod script;
 mod serial;
+mod sigrok;
 mod source;
 mod units;
 

@@ -25,6 +25,12 @@
 //! values; `follow = { temperature = "setpoint" }` makes a value report a setting; a declared value
 //! `last_action` reports the last action and its args, e.g. `"boost seconds=10"`. With channels,
 //! each channel has its own settings. `stuck_*` ignores `set`, `blind_*` reports values only.
+//!
+//! An action with `produces = "file"` fills the capture with a known pattern (byte `i` is
+//! `i % 251`), like a host function would: arguments `bytes` (how many, default 1024), `rate`
+//! (bytes per second, default as fast as possible) and `timeout` (in s, default 10) are used when
+//! the action declares and gets them. It reports `format = "mock"`, extension `bin`, and
+//! `meta = { pattern = "i % 251" }`. `fail_*` fails before writing anything.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +42,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{Endpoint, Params, Provider, ProviderInfo};
+use crate::capture::{Output, Produced};
 use crate::declared::{Declarations, Driver, Type, Val};
 use crate::error::{DeskError, Result};
 use crate::model::{Capability, Power, PowerFeatures, PowerState};
@@ -506,16 +513,61 @@ impl Driver for SimDeclared {
         channel: Option<&str>,
         name: &str,
         args: &indexmap::IndexMap<String, Val>,
-    ) -> Result<()> {
+        output: Option<&Output>,
+    ) -> Result<Option<Produced>> {
         self.inner.simulate(&self.endpoint).await?;
         let mut text = name.to_string();
         for (k, v) in args {
             text.push_str(&format!(" {k}={}", v.display(None)));
         }
-        self.store(channel, "last_action", serde_json::Value::String(text))
+        self.store(channel, "last_action", serde_json::Value::String(text))?;
+        let Some(out) = output else {
+            return Ok(None);
+        };
+        let num = |k: &str| args.get(k).and_then(Val::as_f64);
+        let bytes = num("bytes").unwrap_or(1024.0).max(0.0) as u64;
+        let rate = num("rate").filter(|r| *r > 0.0);
+        let after = num("timeout")
+            .and_then(|s| Duration::try_from_secs_f64(s).ok())
+            .unwrap_or(Duration::from_secs(10));
+        // Like a host function that fills a sink: its own timeout, the others suspended.
+        let _suspended = crate::deadline::suspend();
+        tokio::time::timeout(after, fill(out, bytes, rate))
+            .await
+            .map_err(|_| DeskError::Timeout {
+                what: format!("capture of `{}`", self.endpoint),
+                after,
+            })??;
+        let mut meta = serde_json::Map::new();
+        meta.insert("pattern".into(), serde_json::json!("i % 251"));
+        Ok(Some(Produced {
+            format: "mock".into(),
+            extension: "bin".into(),
+            meta,
+        }))
     }
 
     fn label(&self) -> String {
         format!("sim (endpoint={})", self.endpoint)
     }
+}
+
+/// Write `bytes` of the pattern, in 50 ms steps at `rate` bytes per second (or all at once).
+async fn fill(out: &Output, bytes: u64, rate: Option<f64>) -> Result<()> {
+    const STEP: Duration = Duration::from_millis(50);
+    let chunk = match rate {
+        Some(r) => ((r * STEP.as_secs_f64()) as u64).max(1),
+        None => 64 * 1024,
+    };
+    let mut at = 0u64;
+    while at < bytes {
+        let n = chunk.min(bytes - at);
+        let data: Vec<u8> = (at..at + n).map(|i| (i % 251) as u8).collect();
+        out.write(&data)?;
+        at += n;
+        if rate.is_some() && at < bytes {
+            tokio::time::sleep(STEP).await;
+        }
+    }
+    Ok(())
 }

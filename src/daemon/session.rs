@@ -4,8 +4,10 @@
 //! between two readings, so watching never locks anyone out. It ends when the last watcher
 //! leaves, when a read fails, or when it is stopped (mains off, daemon shutdown).
 //!
-//! Every operation on a device's port, with or without a session, is serialized by that device's
-//! port lock: a one-shot command never opens the port while a session is starting or closing.
+//! Every operation on a device, with or without a session, is serialized by that device's lock
+//! (`port`): a one-shot command never opens the device while a session is starting or closing,
+//! or while another command (a capture from its sigrok device, say) still runs. One lock per
+//! device covers whatever connection its bindings have: a serial `port` or a `sigrok` device.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -97,7 +99,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Sessions {
-    /// The lock that serializes everything touching this device's port.
+    /// The lock that serializes everything touching this device (its serial port, its sigrok
+    /// device).
     pub fn port(&self, device: &str) -> Arc<tokio::sync::Mutex<()>> {
         lock(&self.ports)
             .entry(device.to_string())
@@ -238,7 +241,7 @@ impl Sessions {
                                  watch first"
                             )))
                         } else {
-                            tokio::time::timeout(timeout, ops::run(&cat, &drivers, &op))
+                            crate::deadline::timeout(timeout, ops::run(&cat, &drivers, &op))
                                 .await
                                 .unwrap_or_else(|_| Err(timed_out(&device, timeout)))
                         };

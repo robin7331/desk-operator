@@ -9,6 +9,7 @@ mod port;
 mod power;
 mod provider;
 mod schema;
+mod sigrok;
 mod skill;
 mod status;
 mod update;
@@ -103,12 +104,20 @@ pub enum Command {
         /// The action
         #[arg(add = ArgValueCompleter::new(complete::candidates))]
         action: Option<String>,
-        /// Arguments as name=value (every declared argument is required)
+        /// Arguments as name=value (required unless they have a default or are optional)
         #[arg(add = ArgValueCompleter::new(complete::candidates))]
         args: Vec<String>,
         /// Check the arguments and show what would be done, without doing it
         #[arg(long)]
         dry_run: bool,
+        /// Actions that produce a file: write it here (its folder must exist; an existing file
+        /// is never overwritten) [default: the device's capture folder]
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Actions that produce a file: stop and discard it above this size, e.g. 200MB or 1GiB
+        /// [default: `[captures] max_size`, else 1GiB]
+        #[arg(long, value_name = "SIZE")]
+        max_size: Option<String>,
     },
     /// Stream readings until stopped (Ctrl-C); with --json one JSON line each. Other commands
     /// keep working meanwhile (a background daemon holds the session)
@@ -144,7 +153,13 @@ pub enum Command {
         #[command(subcommand)]
         action: PortCmd,
     },
-    /// Inspect providers (Home Assistant, ...) and what they can control
+    /// sigrok backends (sigrok-cli programs) and their drivers (to fill in a binding's
+    /// `sigrok = { ... }`)
+    Sigrok {
+        #[command(subcommand)]
+        action: SigrokCmd,
+    },
+    /// Inspect providers (Home Assistant, sigrok, ...) and what they can control
     Provider {
         #[command(subcommand)]
         action: ProviderCmd,
@@ -343,6 +358,29 @@ pub struct ProbeArgs {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SigrokCmd {
+    /// List every sigrok backend with the drivers it has (a backend whose program is missing is
+    /// listed with its error)
+    Drivers {
+        /// Only this backend (a provider id with kind = "sigrok", or the implicit `sigrok`)
+        #[arg(long)]
+        backend: Option<String>,
+    },
+    /// Print sigrok's own description of a driver's device (`sigrok-cli --show`), unparsed. It
+    /// opens the device: don't run it while desk captures from that device
+    Show {
+        /// sigrok driver id, e.g. demo (`desk sigrok drivers` lists them)
+        driver: String,
+        /// sigrok connection string of the device, e.g. 1.23 or /dev/ttyUSB0
+        #[arg(long)]
+        conn: Option<String>,
+        /// The backend to ask [default: the first one that has the driver]
+        #[arg(long)]
+        backend: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ProviderCmd {
     /// List configured providers and the devices using them
     List,
@@ -352,7 +390,8 @@ pub enum ProviderCmd {
         #[arg(add = ArgValueCompleter::new(complete::candidates))]
         provider: String,
     },
-    /// List what a provider can switch, e.g. Home Assistant entities, to use in a power binding
+    /// List what a provider can switch, e.g. Home Assistant entities, to use in a power binding;
+    /// for a sigrok backend, the devices its scan finds (for a `sigrok = { ... }` binding)
     Endpoints {
         /// Provider id from [providers.<id>]
         #[arg(add = ArgValueCompleter::new(complete::candidates))]
@@ -427,6 +466,7 @@ pub async fn run(cli: Cli) -> Result<Report> {
             };
         }
         Command::Model { action } => return models::run(cli.config.as_deref(), action),
+        Command::Sigrok { action } => return sigrok::run(cli.config.as_deref(), action).await,
         Command::Skill(SkillArgs { name, action }) => return skill::run(name, action, cli.json),
         Command::Completions { ref shell } => return complete::script(shell),
         Command::Update { check, force } => {
@@ -434,15 +474,52 @@ pub async fn run(cli: Cli) -> Result<Report> {
         }
         _ => {}
     }
+    // `--output` is relative to where desk runs, not to the daemon.
+    let mut command = cli.command;
+    let mut args = crate::daemon::own_args();
+    if let Command::Do {
+        output: Some(out), ..
+    } = &mut command
+        && out.is_relative()
+    {
+        let abs = std::path::absolute(&*out)?;
+        args = absolute_output(&args, out, &abs);
+        *out = abs;
+    }
     // A running daemon may hold the device's session: then it runs the command.
-    if routed(&cli.command)
-        && let Some(report) =
-            crate::daemon::forward(cli.config.as_deref(), &crate::daemon::own_args()).await?
+    if routed(&command)
+        && let Some(report) = crate::daemon::forward(cli.config.as_deref(), &args).await?
     {
         return Ok(report);
     }
     let bench = Bench::load(cli.config.as_deref())?;
-    dispatch(&bench, cli.command).await
+    dispatch(&bench, command).await
+}
+
+/// The command line with `--output <rel>` (or `--output=<rel>`) given as `abs`.
+fn absolute_output(args: &[String], rel: &std::path::Path, abs: &std::path::Path) -> Vec<String> {
+    let rel = rel.to_string_lossy();
+    let abs = abs.to_string_lossy().into_owned();
+    let mut out = Vec::with_capacity(args.len());
+    let mut next_is_value = false;
+    let mut after_dashes = false;
+    for a in args {
+        if next_is_value {
+            out.push(if *a == rel { abs.clone() } else { a.clone() });
+            next_is_value = false;
+            continue;
+        }
+        if !after_dashes && a == "--output" {
+            next_is_value = true;
+        } else if !after_dashes && a.strip_prefix("--output=") == Some(&*rel) {
+            out.push(format!("--output={abs}"));
+            continue;
+        } else if a == "--" {
+            after_dashes = true;
+        }
+        out.push(a.clone());
+    }
+    out
 }
 
 /// Commands that go through the daemon while it runs: everything touching a device's port or
@@ -474,6 +551,7 @@ pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
         | Command::Skill(_)
         | Command::Completions { .. }
         | Command::Port { .. }
+        | Command::Sigrok { .. }
         | Command::Model { .. }
         | Command::Update { .. }
         | Command::Serve { .. } => Err(DeskError::Usage(
@@ -492,7 +570,12 @@ pub async fn dispatch(bench: &Bench, command: Command) -> Result<Report> {
             action,
             args,
             dry_run,
-        } => ops::act(bench, &device, action.as_deref(), &args, dry_run).await,
+            output,
+            max_size,
+        } => {
+            let capture = ops::CaptureArgs { output, max_size };
+            ops::act(bench, &device, action.as_deref(), &args, dry_run, capture).await
+        }
         Command::Watch { .. } => Err(DeskError::Usage(
             "`desk watch` streams through the daemon; it can't run here".into(),
         )),

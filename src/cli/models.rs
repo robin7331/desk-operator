@@ -271,13 +271,13 @@ fn driver_params(def: &Model) -> Vec<(String, Result<Vec<ParamSpec>>)> {
                     let Binding::Script {
                         script,
                         params,
-                        port,
+                        connections,
                         ..
                     } = &binding
                     else {
                         return Ok(Vec::new());
                     };
-                    let spec = spec_for(def, script, params, port.as_ref(), &providers);
+                    let spec = spec_for(def, script, params, connections, &providers);
                     let declared = match key.as_str() {
                         "power" => ScriptSwitch::load(spec)?.params().map(<[_]>::to_vec),
                         "source" => ScriptSource::load(spec)?.params().map(<[_]>::to_vec),
@@ -301,7 +301,7 @@ fn spec_for<'a>(
     def: &'a Model,
     script: &'a Path,
     params: &'a toml::Table,
-    port: Option<&'a crate::serial::PortSpec>,
+    connections: &'a crate::connections::Connections,
     providers: &Arc<Registry>,
 ) -> ScriptSpec<'a> {
     ScriptSpec {
@@ -311,7 +311,7 @@ fn spec_for<'a>(
         },
         path: script,
         params,
-        port,
+        connections,
         timeout: Duration::from_secs(5),
         providers: providers.clone(),
     }

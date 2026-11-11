@@ -15,6 +15,8 @@
 
 pub mod declared;
 pub mod power;
+mod serial;
+mod sigrok;
 pub mod source;
 
 use std::path::{Path, PathBuf};
@@ -26,11 +28,13 @@ use mlua::{
     Value, VmState,
 };
 
+use crate::capture::Output;
 use crate::config::Binding;
+use crate::connections::Connections;
+use crate::deadline::{self, Deadline};
 use crate::error::{DeskError, Result};
 use crate::power::{self as power_core, PowerSwitch, Target};
 use crate::providers::Registry;
-use crate::serial::{Port, PortSpec, Settings};
 
 pub use declared::ScriptDriver;
 pub use power::ScriptSwitch;
@@ -41,9 +45,6 @@ const HOOK_EVERY: u32 = 10_000;
 
 /// Memory one script may use. Drivers need kilobytes; this stops a runaway allocation.
 const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
-
-/// The most one `port:read` returns. A read returns "up to" its count, so more is just asked again.
-const MAX_READ: usize = 64 * 1024;
 
 /// Device facts passed to the script as `ctx.device`.
 pub struct DeviceInfo<'a> {
@@ -56,8 +57,9 @@ pub struct ScriptSpec<'a> {
     pub device: DeviceInfo<'a>,
     pub path: &'a Path,
     pub params: &'a toml::Table,
-    /// The binding's port, the only one `ctx.serial.open` may open.
-    pub port: Option<&'a PortSpec>,
+    /// The binding's connections, the only ones its host API may open (`ctx.serial.open` the
+    /// `port`, `ctx.sigrok.acquire` the `sigrok` device).
+    pub connections: &'a Connections,
     pub timeout: Duration,
     pub providers: Arc<Registry>,
 }
@@ -68,7 +70,7 @@ pub struct Engine {
     ctx: Table,
     path: PathBuf,
     timeout: Duration,
-    deadline: Arc<Mutex<Option<Instant>>>,
+    deadline: Deadline,
     log: Arc<Mutex<Vec<String>>>,
     params: Option<Vec<ParamSpec>>,
 }
@@ -118,7 +120,7 @@ impl Engine {
             device,
             path,
             params,
-            port,
+            connections,
             timeout,
             providers,
         } = spec;
@@ -138,11 +140,12 @@ impl Engine {
         lua.set_memory_limit(MEMORY_LIMIT).map_err(internal)?;
 
         let log = Arc::new(Mutex::new(Vec::new()));
-        let deadline = Arc::new(Mutex::new(Some(Instant::now() + timeout)));
+        let deadline = Deadline::default();
+        deadline.start(timeout);
         install_timeout_hook(&lua, deadline.clone(), timeout, path)?;
-        let ctx = host_api(&lua, &device, params, log.clone(), providers).map_err(internal)?;
-        ctx.set("serial", serial_api(&lua, port.cloned()).map_err(internal)?)
-            .map_err(internal)?;
+        let ctx =
+            host_api(&lua, &device, params, log.clone(), providers.clone()).map_err(internal)?;
+        connection_apis(&lua, &ctx, device.id, connections, providers).map_err(internal)?;
 
         let engine = Engine {
             lua,
@@ -159,7 +162,7 @@ impl Engine {
             .set_name(format!("@{}", file_name(path)))
             .exec()
             .map_err(|e| engine.error(e))?;
-        *engine.deadline.lock().map_err(poisoned)? = None;
+        engine.deadline.clear();
         let declared = engine.declared_params()?;
         if let Some(specs) = &declared {
             engine.check_params(specs, params)?;
@@ -300,6 +303,19 @@ impl Engine {
         self.lua.to_value(v).map_err(|e| self.error(e))
     }
 
+    /// `ctx.output` for the next call: the handle of a capture's sink, or `nil`.
+    pub fn set_output(&self, output: Option<&Output>) -> Result<()> {
+        let v = match output {
+            Some(o) => Value::UserData(
+                self.lua
+                    .create_userdata(OutputHandle(o.clone()))
+                    .map_err(internal)?,
+            ),
+            None => Value::Nil,
+        };
+        self.ctx.set("output", v).map_err(internal)
+    }
+
     /// `ctx.channel` for the next calls (`nil` without channels).
     pub fn set_channel(&self, channel: Option<&str>) -> Result<()> {
         self.ctx.set("channel", channel).map_err(|e| self.error(e))
@@ -313,9 +329,10 @@ impl Engine {
         for a in args {
             argv.push_back(a);
         }
-        *self.deadline.lock().map_err(poisoned)? = Some(Instant::now() + self.timeout);
-        let result = f.call_async::<Value>(argv).await;
-        *self.deadline.lock().map_err(poisoned)? = None;
+        // On the task's deadline stack, so a host function that fills a capture can suspend it.
+        self.deadline.start(self.timeout);
+        let result = deadline::scope(self.deadline.clone(), f.call_async::<Value>(argv)).await;
+        self.deadline.clear();
         result.map_err(|e| self.error(e))
     }
 
@@ -365,17 +382,13 @@ impl Engine {
 
 fn install_timeout_hook(
     lua: &Lua,
-    deadline: Arc<Mutex<Option<Instant>>>,
+    deadline: Deadline,
     timeout: Duration,
     path: &Path,
 ) -> Result<()> {
     let what = format!("script {}", file_name(path));
     let hook = move |_: &Lua, _: &mlua::debug::Debug| -> mlua::Result<VmState> {
-        let expired = deadline
-            .lock()
-            .map(|d| d.is_some_and(|d| Instant::now() > d))
-            .unwrap_or(false);
-        if expired {
+        if deadline.expired() {
             return Err(mlua::Error::external(DeskError::Timeout {
                 what: what.clone(),
                 after: timeout,
@@ -499,181 +512,58 @@ fn host_api(
     })?;
     ctx.set("power", power)?;
 
+    // ctx.append{ into = ctx.output, data = "…" }: bytes the driver has into the capture.
+    let append = lua.create_function(|_, spec: Table| {
+        let out = output_of(&spec, "ctx.append")?;
+        let data: mlua::LuaString = spec
+            .get::<Option<mlua::LuaString>>("data")?
+            .ok_or_else(|| mlua::Error::runtime("ctx.append: `data` must be a string of bytes"))?;
+        out.write(&data.as_bytes()).map_err(mlua::Error::external)
+    })?;
+    ctx.set("append", append)?;
+
     Ok(ctx)
 }
 
-/// `ctx.serial`: `open{ baud = …, … }` opens the binding's port (and only that one).
-fn serial_api(lua: &Lua, port: Option<PortSpec>) -> mlua::Result<Table> {
-    let serial = lua.create_table()?;
-    let open = lua.create_async_function(move |lua, opts: Option<Table>| {
-        let port = port.clone();
-        async move {
-            let Some(spec) = port else {
-                return Err(mlua::Error::external(DeskError::ConfigInvalid(
-                    "ctx.serial.open: this binding has no `port = { ... }`".into(),
-                )));
-            };
-            let settings = serial_settings(opts)?;
-            let port = Port::open(spec, settings)
-                .await
-                .map_err(mlua::Error::external)?;
-            port_handle(&lua, port)
-        }
-    })?;
-    serial.set("open", open)?;
-    Ok(serial)
+/// One host API per connection kind: `ctx.serial`, `ctx.sigrok`.
+fn connection_apis(
+    lua: &Lua,
+    ctx: &Table,
+    device: &str,
+    connections: &Connections,
+    providers: Arc<Registry>,
+) -> mlua::Result<()> {
+    ctx.set("serial", serial::serial_api(lua, connections.port.clone())?)?;
+    let sigrok = connections.sigrok.as_deref().cloned();
+    ctx.set(
+        "sigrok",
+        sigrok::sigrok_api(lua, device, sigrok, providers)?,
+    )?;
+    Ok(())
 }
 
-fn serial_settings(opts: Option<Table>) -> mlua::Result<Settings> {
-    let mut s = Settings::default();
-    let Some(t) = opts else { return Ok(s) };
-    let bad = |m: String| mlua::Error::runtime(format!("ctx.serial.open: {m}"));
-    for pair in t.pairs::<String, Value>() {
-        let (k, v) = pair?;
-        match (k.as_str(), v) {
-            ("baud", Value::Integer(b)) if b > 0 => s.baud = b as u32,
-            ("data_bits", Value::Integer(b)) => {
-                s.data_bits = match b {
-                    5 => serialport::DataBits::Five,
-                    6 => serialport::DataBits::Six,
-                    7 => serialport::DataBits::Seven,
-                    8 => serialport::DataBits::Eight,
-                    _ => return Err(bad(format!("data_bits must be 5..8, got {b}"))),
-                }
-            }
-            ("stop_bits", Value::Integer(b)) => {
-                s.stop_bits = match b {
-                    1 => serialport::StopBits::One,
-                    2 => serialport::StopBits::Two,
-                    _ => return Err(bad(format!("stop_bits must be 1 or 2, got {b}"))),
-                }
-            }
-            ("parity", Value::String(p)) => {
-                s.parity = match &*p.to_str()? {
-                    "none" => serialport::Parity::None,
-                    "odd" => serialport::Parity::Odd,
-                    "even" => serialport::Parity::Even,
-                    other => {
-                        return Err(bad(format!(
-                            "parity must be none, odd or even, got {other}"
-                        )));
-                    }
-                }
-            }
-            ("flow", Value::String(f)) => {
-                s.flow = match &*f.to_str()? {
-                    "none" => serialport::FlowControl::None,
-                    "software" => serialport::FlowControl::Software,
-                    "hardware" => serialport::FlowControl::Hardware,
-                    other => {
-                        return Err(bad(format!(
-                            "flow must be none, software or hardware, got {other}"
-                        )));
-                    }
-                }
-            }
-            ("dtr", Value::Boolean(b)) => s.dtr = Some(b),
-            ("wait", Value::String(w)) => {
-                s.wait = humantime::parse_duration(&w.to_str()?)
-                    .map_err(|e| bad(format!("invalid wait: {e}")))?
-            }
-            ("wait", Value::Integer(ms)) if ms >= 0 => s.wait = Duration::from_millis(ms as u64),
-            (k, v) => {
-                return Err(bad(format!(
-                    "unsupported option `{k}` = {} (options: baud, data_bits, parity, stop_bits, flow, dtr, wait)",
-                    v.type_name()
-                )));
-            }
-        }
+/// What `ctx.output` holds: a capture's sink. Opaque to scripts: no methods, no path.
+struct OutputHandle(Output);
+
+impl mlua::UserData for OutputHandle {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, _, ()| Ok("capture output"));
     }
-    Ok(s)
 }
 
-/// A Lua table driving one open port: `write`, `read`, `clear`, `close`, `path`.
-/// Works with `port:read(…)` and `port.read(…)`.
-fn port_handle(lua: &Lua, port: Port) -> mlua::Result<Table> {
-    /// Drop a leading `self` table (colon call syntax).
-    fn args(mut a: MultiValue) -> MultiValue {
-        if matches!(a.front(), Some(Value::Table(_))) {
-            a.pop_front();
-        }
-        a
+/// The sink a host function fills: `spec.into`, which must be `ctx.output` of the running call.
+pub(crate) fn output_of(spec: &Table, function: &str) -> mlua::Result<Output> {
+    let bad = || mlua::Error::runtime(format!("{function}: `into` must be ctx.output"));
+    let Value::UserData(ud) = spec.get::<Value>("into")? else {
+        return Err(bad());
+    };
+    let out = ud.borrow::<OutputHandle>().map_err(|_| bad())?.0.clone();
+    if !out.is_open() {
+        return Err(mlua::Error::external(DeskError::ScriptFailed(format!(
+            "{function}: this ctx.output belongs to an action call that has ended"
+        ))));
     }
-
-    let handle = lua.create_table()?;
-    handle.set("path", port.path().to_string())?;
-
-    let p = port.clone();
-    handle.set(
-        "write",
-        lua.create_async_function(move |_, a: MultiValue| {
-            let p = p.clone();
-            async move {
-                let Some(Value::String(data)) = args(a).pop_front() else {
-                    return Err(mlua::Error::runtime(
-                        "port:write expects a string of bytes, e.g. port:write(\"\\x01\\x02\")",
-                    ));
-                };
-                p.write(data.as_bytes().to_vec())
-                    .await
-                    .map_err(mlua::Error::external)
-            }
-        })?,
-    )?;
-
-    let p = port.clone();
-    handle.set(
-        "read",
-        lua.create_async_function(move |lua, a: MultiValue| {
-            let p = p.clone();
-            async move {
-                let mut a = args(a);
-                let max = match a.pop_front() {
-                    Some(Value::Integer(n)) if n > 0 => (n as usize).min(MAX_READ),
-                    _ => {
-                        return Err(mlua::Error::runtime(
-                            "port:read expects a byte count, e.g. port:read(17, 500)",
-                        ));
-                    }
-                };
-                let timeout = match a.pop_front() {
-                    None | Some(Value::Nil) => Duration::from_secs(1),
-                    Some(Value::Integer(ms)) if ms >= 0 => Duration::from_millis(ms as u64),
-                    Some(Value::Number(ms)) if ms >= 0.0 && ms.is_finite() => {
-                        Duration::try_from_secs_f64(ms / 1000.0).map_err(|_| {
-                            mlua::Error::runtime("port:read: the timeout is too long")
-                        })?
-                    }
-                    Some(_) => {
-                        return Err(mlua::Error::runtime(
-                            "port:read timeout must be milliseconds",
-                        ));
-                    }
-                };
-                let data = p.read(max, timeout).await.map_err(mlua::Error::external)?;
-                lua.create_string(&data)
-            }
-        })?,
-    )?;
-
-    let p = port.clone();
-    handle.set(
-        "clear",
-        lua.create_async_function(move |_, _: MultiValue| {
-            let p = p.clone();
-            async move { p.clear().await.map_err(mlua::Error::external) }
-        })?,
-    )?;
-
-    let p = port;
-    handle.set(
-        "close",
-        lua.create_function(move |_, _: MultiValue| {
-            p.close();
-            Ok(())
-        })?,
-    )?;
-    Ok(handle)
+    Ok(out)
 }
 
 /// A Lua table whose functions drive one power path. Works with `p:on()` and `p.on()`.
@@ -759,6 +649,42 @@ fn internal(e: mlua::Error) -> DeskError {
     DeskError::Internal(format!("lua: {e}"))
 }
 
-fn poisoned<T>(_: std::sync::PoisonError<T>) -> DeskError {
-    DeskError::Internal("script state lock poisoned".into())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host function that fills a capture suspends the script's per-call deadline; it
+    /// continues afterwards with the time it had left.
+    #[tokio::test]
+    async fn a_suspending_host_call_stops_the_script_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.lua");
+        std::fs::write(
+            &path,
+            "function filled(ctx) ctx.slow(300); for i = 1, 100000 do end end\n\
+             function slept(ctx) ctx.sleep(300); for i = 1, 100000 do end end\n",
+        )
+        .unwrap();
+        let engine = Engine::load(ScriptSpec {
+            device: DeviceInfo { id: "t", name: "t" },
+            path: &path,
+            params: &toml::Table::new(),
+            connections: &Connections::default(),
+            timeout: Duration::from_millis(100),
+            providers: Arc::new(Registry::new(Default::default(), dir.path().to_path_buf())),
+        })
+        .unwrap();
+        let slow = engine
+            .lua
+            .create_async_function(|_, ms: u64| async move {
+                let _suspended = deadline::suspend();
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                Ok(())
+            })
+            .unwrap();
+        engine.ctx.set("slow", slow).unwrap();
+        engine.call("filled", Value::Nil).await.unwrap();
+        let e = engine.call("slept", Value::Nil).await.unwrap_err();
+        assert_eq!(e.code(), "timeout", "{e}");
+    }
 }

@@ -7,11 +7,11 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::connections::{BackendRef, Connections};
 use crate::declared::{self, Declarations, Limit};
 use crate::error::{DeskError, Result};
 use crate::models::{self, Models};
 use crate::providers;
-use crate::serial::PortSpec;
 use crate::source::Limits;
 
 #[derive(Debug)]
@@ -21,6 +21,49 @@ pub struct Config {
     pub providers: IndexMap<String, ProviderConfig>,
     /// Devices in file order.
     pub devices: Vec<Device>,
+    /// `[captures]`: where files that actions produce go, and how big they may get.
+    pub captures: Captures,
+}
+
+#[derive(Debug, Clone)]
+pub struct Captures {
+    /// `dir`, resolved against the config file's folder.
+    pub dir: Option<PathBuf>,
+    pub max_size: u64,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawCaptures {
+    dir: Option<String>,
+    max_size: Option<toml::Value>,
+}
+
+impl RawCaptures {
+    fn build(self, config_path: &Path) -> Result<Captures> {
+        let bad = |m: String| DeskError::ConfigInvalid(format!("[captures]: {m}"));
+        let max_size = match self.max_size {
+            None => crate::capture::DEFAULT_MAX_SIZE,
+            Some(toml::Value::Integer(n)) if n > 0 => n as u64,
+            Some(toml::Value::String(s)) => {
+                crate::capture::parse_size(&s).map_err(|e| bad(format!("max_size: {e}")))?
+            }
+            Some(_) => {
+                return Err(bad(
+                    "max_size must be a size like \"1GiB\" or a number of bytes".into(),
+                ));
+            }
+        };
+        let dir = self.dir.map(|d| {
+            let d = PathBuf::from(d);
+            if d.is_relative() {
+                config_path.parent().unwrap_or(Path::new(".")).join(d)
+            } else {
+                d
+            }
+        });
+        Ok(Captures { dir, max_size })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +109,17 @@ impl Device {
     pub fn source(&self) -> Option<&Binding> {
         self.caps.get(SOURCE).map(|c| &c.binding)
     }
+
+    /// Whether this device uses provider `id`: its power path names it (when the provider's
+    /// endpoints are bound `natively`), or the connections of one of its capabilities run
+    /// through it (a connection backend; mains has no actions, so nothing to capture into).
+    pub fn uses_provider(&self, id: &str, natively: bool) -> bool {
+        let named = matches!(&self.power, Some(Binding::Native { provider, .. }) if provider == id);
+        (natively && named)
+            || self.caps.values().any(|c| {
+                matches!(&c.binding, Binding::Script { connections, .. } if connections.uses(id))
+            })
+    }
 }
 
 /// How a capability of a device is implemented: by a provider, or by a Lua script.
@@ -87,9 +141,9 @@ pub enum Binding {
         params: toml::Table,
         #[serde(serialize_with = "ser_opt_duration")]
         timeout: Option<Duration>,
-        /// The only serial port this script may open (`ctx.serial.open`).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        port: Option<PortSpec>,
+        /// What the script may open to reach the device (`port`, `sigrok`).
+        #[serde(flatten)]
+        connections: Connections,
         /// The device's maximums, in the capability's standard form (e.g. `max_voltage`).
         #[serde(skip_serializing_if = "toml::Table::is_empty")]
         ratings: toml::Table,
@@ -136,10 +190,11 @@ impl Binding {
                     format!("{provider} ({})", params.join(", "))
                 }
             }
-            Binding::Script { script, port, .. } => match port {
-                Some(port) => format!("script {} on {port}", script.display()),
-                None => format!("script {}", script.display()),
-            },
+            Binding::Script {
+                script,
+                connections,
+                ..
+            } => format!("script {}{}", script.display(), connections.describe()),
         }
     }
 }
@@ -176,26 +231,18 @@ impl TryFrom<toml::Table> for Binding {
                     Some(toml::Value::Table(r)) => r,
                     Some(_) => return Err("`ratings` must be a table".into()),
                 };
-                let port = match t.remove("port") {
-                    None => None,
-                    Some(toml::Value::Table(p)) => Some(PortSpec::try_from(p)?),
-                    Some(_) => {
-                        return Err(
-                            "`port` must be a table, e.g. { usb_vid = 0x1a86, usb_pid = 0x7523 }"
-                                .into(),
-                        );
-                    }
-                };
+                let connections = Connections::take(&mut t)?;
                 if let Some(k) = t.keys().next() {
                     return Err(format!(
-                        "unknown key `{k}` in script binding (allowed: script, params, ratings, timeout, port)"
+                        "unknown key `{k}` in script binding (allowed: script, params, ratings, timeout, {})",
+                        Connections::KEYS.join(", ")
                     ));
                 }
                 Ok(Binding::Script {
                     script,
                     params,
                     timeout,
-                    port,
+                    connections,
                     ratings,
                 })
             }
@@ -231,6 +278,8 @@ struct RawConfig {
     providers: IndexMap<String, ProviderConfig>,
     #[serde(default)]
     devices: IndexMap<String, toml::Table>,
+    #[serde(default)]
+    captures: RawCaptures,
 }
 
 /// A device table: the known keys, and every other table as a capability (raw: it may be a
@@ -557,6 +606,7 @@ impl Config {
         let raw: RawConfig = toml::from_str(text)
             .map_err(|e| DeskError::ConfigInvalid(format!("{}: {e}", path.display())))?;
 
+        let captures = raw.captures.build(&path)?;
         let models = Models::for_config(&path);
         let mut devices = Vec::new();
         for (id, d) in raw.devices {
@@ -623,6 +673,7 @@ impl Config {
             path,
             providers: raw.providers,
             devices,
+            captures,
         };
         config.validate()?;
         Ok(config)
@@ -682,6 +733,24 @@ impl Config {
                         d.id
                     ));
                 }
+                let Some(Binding::Script { connections, .. }) = binding else {
+                    continue;
+                };
+                for BackendRef { provider: b, kind } in connections.backends() {
+                    match providers::kind_of(b, &self.providers) {
+                        Some(k) if k == kind => {}
+                        Some(k) => problems.push(format!(
+                            "device `{}`: {key}: {kind} backend `{b}` is a `{k}` provider, not \
+                             kind = \"{kind}\"",
+                            d.id
+                        )),
+                        None => problems.push(format!(
+                            "device `{}`: {key}: {kind} backend `{b}` is not defined under \
+                             [providers] (kind = \"{kind}\")",
+                            d.id
+                        )),
+                    }
+                }
             }
         }
 
@@ -729,7 +798,7 @@ impl Config {
 /// Reserved word: `desk power off all` means every device, so no device may be called this.
 pub const ALL: &str = "all";
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .chars()
@@ -742,13 +811,13 @@ fn resolve_script_path(binding: Binding, config_path: &Path) -> Binding {
             script,
             params,
             timeout,
-            port,
+            connections,
             ratings,
         } if script.is_relative() && !models::is_bundled(&script) => Binding::Script {
             script: config_path.parent().unwrap_or(Path::new(".")).join(script),
             params,
             timeout,
-            port,
+            connections,
             ratings,
         },
         other => other,

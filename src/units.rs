@@ -237,6 +237,21 @@ fn factor(suffix: &str, unit: &str) -> Option<f64> {
     })
 }
 
+/// A unit as an instrument prints it (`mV`, `kΩ`, `µA`, `°C`): the known unit's symbol and the
+/// power of ten its prefix stands for (`mV` → `("V", -3)`). Symbols and prefixes are matched as
+/// printed (case-sensitive); the ohm sign U+2126 counts as `Ω`. `None` for units the table
+/// doesn't know.
+pub fn printed(text: &str) -> Option<(&'static str, i32)> {
+    let text = text.replace('\u{2126}', "Ω");
+    if let Some(k) = known(&text) {
+        return Some((k.symbol, 0));
+    }
+    PREFIXES.iter().find_map(|(p, f)| {
+        let k = known(text.strip_prefix(p)?)?;
+        k.prefixes.then(|| (k.symbol, f.log10().round() as i32))
+    })
+}
+
 /// A value for humans: `4.98 V`, `330 °C`, `0.25 A`. Up to 6 significant digits.
 pub fn format(value: f64, unit: Option<&str>) -> String {
     let n = format!("{value:.6}");
@@ -325,6 +340,26 @@ mod tests {
         assert_eq!(misspelled("v"), Some("V"));
         assert_eq!(misspelled("V"), None);
         assert_eq!(misspelled("ppm"), None);
+    }
+
+    #[test]
+    fn printed_units() {
+        assert_eq!(printed("V"), Some(("V", 0)));
+        assert_eq!(printed("mV"), Some(("V", -3)));
+        assert_eq!(printed("kΩ"), Some(("Ω", 3)));
+        assert_eq!(printed("M\u{2126}"), Some(("Ω", 6)));
+        assert_eq!(printed("µA"), Some(("A", -6)));
+        assert_eq!(printed("uA"), Some(("A", -6)));
+        assert_eq!(printed("kHz"), Some(("Hz", 3)));
+        assert_eq!(printed("°C"), Some(("°C", 0)));
+        assert_eq!(printed("K"), Some(("K", 0)), "kelvin, not a prefix");
+        assert_eq!(printed("%"), Some(("%", 0)));
+        assert_eq!(printed("mAh"), Some(("Ah", -3)));
+        assert_eq!(printed("m°C"), None, "°C takes no prefixes");
+        assert_eq!(printed("mv"), None, "as printed");
+        assert_eq!(printed("°F"), None);
+        assert_eq!(printed("dBm"), None);
+        assert_eq!(printed(""), None);
     }
 
     #[test]
