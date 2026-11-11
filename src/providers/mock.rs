@@ -264,7 +264,7 @@ impl Provider for MockProvider {
             info: SourceInfo {
                 max_voltage: Some(params.float("max_voltage")?.unwrap_or(30.0)),
                 max_current: Some(params.float("max_current")?.unwrap_or(5.0)),
-                max_power: None,
+                ..SourceInfo::default()
             },
             load_ohms: params.float("load_ohms")?,
         }))

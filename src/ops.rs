@@ -355,11 +355,17 @@ pub fn source_decls(ratings: SourceInfo, channels: Option<Vec<String>>) -> Decla
     let mut settings = IndexMap::new();
     settings.insert(
         "voltage".into(),
-        num("V", ratings.max_voltage, "voltage setpoint", true),
+        Decl {
+            tolerance: ratings.voltage_tolerance,
+            ..num("V", ratings.max_voltage, "voltage setpoint", true)
+        },
     );
     settings.insert(
         "current".into(),
-        num("A", ratings.max_current, "current limit", true),
+        Decl {
+            tolerance: ratings.current_tolerance,
+            ..num("A", ratings.max_current, "current limit", true)
+        },
     );
     settings.insert(
         "output".into(),
@@ -1146,7 +1152,7 @@ mod tests {
             SourceInfo {
                 max_voltage: Some(30.0),
                 max_current: Some(5.0),
-                max_power: None,
+                ..SourceInfo::default()
             },
             None,
         );
@@ -1168,6 +1174,19 @@ mod tests {
         assert_eq!(r["measured_voltage"], Val::Number(4.99));
         assert_eq!(r["protection"], Val::Text("ocp".into()));
         assert!(!r.contains_key("current"), "unreported stays absent");
+    }
+
+    #[test]
+    fn a_supplys_tolerance_shows_in_its_settings() {
+        let d = source_decls(
+            SourceInfo {
+                voltage_tolerance: Some(0.005),
+                ..SourceInfo::default()
+            },
+            None,
+        );
+        assert_eq!(d.settings["voltage"].tolerance, Some(0.005));
+        assert_eq!(d.settings["current"].tolerance, None);
     }
 
     #[test]

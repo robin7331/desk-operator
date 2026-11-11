@@ -18,7 +18,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How far a read-back setpoint may differ from the requested one and still count as confirmed:
 /// devices round to their display resolution.
 const TOLERANCE_REL: f64 = 0.005;
-const TOLERANCE_ABS: f64 = 0.011;
+pub const TOLERANCE_ABS: f64 = 0.011;
 
 /// What the device itself can do: its ratings (from the binding) combined with what the driver
 /// reports. Also the format of a `source` binding's `ratings = { … }`.
@@ -30,6 +30,13 @@ pub struct SourceInfo {
     /// Informational (shown, not enforced yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_power: Option<f64>,
+    /// How far a read-back voltage setpoint may differ and still count as confirmed, V. Without
+    /// it the default applies (0.5 % or 0.011, whichever is larger).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage_tolerance: Option<f64>,
+    /// The same for the current setpoint, A.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tolerance: Option<f64>,
 }
 
 impl SourceInfo {
@@ -43,15 +50,19 @@ impl SourceInfo {
             max_voltage: min(self.max_voltage, other.max_voltage),
             max_current: min(self.max_current, other.max_current),
             max_power: min(self.max_power, other.max_power),
+            voltage_tolerance: min(self.voltage_tolerance, other.voltage_tolerance),
+            current_tolerance: min(self.current_tolerance, other.current_tolerance),
         }
     }
 
-    /// The first maximum that isn't a finite number, if any (a driver bug).
+    /// The first number that isn't finite, if any (a driver bug).
     pub fn non_finite(&self) -> Option<&'static str> {
         [
             ("max_voltage", self.max_voltage),
             ("max_current", self.max_current),
             ("max_power", self.max_power),
+            ("voltage_tolerance", self.voltage_tolerance),
+            ("current_tolerance", self.current_tolerance),
         ]
         .into_iter()
         .find(|(_, v)| v.is_some_and(|v| !v.is_finite()))
@@ -64,17 +75,19 @@ pub fn parse_ratings(t: &toml::Table) -> std::result::Result<SourceInfo, String>
     let r: SourceInfo = toml::Value::Table(t.clone())
         .try_into()
         .map_err(|e: toml::de::Error| format!("ratings: {}", e.message()))?;
-    for (what, v) in [
-        ("max_voltage", r.max_voltage),
-        ("max_current", r.max_current),
-        ("max_power", r.max_power),
+    let maximum = "the device's maximum";
+    let tolerance = "how far a read-back may differ";
+    for (what, v, means) in [
+        ("max_voltage", r.max_voltage, maximum),
+        ("max_current", r.max_current, maximum),
+        ("max_power", r.max_power, maximum),
+        ("voltage_tolerance", r.voltage_tolerance, tolerance),
+        ("current_tolerance", r.current_tolerance, tolerance),
     ] {
         if let Some(v) = v
             && !(v.is_finite() && v > 0.0)
         {
-            return Err(format!(
-                "ratings.{what} must be > 0 (the device's maximum), got {v}"
-            ));
+            return Err(format!("ratings.{what} must be > 0 ({means}), got {v}"));
         }
     }
     Ok(r)
@@ -340,7 +353,7 @@ pub async fn apply(
                 output: None,
                 ..req
             };
-            verify(&setpoints, &held).map_err(not_switched_on)?;
+            verify(&setpoints, &held, &info).map_err(not_switched_on)?;
         }
         src.set_output(true).await?;
     }
@@ -352,7 +365,7 @@ pub async fn apply(
     {
         return Err(DeskError::ProtectionTripped(p.name().to_string()));
     }
-    let verified = verify(&req, &reading)?;
+    let verified = verify(&req, &reading, &info)?;
     protection_warning(&reading, &mut warnings);
     Ok(Report {
         requested: req,
@@ -366,14 +379,18 @@ pub async fn apply(
 
 /// Compare a request with what the device reports. The first value it reports differently is
 /// `verify_failed`; what it doesn't report stays unconfirmed (`None`).
-fn verify(req: &Request, reading: &Reading) -> Result<Verified> {
+fn verify(req: &Request, reading: &Reading, info: &SourceInfo) -> Result<Verified> {
     let verified = Verified {
-        voltage: req
-            .voltage
-            .and_then(|v| reading.voltage_set.map(|r| close(v, r))),
-        current: req
-            .current
-            .and_then(|a| reading.current_set.map(|r| close(a, r))),
+        voltage: req.voltage.and_then(|v| {
+            reading
+                .voltage_set
+                .map(|r| close(v, r, info.voltage_tolerance))
+        }),
+        current: req.current.and_then(|a| {
+            reading
+                .current_set
+                .map(|r| close(a, r, info.current_tolerance))
+        }),
         output: req.output.and_then(|o| reading.output.map(|r| r == o)),
     };
     for (what, ok, want, got) in [
@@ -482,8 +499,13 @@ fn check_limits(req: &Request, info: &SourceInfo, limits: &Limits) -> Result<()>
     Ok(())
 }
 
-fn close(want: f64, got: f64) -> bool {
-    (want - got).abs() <= (want.abs() * TOLERANCE_REL).max(TOLERANCE_ABS)
+/// Whether a read-back setpoint confirms the requested one: within the tolerance the model or
+/// the driver states, or without one within the default.
+fn close(want: f64, got: f64, tolerance: Option<f64>) -> bool {
+    match tolerance {
+        Some(t) => (want - got).abs() <= t + 1e-12,
+        None => (want - got).abs() <= (want.abs() * TOLERANCE_REL).max(TOLERANCE_ABS),
+    }
 }
 
 pub fn fmt_v(v: f64) -> String {
@@ -654,6 +676,53 @@ mod tests {
     }
 
     #[test]
+    fn a_stated_tolerance_decides_what_confirmed_means() {
+        let ask = |info: SourceInfo| {
+            let f = Fake {
+                readback: true,
+                ignore_voltage: true,
+                info,
+                ..Fake::default()
+            };
+            // The device stays at 15 mV when 5 mV is asked for.
+            f.state.lock().unwrap().voltage_set = Some(0.015);
+            run(apply(
+                &f,
+                req(Some(0.005), None, None),
+                Limits::default(),
+                SourceInfo::default(),
+                false,
+            ))
+        };
+        // Without one, the default applies (0.5 % or 0.011): that counts as confirmed.
+        let r = ask(SourceInfo::default()).unwrap();
+        assert_eq!(r.verified.voltage, Some(true));
+        // A model that states what its device resolves gets an honest answer.
+        let e = ask(SourceInfo {
+            voltage_tolerance: Some(0.001),
+            ..SourceInfo::default()
+        })
+        .unwrap_err();
+        assert_eq!(e.code(), "verify_failed");
+    }
+
+    #[test]
+    fn the_stricter_tolerance_wins() {
+        let a = SourceInfo {
+            voltage_tolerance: Some(0.01),
+            ..SourceInfo::default()
+        };
+        let b = SourceInfo {
+            voltage_tolerance: Some(0.002),
+            current_tolerance: Some(0.001),
+            ..SourceInfo::default()
+        };
+        let s = a.stricter(b);
+        assert_eq!(s.voltage_tolerance, Some(0.002));
+        assert_eq!(s.current_tolerance, Some(0.001));
+    }
+
+    #[test]
     fn a_dropped_setpoint_never_reaches_a_live_output() {
         let f = Fake {
             readback: true,
@@ -682,7 +751,7 @@ mod tests {
             info: SourceInfo {
                 max_voltage: Some(30.0),
                 max_current: Some(5.0),
-                max_power: None,
+                ..SourceInfo::default()
             },
             ..Fake::default()
         };

@@ -560,6 +560,18 @@ pub fn check_tightens(
             {
                 return Err(too_loose(&format!("ratings.{k}"), dv, mv, "above"));
             }
+            // A tolerance the model doesn't state: the default applies, which is never below its
+            // floor. Only a value up to that floor is sure to be a tightening.
+            if k.ends_with("_tolerance")
+                && !m.contains_key(k)
+                && num(dv).is_some_and(|n| n > crate::source::TOLERANCE_ABS)
+            {
+                return Err(format!(
+                    "`ratings.{k}` = {} is looser than the default the model leaves in place (a \
+                     device can tighten what its model states, not loosen it; {WAY_OUT})",
+                    show(dv)
+                ));
+            }
         }
     }
     for section in ["values", "settings"] {
@@ -710,6 +722,21 @@ mod tests {
             "ratings.max_voltage",
         );
         ok(&ratings, "ratings = { max_power = 50.0 }");
+        // A tolerance: lower is tighter. Without the model's, only up to the default's floor.
+        let tol =
+            t("ratings = { max_voltage = 30.0, max_current = 5.0, voltage_tolerance = 0.005 }");
+        ok(&tol, "ratings = { voltage_tolerance = 0.001 }");
+        err(
+            &tol,
+            "ratings = { voltage_tolerance = 0.02 }",
+            "ratings.voltage_tolerance",
+        );
+        ok(&ratings, "ratings = { current_tolerance = 0.001 }");
+        err(
+            &ratings,
+            "ratings = { current_tolerance = 0.5 }",
+            "ratings.current_tolerance",
+        );
         ok(
             &ratings,
             "port = { serial_number = \"X\" }\nparams = { max_voltage = 99 }",

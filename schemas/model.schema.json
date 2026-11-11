@@ -93,6 +93,16 @@
                   "type": "number",
                   "exclusiveMinimum": 0,
                   "description": "Watts (informational)"
+                },
+                "voltage_tolerance": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Volts: how far a read-back voltage setpoint may differ and still count as confirmed"
+                },
+                "current_tolerance": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Amps: the same for the current setpoint"
                 }
               }
             }
