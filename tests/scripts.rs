@@ -83,6 +83,35 @@ fn run_in(state_dir: &Path, config: &Path, args: &[&str]) -> Out {
     }
 }
 
+/// Like `Bench::run`, but a command that still runs after 10 s is killed (code -1): a script
+/// that escapes its timeout fails the test instead of hanging the whole test run.
+fn run_bounded(b: &Bench, args: &[&str]) -> Out {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_desk"))
+        .env_remove("DESK_CONFIG")
+        .env("DESK_MOCK_STATE", b.dir.path().join("mock-state.json"))
+        .arg("--config")
+        .arg(b.dir.path().join("desk.toml"))
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = child.wait_with_output().unwrap();
+    Out {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::new(),
+    }
+}
+
 /// Drives the `outlet` mock endpoint, with readback through state().
 const OUTLET_SCRIPT: &str = r#"
 local function outlet(ctx) return ctx.power{ provider = "sim", endpoint = "outlet" } end
@@ -272,6 +301,71 @@ fn busy_loop_at_top_level_hits_the_timeout() {
     let b = bench("while true do end", r#", timeout = "300ms""#);
     let out = b.run(&["--json", "power", "on", "dev"]);
     assert_eq!(out.code, 6, "{}", out.stdout);
+}
+
+/// `pcall`, `xpcall` and `coroutine.resume` catch errors, but never the timeout.
+#[test]
+fn a_timeout_cannot_be_caught() {
+    for catcher in [
+        "pcall(function() while true do end end)",
+        "xpcall(function() while true do end end, function(m) return m end)",
+        "coroutine.resume(coroutine.create(function() while true do end end))",
+    ] {
+        let b = bench(
+            &format!(
+                r#"
+                function on(ctx) while true do {catcher} end end
+                function off(ctx) end
+                "#
+            ),
+            r#", timeout = "300ms""#,
+        );
+        let start = Instant::now();
+        let out = run_bounded(&b, &["--json", "power", "on", "dev"]);
+        assert_eq!(out.code, 6, "{catcher}: {}", out.stdout);
+        assert_eq!(out.error_code(), "timeout", "{catcher}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{catcher}: {:?}",
+            start.elapsed()
+        );
+    }
+}
+
+/// Apart from the timeout, catching works as in plain Lua: results, messages, yields.
+#[test]
+fn catching_errors_works_as_in_plain_lua() {
+    let b = bench(
+        r#"
+        function on(ctx)
+          ctx.log(select('#', pcall(function() return 1, nil end)), pcall(error, "x", 0))
+          ctx.log(xpcall(function() error("y", 0) end, function(m) return "handled " .. m end))
+          local co = coroutine.create(function(a)
+            local b = coroutine.yield(a + 1)
+            error("z", 0)
+          end)
+          ctx.log(coroutine.resume(co, 1))
+          ctx.log(coroutine.resume(co, 5))
+          -- A protected call around a host function that waits.
+          ctx.log(pcall(function() ctx.sleep(5); return "slept" end))
+        end
+        function off(ctx) end
+        "#,
+        "",
+    );
+    let out = b.run(&["--json", "power", "on", "dev"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let log = out.json()["data"]["results"][0]["log"].clone();
+    assert_eq!(
+        log,
+        serde_json::json!([
+            "3 false x",
+            "false handled y",
+            "true 2",
+            "false z",
+            "true slept"
+        ])
+    );
 }
 
 #[test]

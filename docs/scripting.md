@@ -452,7 +452,8 @@ Only the `string`, `table`, `math`, `utf8` and `coroutine` libraries are availab
 reach the outside world through `ctx`. `load` compiles source text only, never precompiled chunks.
 A script may use up to 64 MiB of memory. One `port:read` returns at most 64 KiB; ask again for more.
 `print` writes to the log, so `--json` output stays parseable. The timeout also interrupts busy
-loops written in Lua.
+loops written in Lua, and it can't be caught: `pcall`, `xpcall` and `coroutine.resume` catch other
+errors as usual and pass a timeout on. Clean up in `close`, which gets its own time.
 
 ## Examples
 
