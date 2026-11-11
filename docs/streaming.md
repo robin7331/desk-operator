@@ -41,9 +41,10 @@ example `device_off` after the device's mains was switched off, `timeout` when t
 answering, `daemon_unavailable` when the daemon was stopped.
 
 **`--changes`** prints a reading only when one of the watched values changed: a number by more
-than its tolerance (so measurement noise doesn't count), anything else at all. Without it, there's
-one line per interval, evenly spaced for plots. Either way the device is read in full; names only
-filter what you see.
+than the tolerance its model declares, or without one by more than 0.5 % of its size (so
+measurement noise doesn't count, whether the reading is in volts or in nanofarads), anything else
+at all. Without it, there's one line per interval, evenly spaced for plots. Either way the device
+is read in full; names only filter what you see.
 
 **Rate.** The interval is the shortest time between two readings (default 100 ms). A reading
 takes as long as the device needs to answer: with `--interval 0` you get as many as the device
