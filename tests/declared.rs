@@ -957,6 +957,23 @@ b = { provider = "sim", endpoint = "b", settings = { level = { type = "number", 
         "{}",
         d["devices"][0]
     );
+
+    // What desk reports uses the same names as the schema.
+    let out = b.run(&["--json", "set", "combo", "a.level", "10%", "b.level", "50%"]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let d = out.data();
+    assert_eq!(d["requested"]["a.level"], 10.0, "{d}");
+    assert_eq!(d["requested"]["b.level"], 50.0, "{d}");
+    assert_eq!(d["verified"]["a.level"], true, "{d}");
+    assert_eq!(d["verified"]["b.level"], true, "{d}");
+    assert_eq!(d["values"]["a.level"], 10.0, "{d}");
+    assert_eq!(d["values"]["b.level"], 50.0, "{d}");
+    assert!(d["values"].get("level").is_none(), "{d}");
+    let d = b.run(&["--json", "get", "combo", "a.level"]).data();
+    assert_eq!(d["values"], serde_json::json!({ "a.level": 10.0 }), "{d}");
+    let out = b.run(&["get", "combo"]);
+    assert!(out.stdout.contains("a.level  10%"), "{}", out.stdout);
+    assert!(out.stdout.contains("b.level  50%"), "{}", out.stdout);
 }
 
 #[test]

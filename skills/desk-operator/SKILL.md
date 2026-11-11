@@ -103,7 +103,8 @@ the first failure only.
 - Read `data.verified`: `true` means the setting was read back and confirmed. A missing entry
   means the device can't report it, so say "set, but not confirmed by the device".
 - Report `data.values` (and `data.channels` for multi-channel devices) and `data.warnings`. A name
-  that's absent isn't reported by the device.
+  that's absent isn't reported by the device. A name that two capabilities of one device share is
+  written `capability.name` (as in the schema), also in `data.requested` and `data.verified`.
 - When in doubt, `--dry-run` first: it checks ranges and limits and shows what would be sent.
 - To find out what a setting or action takes, leave the value or action out: `desk set <device>
   <setting> --json` gives its choices or unit, range and `limit` in `data`, and its current `value`

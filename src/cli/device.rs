@@ -76,21 +76,9 @@ impl Names {
     /// `channel`: whose bench limits to show (a channel's own limit wins).
     pub(super) fn of(d: &Device, cat: &Catalog, channel: Option<&str>) -> Names {
         let mut names = Names::default();
-        let clashes = |n: &str| {
-            cat.entries
-                .iter()
-                .filter(|e| e.decls.names().any(|m| m == n) || e.decls.streams.contains_key(n))
-                .count()
-                > 1
-        };
-        for e in &cat.entries {
-            let key = |n: &str| {
-                if clashes(n) {
-                    format!("{}.{n}", e.key)
-                } else {
-                    n.to_string()
-                }
-            };
+        for (i, e) in cat.entries.iter().enumerate() {
+            // The same rule as for what desk reports.
+            let key = |n: &str| cat.shown(i, n);
             for (n, decl) in &e.decls.settings {
                 names.settings.insert(
                     key(n),
