@@ -522,6 +522,37 @@ fn lua_source_driver_runs_in_one_session_in_order() {
 }
 
 #[test]
+fn a_failing_close_does_not_hide_a_finished_command() {
+    let driver = SIM_DRIVER.replace(
+        r#"function close(ctx) ctx.log("close") end"#,
+        r#"function close(ctx) error("port stuck") end"#,
+    );
+    assert_ne!(driver, SIM_DRIVER, "SIM_DRIVER's close line changed");
+    let b = source_bench(&driver, "", "");
+    let out = b.run(&[
+        "--json", "set", "psu", "voltage", "5v", "current", "1a", "output", "on",
+    ]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    let j = out.json();
+    assert_eq!(j["ok"], true, "{j}");
+    let d = &j["data"];
+    assert_eq!(d["applied"], true, "{d}");
+    assert_eq!(d["verified"]["output"], true, "{d}");
+    let told = d["warnings"].as_array().is_some_and(|ws| {
+        ws.iter()
+            .filter_map(|w| w.as_str())
+            .any(|w| w.contains("closing the session failed") && w.contains("port stuck"))
+    });
+    assert!(told, "the close error is a warning: {d}");
+
+    // People see it too.
+    let out = b.run(&["set", "psu", "voltage", "5v"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("warning: "), "{}", out.stdout);
+    assert!(out.stdout.contains("port stuck"), "{}", out.stdout);
+}
+
+#[test]
 fn lua_driver_limits_come_from_info_and_bench() {
     let b = source_bench(
         SIM_DRIVER,

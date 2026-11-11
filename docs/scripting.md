@@ -426,7 +426,9 @@ Drivers only implement primitives. Everything users rely on is done by desk itse
 every driver:
 
 - **Sessions:** one `open` … `close` per command around all steps. `close` is called even after
-  errors and timeouts (devices that lock their front panel while connected get released).
+  errors and timeouts (devices that lock their front panel while connected get released). When
+  the command succeeded and `close` then fails, the command still counts: its result is
+  reported, with the error from `close` as a warning.
 - **Limits:** values above `info()`'s maximum or the device's bench `limits` are refused before
   the driver is called. Switching the output on is also refused when the device *already* holds a
   setpoint above the bench limits (as far as `read()` reports it).
