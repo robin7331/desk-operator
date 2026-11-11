@@ -20,7 +20,7 @@ skill, validated when a fresh session added the XDM1041. Streaming is done: a da
 commands keep working (`docs/streaming.md`). **M7, open capabilities, done** (`plan.md`,
 "M7"): models declare values, settings and actions; one command set for every device
 (`desk get|set|do|watch`; `desk source` is gone); channels. **Public since 2026-11-09**, releases
-`v0.1.0` to `v0.3.1`: CI, release builds, one-line installers and `desk update`. **M8, captures
+`v0.1.0` to `v0.5.0`: CI, release builds, one-line installers and `desk update`. **M8, captures
 and sigrok, done** (`plan.md`, "M8"): actions that produce a file (`produces = "file"`, a sink the
 core owns), and sigrok as a connection kind (`sigrok-cli` run as a separate program,
 `docs/sigrok.md`). **M8.1**: readings and settings through sigrok (`ctx.sigrok.measure|get|set`

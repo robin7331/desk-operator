@@ -541,7 +541,10 @@ bench part). It should follow the workflow that worked for the IPS3608 in M4.5:
    - [x] First release: `v0.1.0` published by the workflow (2026-11-09). The real `curl | sh` install
      works on Linux.
    - [x] Second release: `v0.2.0`. Third: `v0.3.0` (sandbox hardening, safer switching and
-     limits), then `v0.3.1` (IPS3608 firmware notes).
+     limits), then `v0.3.1` (IPS3608 firmware notes), `v0.4.0` (captures, sigrok, streams, the
+     SLogic32U3) and `v0.5.0` (fixes from a code audit: honest results after a failed close or
+     read, setpoints confirmed before the output goes on, script timeouts that can't be caught,
+     tests before a release).
    - [ ] Run the real install commands on macOS and Windows; CI only ran them against a local copy.
    - [ ] Try a real serial device on macOS and on Windows: no test covers serial there yet.
    - [x] License: MIT OR Apache-2.0 (2026-11-09), so anyone can use desk, also commercially.
